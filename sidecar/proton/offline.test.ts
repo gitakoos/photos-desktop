@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -298,8 +298,8 @@ describe("pin for offline", () => {
   });
 
   // The host admits one call at a time, and the in-memory route holds that channel for
-  // the whole base64 hand-over. The cap is what keeps that hold short, and a pinned
-  // photo used to walk straight past it because the bytes were already local.
+  // the whole base64 hand-over. The cap is what keeps that hold short, and it applies
+  // to a pinned photo too, although its bytes are already local.
   // What happens ABOVE the in-memory cap is covered in download.test.ts instead: it
   // stages a real file, and VIEW_DIR is one fixed path the whole process shares, so a
   // staging test here would race that file's assertion that the folder is never made.

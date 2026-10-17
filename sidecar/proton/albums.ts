@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -55,6 +55,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { collectResults, nodeName, toMillis, type NodeOpResult } from "./nodes.ts";
+import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 
 export type AlbumSummary = {
   uid: string;
@@ -99,7 +100,7 @@ export async function listAlbums(photos: any): Promise<AlbumSummary[]> {
   if (uids.length === 0) return [];
 
   const out: AlbumSummary[] = [];
-  for await (const node of photos.iterateNodes(uids)) {
+  for await (const node of withStallGuard(photos.iterateNodes(uids), SDK_STALL_MS, "iterateNodes")) {
     // An album deleted between the two calls is reported rather than yielded.
     if ((node as any).missingUid) continue;
     const album = (node as any).album;
@@ -125,7 +126,11 @@ export async function listAlbums(photos: any): Promise<AlbumSummary[]> {
  */
 async function listAlbumUids(photos: any): Promise<string[]> {
   const uids: string[] = [];
-  for await (const uid of photos.experimental.iterateAlbumUids()) {
+  for await (const uid of withStallGuard(
+    photos.experimental.iterateAlbumUids(),
+    SDK_STALL_MS,
+    "iterateAlbumUids",
+  )) {
     uids.push(uid as string);
   }
   await new Promise((resolve) => setImmediate(resolve));
@@ -146,7 +151,11 @@ export async function listAlbumPhotoUids(photos: any): Promise<string[]> {
   const members = new Set<string>();
   for (const albumUid of albumUids) {
     try {
-      for await (const item of photos.iterateAlbum(albumUid)) {
+      for await (const item of withStallGuard(
+        photos.iterateAlbum(albumUid),
+        SDK_STALL_MS,
+        "iterateAlbum",
+      )) {
         members.add((item as any).nodeUid);
       }
     } catch (e) {
@@ -159,7 +168,7 @@ export async function listAlbumPhotoUids(photos: any): Promise<string[]> {
 /** The photos inside one album, newest first. */
 export async function listAlbumPhotos(photos: any, uid: string): Promise<AlbumPhoto[]> {
   const out: AlbumPhoto[] = [];
-  for await (const item of photos.iterateAlbum(uid)) {
+  for await (const item of withStallGuard(photos.iterateAlbum(uid), SDK_STALL_MS, "iterateAlbum")) {
     out.push({ uid: (item as any).nodeUid, captureTime: toMillis((item as any).captureTime) });
   }
   out.sort((a, b) => b.captureTime - a.captureTime);
@@ -181,12 +190,20 @@ export async function listAlbumsForMount(photos: any): Promise<AlbumMount[]> {
   if (albumUids.length === 0) return [];
 
   const out: AlbumMount[] = [];
-  for await (const albumNode of photos.iterateNodes(albumUids)) {
+  for await (const albumNode of withStallGuard(
+    photos.iterateNodes(albumUids),
+    SDK_STALL_MS,
+    "iterateNodes",
+  )) {
     if ((albumNode as any).missingUid) continue;
     const albumUid = (albumNode as any).uid;
     const uids: string[] = [];
     try {
-      for await (const item of photos.iterateAlbum(albumUid)) {
+      for await (const item of withStallGuard(
+        photos.iterateAlbum(albumUid),
+        SDK_STALL_MS,
+        "iterateAlbum",
+      )) {
         const u = (item as any).nodeUid;
         if (u) uids.push(u);
       }
@@ -214,6 +231,22 @@ export async function createAlbum(photos: any, name: string): Promise<AlbumSumma
     coverUid: null,
     lastActivityTime: toMillis((node as any).creationTime) || Date.now(),
   };
+}
+
+/**
+ * The user's own album a folder of this name belongs in, matched ignoring case and the
+ * spaces around it, or null. With several of that name the fullest wins, so a folder
+ * joins the copy holding its photos rather than an empty leftover.
+ */
+export async function findAlbumByName(photos: any, name: string): Promise<AlbumSummary | null> {
+  const wanted = name.trim().toLocaleLowerCase();
+  if (!wanted) return null;
+  let best: AlbumSummary | null = null;
+  for (const album of await listAlbums(photos)) {
+    if (album.name.trim().toLocaleLowerCase() !== wanted) continue;
+    if (!best || album.photoCount > best.photoCount) best = album;
+  }
+  return best;
 }
 
 /** Renames an album. Same name rules as creating one. */

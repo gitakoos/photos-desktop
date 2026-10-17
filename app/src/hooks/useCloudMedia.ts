@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { rpc } from "../lib/rpc";
-import { cachedThumbnail } from "../lib/thumbStore";
+import { cachedThumbnail, thumbUrl } from "../lib/thumbStore";
 import type { ViewerItem, ViewerList } from "../components/ViewerShell";
 
 /**
@@ -106,6 +106,12 @@ function requestPicture(uid: string, cb: (url: string | null) => void): () => vo
   const shared = cachedThumbnail(uid);
   if (shared !== undefined) {
     cb(shared);
+    return () => {};
+  }
+  // The thumbnail server's URL, when there is one: the webview loads it like the grid's.
+  const served = thumbUrl(uid);
+  if (served) {
+    cb(served);
     return () => {};
   }
   const mine = pictures.get(uid);

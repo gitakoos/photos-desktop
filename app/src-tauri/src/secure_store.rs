@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -22,10 +22,11 @@
 
 // Encrypted, app-owned storage for non-secret preferences.
 //
-// Every byte lives inside the app's own directory. A random AES-256-GCM data
-// key is generated on first use and sealed at rest with user-scope DPAPI, so
-// only the same Windows user on the same machine can unseal it, and nothing is
-// registered anywhere the system can enumerate.
+// Every byte lives inside the app's own directory. A random AES-256-GCM data key is
+// generated on first use and sealed at rest by the platform keystore: user-scope DPAPI
+// on Windows (so only the same Windows user on the same machine can unseal it, and
+// nothing is registered anywhere the system can enumerate), and the Secret Service on
+// Linux (gnome-keyring / kwallet), which encrypts it against the login session.
 //
 // This key backs what must be readable before login: the `settings` blob (theme,
 // language, toggles) and the mount's own uid lists. The session and thumbnail cache
@@ -38,10 +39,14 @@ use std::path::PathBuf;
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use tauri::{AppHandle, Manager};
+#[cfg(windows)]
 use windows_dpapi::{decrypt_data, encrypt_data, Scope};
 
-/// Bound into the DPAPI seal so a blob lifted from this app cannot be unsealed
-/// by another process running as the same user.
+/// Bound into the DPAPI seal, which ties the blob to this purpose: a blob sealed with
+/// other entropy, or with none, does not unseal as this key, and this one does not
+/// unseal without it. It is not a secret (the value is right here), so it does not stop
+/// a process running as the same user from unsealing the key; DPAPI's user scope is
+/// what keeps other users and other machines out.
 const DPAPI_ENTROPY: &[u8] = b"eu.akoos.photos.desktop/store/v1";
 const KEY_FILE: &str = "key.bin";
 const NONCE_LEN: usize = 12;
@@ -59,13 +64,21 @@ const VAULT_KEY_FILE: &str = "vaultmeta.bin";
 /// `<install>\data` so everything lives in ONE install folder and the uninstaller
 /// wipes it together. Returns None in dev / any other layout, where the OS
 /// app-data dir is used instead.
+///
+/// That layout is the Windows installer's alone. A Linux install is read-only (a
+/// Flatpak's `/app`), and there `resources/sidecar` is the directory holding
+/// server.mjs, which would pass the check and send every write to a folder that
+/// cannot take one: no log, no store, and a sidecar that never starts.
 pub fn install_data_dir() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let runtime = dir
-        .join("resources")
-        .join(if cfg!(windows) { "sidecar.exe" } else { "sidecar" });
-    runtime.exists().then(|| dir.join("data"))
+    dir.join("resources")
+        .join("sidecar.exe")
+        .exists()
+        .then(|| dir.join("data"))
 }
 
 pub fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -77,23 +90,70 @@ pub fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// The AES data key, created on first use and sealed with user-scope DPAPI.
-fn data_key(app: &AppHandle) -> Result<Key<Aes256Gcm>, String> {
-    let path = app_dir(app)?.join(KEY_FILE);
+/// A fresh 32-byte key from the OS CSPRNG.
+fn rand_key() -> [u8; 32] {
+    let key = Aes256Gcm::generate_key(&mut OsRng);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(key.as_slice());
+    out
+}
+
+/// Load a 32-byte at-rest key by logical id, creating and sealing it on first use.
+///
+/// On Windows it is sealed to `<data>/<file>` with user-scope DPAPI, bound to
+/// `entropy`, so only the same user on the same machine can unseal it and a stolen
+/// file cannot. `file` and `entropy` identify the key, so the store key and the
+/// vault-meta key stay distinct.
+#[cfg(windows)]
+fn keystore_get_or_create(
+    app: &AppHandle,
+    file: &str,
+    entropy: &[u8],
+) -> Result<[u8; 32], String> {
+    let path = app_dir(app)?.join(file);
     if path.exists() {
         let sealed = fs::read(&path).map_err(|e| e.to_string())?;
-        let raw = decrypt_data(&sealed, Scope::User, Some(DPAPI_ENTROPY))
-            .map_err(|e| format!("could not unseal the data key: {e}"))?;
-        if raw.len() != 32 {
-            return Err("stored data key is corrupt".into());
-        }
-        return Ok(*Key::<Aes256Gcm>::from_slice(&raw));
+        let raw = decrypt_data(&sealed, Scope::User, Some(entropy))
+            .map_err(|e| format!("could not unseal a key: {e}"))?;
+        return raw.try_into().map_err(|_| "stored key is corrupt".to_string());
     }
-    let key = Aes256Gcm::generate_key(&mut OsRng);
-    let sealed = encrypt_data(key.as_slice(), Scope::User, Some(DPAPI_ENTROPY))
-        .map_err(|e| format!("could not seal the data key: {e}"))?;
+    let key = rand_key();
+    let sealed = encrypt_data(&key, Scope::User, Some(entropy))
+        .map_err(|e| format!("could not seal a key: {e}"))?;
     fs::write(&path, sealed).map_err(|e| e.to_string())?;
     Ok(key)
+}
+
+/// The non-Windows path stores the raw key in the OS keyring, which on a Linux desktop
+/// is the Secret Service (gnome-keyring / kwallet). It encrypts the key at rest, so the
+/// key never sits on disk in the clear, the same guarantee DPAPI gives above. The `file`
+/// id names the keyring entry so the two keys stay distinct; `entropy` is unused here,
+/// because the keyring, not this app, binds the secret to the login session.
+#[cfg(not(windows))]
+fn keystore_get_or_create(
+    _app: &AppHandle,
+    file: &str,
+    _entropy: &[u8],
+) -> Result<[u8; 32], String> {
+    let entry = keyring::Entry::new("eu.akoos.photos.desktop", file)
+        .map_err(|e| format!("keyring entry: {e}"))?;
+    match entry.get_secret() {
+        Ok(raw) => raw.try_into().map_err(|_| "stored key is corrupt".to_string()),
+        Err(keyring::Error::NoEntry) => {
+            let key = rand_key();
+            entry
+                .set_secret(&key)
+                .map_err(|e| format!("could not store a key in the keyring: {e}"))?;
+            Ok(key)
+        }
+        Err(e) => Err(format!("could not read a key from the keyring: {e}")),
+    }
+}
+
+/// The AES data key, created on first use and sealed at rest by the platform keystore.
+fn data_key(app: &AppHandle) -> Result<Key<Aes256Gcm>, String> {
+    let raw = keystore_get_or_create(app, KEY_FILE, DPAPI_ENTROPY)?;
+    Ok(*Key::<Aes256Gcm>::from_slice(&raw))
 }
 
 fn seal(key: &Key<Aes256Gcm>, plain: &[u8]) -> Result<Vec<u8>, String> {
@@ -120,16 +180,18 @@ fn unseal(key: &Key<Aes256Gcm>, blob: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Names come from the WebView, so they must never be able to escape app_dir.
 fn safe_name(name: &str) -> Result<String, String> {
-    let ok = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-    if !ok {
+    // The one entry the interface keeps here. The same directory holds the sealed keys
+    // (`key.bin`, `vaultmeta.bin`) under names of exactly this shape, and overwriting or
+    // deleting either would lock the vault away for good, so the renderer may name
+    // nothing else.
+    if !RENDERER_ENTRIES.contains(&name) {
         return Err("invalid store name".into());
     }
     Ok(format!("{name}.bin"))
 }
+
+/// What the WebView may read, write and delete through the `store_*` commands.
+const RENDERER_ENTRIES: &[&str] = &["settings"];
 
 /// Seal one text file into the app directory. Named directly, so callers inside the
 /// app (the mount's uid lists) can share this key without going through the
@@ -190,21 +252,7 @@ pub fn store_del(app: AppHandle, name: String) -> Result<(), String> {
 /// only breaking the password-to-key binding would, and that would cost the vault's
 /// ability to verify a password locally at all.
 fn vault_meta_key(app: &AppHandle) -> Result<String, String> {
-    let path = app_dir(app)?.join(VAULT_KEY_FILE);
-    let raw = if path.exists() {
-        let sealed = fs::read(&path).map_err(|e| e.to_string())?;
-        decrypt_data(&sealed, Scope::User, Some(VAULT_KEY_ENTROPY))
-            .map_err(|e| format!("could not unseal the vault key: {e}"))?
-    } else {
-        let key = Aes256Gcm::generate_key(&mut OsRng).to_vec();
-        let sealed = encrypt_data(&key, Scope::User, Some(VAULT_KEY_ENTROPY))
-            .map_err(|e| format!("could not seal the vault key: {e}"))?;
-        fs::write(&path, sealed).map_err(|e| e.to_string())?;
-        key
-    };
-    if raw.len() != 32 {
-        return Err("stored vault key is corrupt".into());
-    }
+    let raw = keystore_get_or_create(app, VAULT_KEY_FILE, VAULT_KEY_ENTROPY)?;
     // Hex rather than base64: the JSON hop needs some text form, and hex costs no
     // dependency and cannot be confused with the base64 uids elsewhere in the logs.
     Ok(raw.iter().map(|b| format!("{b:02x}")).collect())

@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -35,5 +35,13 @@ export function scrubSecrets(s: string): string {
     // base64 and base64url ("-" and "_" instead of "+" and "/"), which is what
     // tokens actually travel as.
     .replace(/[A-Za-z0-9+/_-]{40,}={0,2}/g, "[redacted]")
-    .replace(/\b[0-9a-fA-F]{40,}\b/g, "[redacted]");
+    .replace(/\b[0-9a-fA-F]{40,}\b/g, "[redacted]")
+    // Proton's session uid, access and refresh tokens are 32 lowercase letters and
+    // digits, under the length above; so is the file-manager drive's token. A run that
+    // long mixing both is a token, never a word.
+    .replace(/\b(?=[a-z0-9]*\d)(?=[a-z0-9]*[a-z])[a-z0-9]{32,39}\b/g, "[redacted]")
+    // Control characters, but for the tab and the newline a stack trace is made of: a
+    // name or a server message carrying a carriage return or an escape sequence would
+    // otherwise forge a line of its own in the log, or repaint the terminal reading it.
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "?");
 }

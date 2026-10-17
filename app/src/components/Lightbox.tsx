@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
 import { downloadPhotos, explorerMode } from "../lib/download";
@@ -32,15 +32,22 @@ import { useProgressiveImage } from "../hooks/useProgressiveImage";
 import { formatBytes, formatDate, dimensionsOf } from "../lib/format";
 import { Confirm } from "./Confirm";
 import { ShareDialog } from "./ShareDialog";
+import { AlbumPicker } from "./AlbumDialogs";
+import { ContextMenu, type MenuAction } from "./ContextMenu";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
 import {
   CloudIcon,
   DownloadIcon,
+  FolderOpenIcon,
   HeartIcon,
+  LibraryAddIcon,
   OfflinePinIcon,
+  PencilIcon,
   ShareIcon,
   TrashIcon,
 } from "./icons";
+import { PhotoEditor } from "./PhotoEditor";
+import { cloudEditorSource, isEditableImage, saveCloudEdit } from "../lib/cloudEditor";
 import { TAG, withFavorite } from "../lib/tags";
 import { useT } from "../lib/i18n";
 import "../styles/Lightbox.css";
@@ -75,6 +82,10 @@ type Props = {
   onClose: () => void;
   onTrashed: (uid: string) => void;
   onRenamed: (uid: string, name: string) => void;
+  /** A saved edit created a new timeline photo, so the caller reloads to show it. */
+  onEdited?: () => void;
+  /** Whether the edit control is offered. Off for shared photos this account cannot edit. */
+  editable?: boolean;
   /** Whether this photo is downloaded (hydrated), which drives Download vs Free up. */
   isLocal?: boolean;
   /** Whether the app holds its own encrypted copy, a different place from `isLocal`. */
@@ -111,7 +122,7 @@ type Props = {
  * Those calls are the full-resolution upgrade, the details behind the name and the info
  * panel, and a video's own bytes. Each is worth having for a photo somebody is looking
  * at and worth nothing at all for one passed through on the way to another. The
- * sidecar answers one call at a time, so a run through fifty photos used to put three
+ * sidecar answers one call at a time, so a run through fifty photos would put three
  * rounds of them in front of the one photo the reader stopped on. Waiting for the photo
  * to settle means a photo passed through never asks for any of them.
  *
@@ -145,6 +156,8 @@ export function Lightbox({
   onClose,
   onTrashed,
   onRenamed,
+  onEdited,
+  editable = true,
   isLocal = false,
   isOffline = false,
   kind,
@@ -170,10 +183,17 @@ export function Lightbox({
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState("");
   // Our own optimistic flip, which outranks both sources below until the uid
   // changes. Cleared on failure, so the heart falls back to the truth.
   const [favOverride, setFavOverride] = useState<boolean | null>(null);
+  // The right-click menu, and the "add to album" picker it can open.
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  const [pickingAlbum, setPickingAlbum] = useState(false);
+  // A menu dismissed by a click-away must not also close the viewer: the menu closes on
+  // the mousedown, so this brief window swallows the click that lands right after it.
+  const suppressCloseUntil = useRef(0);
 
   // The caller's kind wins when it has one, so the video branch fires on open
   // without waiting for the details. Without it, the media type comes from the
@@ -186,6 +206,10 @@ export function Lightbox({
   // `null` means not known yet, which keeps the heart disabled rather than lying.
   const fav: boolean | null =
     favOverride ?? isFavorite ?? (details ? details.tags.includes(TAG.Favorite) : null);
+
+  // The cloud editor opens what sharp can decode; HEIC and RAW keep only the viewer, so
+  // the Edit control is hidden for those rather than offering an edit that would fail.
+  const canEdit = editable && !isVideo && !!details && isEditableImage(details.mediaType, details.name);
 
   useEffect(() => {
     setError("");
@@ -276,7 +300,7 @@ export function Lightbox({
   // Images skip this entirely and keep using the HD still above.
   //
   // Behind the same settle, and this is where it matters most: a video crosses the one
-  // channel as a whole file in a single call, so one stepped past used to hold the
+  // channel as a whole file in a single call, so one stepped past would hold the
   // viewer up for every photo after it. The poster is the preview and it is already
   // showing, so what the wait actually delays is the first frame becoming playable.
   //
@@ -429,6 +453,21 @@ export function Lightbox({
     setBusy(false);
   }
 
+  // Add this photo to an album, from the right-click menu's picker.
+  async function addToAlbum(albumUid: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await rpc("addPhotosToAlbum", { albumUid, uids: [uid] });
+      setPickingAlbum(false);
+    } catch (e) {
+      setError(String(e));
+      setPickingAlbum(false);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const dims = dimensionsOf(details?.extra ?? null);
 
   // The photo, at the best quality that has arrived: the grid thumbnail the caller
@@ -455,6 +494,83 @@ export function Lightbox({
       }
     : { kind: "image", src: stillSrc, loading: loadingPreview };
 
+  // The right-click menu on the stage: the same actions the toolbar carries, plus
+  // "add to album", since the stage is where the reader spends most time.
+  const menuActions: MenuAction[] = [
+    {
+      key: "favorite",
+      label: t(fav ? "selection.unfavorite" : "selection.favorite"),
+      icon: <HeartIcon size={14} filled={!!fav} />,
+      disabled: fav === null || busy,
+      onSelect: () => void toggleFavorite(),
+    },
+    ...(canEdit
+      ? [
+          {
+            key: "edit",
+            label: t("editor.edit"),
+            icon: <PencilIcon size={14} />,
+            disabled: busy,
+            onSelect: () => setEditing(true),
+          },
+        ]
+      : []),
+    {
+      key: "album",
+      label: t("selection.addToAlbum"),
+      icon: <LibraryAddIcon size={14} />,
+      onSelect: () => setPickingAlbum(true),
+    },
+    {
+      key: "offline",
+      label: t(isOffline ? "selection.offlineRemove" : "selection.offlineAdd"),
+      icon: <OfflinePinIcon size={14} />,
+      disabled: busy,
+      onSelect: () => void toggleOffline(),
+    },
+    {
+      key: "download",
+      label: isLocal
+        ? t("viewer.freeUp")
+        : explorer
+          ? t("viewer.download")
+          : t("viewer.saveToFolder"),
+      icon: isLocal ? <CloudIcon size={14} /> : <DownloadIcon size={14} />,
+      disabled: busy,
+      onSelect: () => void (isLocal ? freeUp() : download()),
+    },
+    ...(isLocal
+      ? [
+          {
+            key: "reveal",
+            label: t("selection.showInFolder"),
+            icon: <FolderOpenIcon size={14} />,
+            onSelect: () => void invoke("reveal_photo", { uid }).catch(() => {}),
+          },
+        ]
+      : []),
+    {
+      key: "share",
+      label: t("selection.share"),
+      icon: <ShareIcon size={14} />,
+      onSelect: () => setSharing(true),
+    },
+    {
+      key: "trash",
+      label: t("selection.trash"),
+      icon: <TrashIcon size={14} />,
+      separator: true,
+      danger: true,
+      onSelect: () => setConfirming(true),
+    },
+  ];
+
+  const downloadLabel = isLocal
+    ? t("viewer.freeUp")
+    : explorer
+      ? t("viewer.download")
+      : t("viewer.saveToFolder");
+
   return (
     <ViewerShell
       itemKey={uid}
@@ -468,9 +584,13 @@ export function Lightbox({
       onNext={onNext}
       list={neighbours.list}
       onRange={neighbours.onRange}
-      onClose={onClose}
+      onClose={() => {
+        if (Date.now() < suppressCloseUntil.current) return;
+        onClose();
+      }}
       onRename={rename}
       onVideoError={() => setVideoState("error")}
+      onContextMenu={(e) => setMenuAt({ x: e.clientX, y: e.clientY })}
       onKey={(e) => {
         if (e.key === "Delete") setConfirming(true);
         else if (e.key.toLowerCase() === "f") void toggleFavorite();
@@ -478,55 +598,73 @@ export function Lightbox({
       }}
       toolbar={
         <>
+          {/* Icons alone, named in their tooltips, as in Windows Photos: the bar keeps one
+              width whatever the language. Favourite colours in when held, as a state. */}
           <button
             className={`lbx-ibtn ${fav ? "sel" : ""}`}
             disabled={busy || fav === null}
             onClick={() => void toggleFavorite()}
-            title={fav ? t("viewer.unfavoriteShortcut") : t("viewer.favoriteShortcut")}
+            title={`${fav ? t("selection.unfavorite") : t("selection.favorite")} (F)`}
+            aria-label={fav ? t("selection.unfavorite") : t("selection.favorite")}
           >
-            <HeartIcon filled={!!fav} />
+            <HeartIcon size={17} filled={!!fav} />
           </button>
+          {canEdit && (
+            <button
+              className="lbx-ibtn"
+              disabled={busy}
+              onClick={() => setEditing(true)}
+              title={t("editor.edit")}
+              aria-label={t("editor.edit")}
+            >
+              <PencilIcon size={16} />
+            </button>
+          )}
           <button
-            className="lbx-ibtn danger"
-            disabled={busy}
-            onClick={() => setConfirming(true)}
-            title={t("viewer.trashShortcut")}
+            className="lbx-ibtn"
+            onClick={() => setPickingAlbum(true)}
+            title={t("selection.addToAlbum")}
+            aria-label={t("selection.addToAlbum")}
           >
-            <TrashIcon />
-          </button>
-          {/* The app's own copy. Lit while it is held, so the one button reads as a
-              state as much as an action, the way the heart does. */}
-          <button
-            className={`lbx-ibtn ${isOffline ? "sel" : ""}`}
-            disabled={busy}
-            onClick={() => void toggleOffline()}
-            title={isOffline ? t("viewer.offlineRemove") : t("viewer.offlineAdd")}
-          >
-            <OfflinePinIcon />
+            <LibraryAddIcon size={17} />
           </button>
           <button
             className="lbx-ibtn"
             disabled={busy}
             onClick={() => void (isLocal ? freeUp() : download())}
-            title={
-              isLocal
-                ? t("viewer.freeUp")
-                : explorer
-                  ? t("viewer.download")
-                  : t("viewer.saveToFolder")
-            }
+            title={downloadLabel}
+            aria-label={downloadLabel}
           >
-            {isLocal ? <CloudIcon /> : <DownloadIcon />}
+            {isLocal ? <CloudIcon size={17} /> : <DownloadIcon size={17} />}
           </button>
           <button
-            className={`lbx-ibtn ${details?.isShared ? "sel" : ""}`}
+            className="lbx-ibtn"
             onClick={() => setSharing(true)}
-            title={t("viewer.shareShortcut")}
+            title={`${t("selection.share")} (S)`}
+            aria-label={t("selection.share")}
           >
-            <ShareIcon />
+            <ShareIcon size={17} />
+          </button>
+          <button
+            className="lbx-ibtn danger"
+            disabled={busy}
+            onClick={() => setConfirming(true)}
+            title={`${t("selection.trash")} (Del)`}
+            aria-label={t("selection.trash")}
+          >
+            <TrashIcon size={17} />
           </button>
         </>
       }
+      menuItems={[
+        {
+          key: "offline",
+          label: isOffline ? t("selection.offlineRemove") : t("selection.offlineAdd"),
+          icon: <OfflinePinIcon size={14} />,
+          disabled: busy,
+          onSelect: () => void toggleOffline(),
+        },
+      ]}
       details={
         !details ? (
           <p className="lbx-dim">{t("common.loading")}</p>
@@ -572,6 +710,27 @@ export function Lightbox({
         )
       }
     >
+      {menuAt && (
+        <ContextMenu
+          x={menuAt.x}
+          y={menuAt.y}
+          actions={menuActions}
+          onClose={() => {
+            suppressCloseUntil.current = Date.now() + 350;
+            setMenuAt(null);
+          }}
+        />
+      )}
+
+      {pickingAlbum && (
+        <AlbumPicker
+          count={1}
+          busy={busy}
+          onPick={(albumUid) => void addToAlbum(albumUid)}
+          onCancel={() => setPickingAlbum(false)}
+        />
+      )}
+
       {sharing && (
         <ShareDialog
           uid={uid}
@@ -597,6 +756,29 @@ export function Lightbox({
           onConfirm={() => {
             setConfirming(false);
             void trash();
+          }}
+        />
+      )}
+
+      {/* Saving writes a NEW timeline photo carrying this one's date, place and camera;
+          the original is left untouched. The caller reloads so the copy appears. */}
+      {editing && details && (
+        <PhotoEditor
+          sourceKey={uid}
+          loadSource={() => cloudEditorSource(uid)}
+          saveEdit={(jpeg, src) =>
+            saveCloudEdit(jpeg, {
+              name: details.name,
+              captureTime: src.captureTime,
+              camera: src.camera,
+              latitude: src.latitude,
+              longitude: src.longitude,
+            }).then(() => null)
+          }
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
+            onEdited?.();
           }}
         />
       )}

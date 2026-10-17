@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -42,6 +42,12 @@
 
 :root,
 :root[data-theme="dark"] {
+  /* Every dialog's dimmed background and shadow, and every menu's. One value each, so
+     dialogs agree; small and close shadows, because a wide soft one over a dimmed
+     screen read as a second, larger dark box behind the dialog. */
+  --scrim: rgba(0, 0, 0, 0.5);
+  --dialog-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  --menu-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
   --bg0: #090909;
   --bg2: #1a1a1a;
   --page-bg: #0e0e0f;
@@ -87,6 +93,9 @@
 }
 
 :root[data-theme="light"] {
+  --scrim: rgba(0, 0, 0, 0.32);
+  --dialog-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+  --menu-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
   --bg0: #f7f7f8;
   --bg2: #eaeaec;
   --page-bg: #f2f2f5;
@@ -140,7 +149,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: var(--bg, #17171b);
+  background: var(--bg0, #17171b);
   -webkit-app-region: drag;
 }
 .eb-card {

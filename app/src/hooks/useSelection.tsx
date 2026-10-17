@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -51,6 +51,10 @@ export type MarqueeRect = { x1: number; y1: number; x2: number; y2: number };
 
 const DRAG_THRESHOLD_PX = 5;
 
+/** Any open dialog or panel, which owns the keyboard while it is up. */
+const DIALOG_SELECTOR =
+  ".cf-backdrop, .up-backdrop, .st-backdrop, .lbx, .ap-veil";
+
 /** Auto-scroll speed, in px per frame, from the moment the pointer clears the edge
  *  to the point where pulling further adds nothing. */
 const AUTOSCROLL_MIN_PX = 4;
@@ -98,6 +102,8 @@ type Drag = {
    * auto-scrolled frame, which is what made a band over a large library crawl.
    */
   cells: { uid: string; left: number; right: number; top: number; bottom: number }[] | null;
+  /** How many tiles were in the document when `cells` was last brought up to date. */
+  seen: number;
 };
 
 /**
@@ -110,8 +116,12 @@ type Drag = {
  * Dragging past the top or bottom edge scrolls the view and keeps extending the
  * band, the way File Explorer does, faster the further past the edge the pointer
  * goes. The move and release are watched on the window, so the drag survives the
- * pointer leaving the grid — leaving used to end it, which is what stopped the
- * band at the edge.
+ * pointer leaving the grid. Ending it there would stop the band at the edge.
+ *
+ * Shift+click selects every photo between the last one picked and this one, and Ctrl+A
+ * selects them all, the way File Explorer does. Both read the photos in the order they
+ * are on screen from `order`, which the view fills; an empty one turns both off, which
+ * is how a view that is mounted but not showing stays out of the way.
  *
  * Shared by every grid in the app: Photos, Albums, Shared.
  */
@@ -128,9 +138,27 @@ export function useSelection(containerRef: RefObject<HTMLElement | null>, escEna
   // then cannot leave either behind.
   const [dragging, setDragging] = useState(false);
 
+  /** The view's photos in screen order, for Shift+click ranges and Ctrl+A. */
+  const order = useRef<string[]>([]);
+  /** The photo a Shift+click range starts from: the last one picked. */
+  const anchorRef = useRef<string | null>(null);
+
   const clear = useCallback(() => setSelected(new Set()), []);
 
-  const toggle = useCallback((uid: string) => {
+  const toggle = useCallback((uid: string, e?: { shiftKey?: boolean }) => {
+    const list = order.current;
+    const from = e?.shiftKey && anchorRef.current ? list.indexOf(anchorRef.current) : -1;
+    const to = list.indexOf(uid);
+    anchorRef.current = uid;
+    if (from >= 0 && to >= 0) {
+      const [lo, hi] = from < to ? [from, to] : [to, from];
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (let i = lo; i <= hi; i++) next.add(list[i]);
+        return next;
+      });
+      return;
+    }
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(uid)) next.delete(uid);
@@ -138,6 +166,22 @@ export function useSelection(containerRef: RefObject<HTMLElement | null>, escEna
       return next;
     });
   }, []);
+
+  // Ctrl+A selects every photo in the view, unless a field or a dialog has the keyboard.
+  useEffect(() => {
+    if (!escEnabled) return;
+    function onKey(e: KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "a" || e.altKey) return;
+      if (order.current.length === 0) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable=true]")) return;
+      if (document.querySelector(DIALOG_SELECTOR)) return;
+      e.preventDefault();
+      setSelected(new Set(order.current));
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [escEnabled]);
 
   // Escape abandons the selection. Disable this while a lightbox or dialog owns
   // the key, so it does not fire twice.
@@ -168,12 +212,16 @@ export function useSelection(containerRef: RefObject<HTMLElement | null>, escEna
     setMarquee(rect);
 
     // Measured on the first frame of the band rather than at the press, so a
-    // press that turns out to be a plain click pays nothing.
-    if (!drag.cells) {
-      const cells: NonNullable<Drag["cells"]> = [];
-      containerRef.current?.querySelectorAll<HTMLElement>("[data-uid]").forEach((el) => {
+    // press that turns out to be a plain click pays nothing. The timeline builds only the
+    // months near the screen, so tiles keep appearing as the band scrolls: any not yet
+    // measured are added as they come, and the ones already left behind keep their place.
+    const nodes = containerRef.current?.querySelectorAll<HTMLElement>("[data-uid]");
+    if (!drag.cells || (nodes && nodes.length !== drag.seen)) {
+      const cells = drag.cells ?? [];
+      const known = new Set(cells.map((c) => c.uid));
+      nodes?.forEach((el) => {
         const uid = el.dataset.uid;
-        if (!uid) return;
+        if (!uid || known.has(uid)) return;
         const r = el.getBoundingClientRect();
         cells.push({
           uid,
@@ -184,6 +232,7 @@ export function useSelection(containerRef: RefObject<HTMLElement | null>, escEna
         });
       });
       drag.cells = cells;
+      drag.seen = nodes?.length ?? 0;
     }
 
     // Both sides in content space, so a band that auto-scrolls still lines up
@@ -211,6 +260,7 @@ export function useSelection(containerRef: RefObject<HTMLElement | null>, escEna
       base: new Set(selected),
       scroller,
       cells: null,
+      seen: 0,
     };
     pointerRef.current = { x: e.clientX, y: e.clientY };
     draggedRef.current = false;
@@ -293,6 +343,7 @@ export function useSelection(containerRef: RefObject<HTMLElement | null>, escEna
     setSelected,
     toggle,
     clear,
+    order,
     marquee,
     wasDragging: () => draggedRef.current,
     containerProps: { onMouseDown },

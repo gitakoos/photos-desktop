@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -33,6 +33,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { collectResults, nodeName, toMillis, type NodeOpResult } from "./nodes.ts";
+import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 
 /**
  * A trashed node, shaped like the timeline's items so the grid renders it with
@@ -60,13 +61,17 @@ export type TrashResult = NodeOpResult;
  */
 export async function listTrashed(photos: any): Promise<TrashItem[]> {
   const uids: string[] = [];
-  for await (const uid of photos.iterateTrashedNodeUids()) {
+  for await (const uid of withStallGuard(
+    photos.iterateTrashedNodeUids(),
+    SDK_STALL_MS,
+    "iterateTrashedNodeUids",
+  )) {
     uids.push(uid as string);
   }
   if (uids.length === 0) return [];
 
   const out: TrashItem[] = [];
-  for await (const node of photos.iterateNodes(uids)) {
+  for await (const node of withStallGuard(photos.iterateNodes(uids), SDK_STALL_MS, "iterateNodes")) {
     const n = node as any;
     if (n.missingUid) continue; // vanished server-side between the two passes
     out.push({

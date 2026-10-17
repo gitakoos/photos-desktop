@@ -3077,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "setup"
-version = "0.2.0-beta.1"
+version = "1.0.0"
 dependencies = [
  "cloud-filter",
  "mslnk",

@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -22,7 +22,7 @@
 
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
-import { cachedThumbnail, requestThumbnail } from "../lib/thumbStore";
+import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
 import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
 import { cachedMediaType, requestMediaType } from "../lib/mediaTypes";
 import { useT } from "../lib/i18n";
@@ -40,7 +40,7 @@ import {
 export type GridItem = { uid: string; tags?: number[]; name?: string };
 
 /** The gap between tiles, matching `.g-grid` in the stylesheet. */
-const GRID_GAP = 6;
+export const GRID_GAP = 6;
 
 /**
  * Android drops the lower-priority corner badges as tiles shrink, so a dense grid does
@@ -99,6 +99,32 @@ function typeBadgeOf(tags: number[] | undefined): { icon: ReactNode; key: string
   return null;
 }
 
+/**
+ * One observer for every tile on screen rather than one each: a library of thousands
+ * built thousands of them whenever the grid came back in full, such as when a filter was
+ * cleared, and that was a visible stall. The margin keeps about two screens ahead, so a
+ * tile is usually filled before it scrolls in.
+ */
+const nearScreen = new Map<Element, (visible: boolean) => void>();
+let nearScreenObserver: IntersectionObserver | null = null;
+
+function watchNearScreen(el: Element, onChange: (visible: boolean) => void): () => void {
+  if (!nearScreenObserver) {
+    nearScreenObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) nearScreen.get(entry.target)?.(entry.isIntersecting);
+      },
+      { rootMargin: "1200px" },
+    );
+  }
+  nearScreen.set(el, onChange);
+  nearScreenObserver.observe(el);
+  return () => {
+    nearScreen.delete(el);
+    nearScreenObserver?.unobserve(el);
+  };
+}
+
 type CellProps = {
   item: GridItem;
   /** Provided by eager callers; `undefined` means "lazy-load when visible". */
@@ -106,8 +132,8 @@ type CellProps = {
   selected: boolean;
   /** True while anything at all is selected, which is what mutes the play icon. */
   selectionMode?: boolean;
-  onToggle?: (uid: string) => void;
-  onOpen?: (uid: string) => void;
+  onToggle?: (uid: string, e: MouseEvent) => void;
+  onOpen?: (uid: string, e: MouseEvent) => void;
   /** Right-click. Offered only by the views that have something to put in a menu. */
   onContext?: (uid: string, e: MouseEvent) => void;
   showBadges?: boolean;
@@ -142,6 +168,11 @@ export function PhotoCell({
   // scrolls near the viewport, from a bounded LRU, so a huge library never loads
   // every thumbnail into memory at once.
   const lazy = thumb === undefined;
+  // With the thumbnail server up a lazy tile is just its URL, and the webview loads and
+  // decodes it as it would on any web page. Only without one does the tile fetch its own.
+  const serverBase = useThumbServerBase();
+  const served = lazy && serverBase ? serverBase + encodeURIComponent(item.uid) : null;
+  const fetchesOwn = lazy && !served;
   const ref = useRef<HTMLDivElement>(null);
   const [self, setSelf] = useState<string | null | undefined>(() =>
     lazy ? cachedThumbnail(item.uid) : undefined,
@@ -171,67 +202,62 @@ export function PhotoCell({
   );
 
   useEffect(() => {
-    if (!lazy && !wantsDuration && !wantsMediaType) return;
+    if (!fetchesOwn && !wantsDuration && !wantsMediaType) return;
     const el = ref.current;
     if (!el) return;
     let unsubThumb: (() => void) | undefined;
     let unsubDuration: (() => void) | undefined;
     let unsubMediaType: (() => void) | undefined;
-    const io = new IntersectionObserver(
-      (entries) => {
-        const visible = entries[entries.length - 1]?.isIntersecting;
-        if (visible) {
-          if (lazy) {
-            const cached = cachedThumbnail(item.uid);
-            if (cached !== undefined) {
-              setSelf(cached);
-              setLoading(false);
-            } else {
-              setLoading(true);
-              unsubThumb = requestThumbnail(item.uid, (url) => {
-                setSelf(url);
-                setLoading(false);
-              });
-            }
-          }
-          if (wantsDuration && !unsubDuration) {
-            unsubDuration = requestDuration(item.uid, setDurationMs);
-          }
-          if (wantsMediaType && !unsubMediaType) {
-            unsubMediaType = requestMediaType(item.uid, setMediaType);
-          }
-        } else {
-          // Scrolled far out of view: drop this cell's copy of the thumbnail so
-          // a big library's per-cell strings cannot accumulate (the bounded LRU
-          // still caches it for an instant re-entry). Keeps the JS heap tied to
-          // what is on screen, not to the whole library.
-          if (lazy) {
-            unsubThumb?.();
-            unsubThumb = undefined;
-            setSelf(undefined);
+    const stopWatching = watchNearScreen(el, (visible) => {
+      if (visible) {
+        if (fetchesOwn) {
+          const cached = cachedThumbnail(item.uid);
+          if (cached !== undefined) {
+            setSelf(cached);
             setLoading(false);
+          } else {
+            setLoading(true);
+            unsubThumb = requestThumbnail(item.uid, (url) => {
+              setSelf(url);
+              setLoading(false);
+            });
           }
-          // The length itself is kept — it is one number, and letting go of it would
-          // only mean asking for it again. This just stops a cell nobody is looking at
-          // from holding up the queue.
-          unsubDuration?.();
-          unsubDuration = undefined;
-          // Kept for the same reason as the length: it is one short string, and letting
-          // go of it would only mean asking for it again.
-          unsubMediaType?.();
-          unsubMediaType = undefined;
         }
-      },
-      { rootMargin: "600px" },
-    );
-    io.observe(el);
+        if (wantsDuration && !unsubDuration) {
+          unsubDuration = requestDuration(item.uid, setDurationMs);
+        }
+        if (wantsMediaType && !unsubMediaType) {
+          unsubMediaType = requestMediaType(item.uid, setMediaType);
+        }
+      } else {
+        // Scrolled far out of view: drop this cell's copy of the thumbnail so
+        // a big library's per-cell strings cannot accumulate (the bounded LRU
+        // still caches it for an instant re-entry). Keeps the JS heap tied to
+        // what is on screen, not to the whole library.
+        if (fetchesOwn) {
+          unsubThumb?.();
+          unsubThumb = undefined;
+          setSelf(undefined);
+          setLoading(false);
+        }
+        // The length itself is kept — it is one number, and letting go of it would
+        // only mean asking for it again. This just stops a cell nobody is looking at
+        // from holding up the queue.
+        unsubDuration?.();
+        unsubDuration = undefined;
+        // Kept for the same reason as the length: it is one short string, and letting
+        // go of it would only mean asking for it again.
+        unsubMediaType?.();
+        unsubMediaType = undefined;
+      }
+    });
     return () => {
-      io.disconnect();
+      stopWatching();
       unsubThumb?.();
       unsubDuration?.();
       unsubMediaType?.();
     };
-  }, [lazy, wantsDuration, wantsMediaType, item.uid]);
+  }, [fetchesOwn, wantsDuration, wantsMediaType, item.uid]);
 
   // Android's ladder, unchanged: at the compact tier the cloud badge keeps its corner and
   // exactly one secondary joins it, picked in this order. At the smallest tier the cloud
@@ -260,14 +286,14 @@ export function PhotoCell({
   const showType = !!typeBadge && allow("type");
   const showFavorite = isFavorite && allow("favorite");
 
-  const src = lazy ? self : thumb;
+  const src = served ?? (lazy ? self : thumb);
   return (
     <div
       className={`g-cell ${selected ? "sel" : ""}`}
       ref={ref}
       data-uid={item.uid}
       title={showName ? item.name : undefined}
-      onClick={() => onOpen?.(item.uid)}
+      onClick={(e) => onOpen?.(item.uid, e)}
       onContextMenu={
         onContext &&
         ((e) => {
@@ -280,7 +306,7 @@ export function PhotoCell({
       }
     >
       {src ? (
-        <img src={src} loading="lazy" alt="" draggable={false} />
+        <img src={src} loading="lazy" decoding="async" alt="" draggable={false} />
       ) : (
         <div className={`g-cell-ph${loading ? " g-cell-loading" : ""}`} />
       )}
@@ -291,7 +317,7 @@ export function PhotoCell({
           title={selected ? t("grid.deselect") : t("grid.select")}
           onClick={(e) => {
             e.stopPropagation();
-            onToggle(item.uid);
+            onToggle(item.uid, e);
           }}
         >
           {selected ? <CheckIcon size={11} /> : null}
@@ -311,7 +337,7 @@ export function PhotoCell({
         <div className="g-badgerow">
           {showOffline && (
             <span className="g-tilebadge" title={t("photos.offline")}>
-              <OfflinePinIcon size={11} />
+              <OfflinePinIcon size={11} filled />
             </span>
           )}
           {showDuration && (
@@ -323,7 +349,7 @@ export function PhotoCell({
       {/* Bottom-end: the cloud, and the type mark just inside it. */}
       {local && (
         <span className="g-tilebadge g-cloud" title={t("photos.downloaded")}>
-          <CloudIcon size={11} />
+          <CloudIcon size={11} filled />
         </span>
       )}
       {(showType || showFavorite) && (

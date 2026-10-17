@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -34,8 +34,11 @@ pub mod data_format;
 // Public for the same reason: the installer compiles this one too, and the identity
 // constants in it are the installer's to read, not the app's.
 pub mod file_assoc;
+#[cfg(not(windows))]
+mod files_drive;
 mod local_file;
 mod local_folder;
+mod photo_edit;
 mod secure_store;
 mod upload_frame;
 
@@ -48,16 +51,29 @@ use std::time::{Duration, Instant};
 use tauri::webview::WebviewBuilder;
 use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl};
 
+/// The response router, shared with the reader thread. Each in-flight request registers
+/// a one-shot sender under its id; the reader delivers each response line to the matching
+/// sender and drops the entry. A response whose waiter is gone — timed out, or on a
+/// sidecar since replaced — finds no entry and is discarded. This is what lets more than
+/// one request be in flight: the reader matches each answer to its asker by id rather than
+/// assuming the next line answers the one call that could have been outstanding.
+type Router =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, std::sync::mpsc::SyncSender<serde_json::Value>>>>;
+
 struct Sidecar {
     child: Child,
+    /// Held (through the sidecar mutex) only for the brief write of one request line; the
+    /// wait for a response takes no lock, so requests on the two lanes overlap.
     stdin: ChildStdin,
-    /// Every line the sidecar writes to stdout, in order, handed over by the reader
-    /// thread `spawn_sidecar` starts. Reading through a channel rather than straight
-    /// off the pipe is what makes a deadline possible at all: a blocking `read_line`
-    /// on a pipe cannot be given one, and the caller holds the admission gate while
-    /// it waits.
-    lines: Receiver<String>,
     next_id: u64,
+    /// Where the reader thread `spawn_sidecar` starts delivers each response, keyed by id.
+    /// Reading through a channel rather than straight off the pipe is also what makes a
+    /// deadline possible: a blocking `read_line` cannot be given one.
+    router: Router,
+    /// Which spawn this is. A response wait that fails re-locks and drops the sidecar only
+    /// when this still matches, so a slow failure never kills a fresh sidecar a concurrent
+    /// caller has already put in its place.
+    generation: u64,
 }
 
 /// Dropping a sidecar means it is finished with, so the process goes too. Nothing
@@ -113,9 +129,11 @@ enum Priority {
 fn priority_for(method: &str) -> Priority {
     match method {
         // The user is waiting on the answer.
-        "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile"
+        "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile" | "startHydrate"
         // Session lifecycle: must never sit behind a warm.
-        | "__init" | "ping" | "lock" | "unlock" | "signOut" => Priority::Interactive,
+        | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
+        | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
+        | "protectSession" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
         // even though the user is looking at that photo: the transfer itself runs inside
@@ -139,7 +157,7 @@ fn priority_for(method: &str) -> Priority {
         "listForMount" | "getMetadata" => Priority::Enumerate,
 
         // Warming and mount bookkeeping: whole-library sweeps that must yield.
-        "getThumbnails" | "listAlbumsForMount"
+        "getThumbnails" | "listAlbumsForMount" | "listExtrasForMount"
         | "getAlbums" | "getAlbumPhotos" | "getAlbumPhotoUids" | "heapStats"
         | "whoami" | "getAccountInfo" | "getShared" | "getSharingInfo"
         | "checkUpdate" | "downloadUpdate" => Priority::Background,
@@ -186,48 +204,67 @@ type CallId = u64;
 /// answer the same as a failed one.
 const CANCELLED: &str = "rpc cancelled";
 
-/// The waiter queue, guarded by the gate's own mutex. That mutex is held only for the
-/// brief moments of joining the queue, checking the head, and releasing — never
-/// across the RPC itself, so callers can keep queueing while one request is in flight.
-struct GateState {
-    /// True while exactly one caller is doing I/O on the sidecar. No second caller may
-    /// proceed until it is false again.
-    busy: bool,
-    /// Monotonic arrival counter, for FIFO ordering within a priority.
-    next_seq: u64,
-    waiters: BinaryHeap<Ticket>,
+/// Which lane a priority runs on. The whole-library sweeps and warming (`Enumerate`,
+/// `Background`) share the one background lane; everything the user is waiting on runs on
+/// the foreground lane. That split is what stops a viewer's full-resolution upgrade from
+/// queueing behind a search-index sweep or a thumbnail warm: they are never in the same
+/// line.
+fn is_background(prio: Priority) -> bool {
+    matches!(prio, Priority::Background | Priority::Enumerate)
 }
 
-/// A priority admission gate in front of the single sidecar channel.
+/// The waiter queues, guarded by the gate's own mutex. That mutex is held only for the
+/// brief moments of joining a queue, checking the head, and releasing — never across the
+/// RPC itself, so callers can keep queueing while requests are in flight.
+struct GateState {
+    /// One in-flight slot per lane. At most one foreground and one background call run
+    /// at a time, so never more than two overlap. The two lanes only ever touch disjoint
+    /// sidecar state (the foreground viewer path holds the `viewing` original and the HD
+    /// preview cache; the background sweeps read metadata and fill the grid-thumbnail
+    /// cache), so the overlap introduces no race that a single channel would prevent.
+    fg_busy: bool,
+    bg_busy: bool,
+    /// Monotonic arrival counter, for FIFO ordering within a priority.
+    next_seq: u64,
+    fg_waiters: BinaryHeap<Ticket>,
+    bg_waiters: BinaryHeap<Ticket>,
+}
+
+/// A two-lane priority admission gate in front of the sidecar channel.
 ///
-/// The invariant is absolute: exactly one RPC is ever in flight. The gate only
-/// decides WHICH queued caller goes next when the channel frees up (the highest
-/// priority, oldest within it); it never lets two callers overlap.
+/// The invariant: at most one RPC per lane is ever in flight, so at most two overlap.
+/// Within a lane the gate decides WHICH queued caller goes next when that lane frees up
+/// (the highest priority, oldest within it); it never lets two callers share a lane.
 ///
-/// Starvation is intentional and bounded: a `Background` waiter yields to every
-/// `Interactive` / `UserAction` caller and runs once they drain. Click and open
-/// bursts are finite, so background work always resumes; no aging is added, because
-/// it would trade that simple guarantee for complexity we do not need here.
+/// Starvation within a lane is intentional and bounded: a `Background` waiter yields to
+/// every other background caller ahead of it and runs once they drain. Across lanes there
+/// is no starvation at all: the foreground lane is entirely independent of the background
+/// one, which is the whole reason the split exists.
 struct Gate {
     state: Mutex<GateState>,
     admit: Condvar,
 }
 
-/// Proof of admission from `acquire`. Releasing the gate is tied to dropping this, so
-/// every exit path — an early `?`, an error, a panic — frees the channel for the next
-/// waiter.
+/// Proof of admission from `acquire`. Releasing the lane is tied to dropping this, so
+/// every exit path — an early `?`, an error, a panic — frees it for the next waiter.
 struct GatePermit<'a> {
     gate: &'a Gate,
+    /// Which lane this permit holds, so its release clears the right one.
+    background: bool,
 }
 
 impl Drop for GatePermit<'_> {
     fn drop(&mut self) {
         let mut st = self.gate.state.lock().unwrap();
-        st.busy = false;
+        if self.background {
+            st.bg_busy = false;
+        } else {
+            st.fg_busy = false;
+        }
         // notify_all, not notify_one: a single wake could land on a waiter that is not
-        // the head, which would then re-check, see it is not first in line, and go back
-        // to sleep while the true head keeps sleeping — a stall. Waking all lets the
-        // head win and the rest re-queue.
+        // the head of its lane, which would then re-check, see it is not first in line,
+        // and go back to sleep while the true head keeps sleeping — a stall. Waking all
+        // lets each lane's head win and the rest re-queue.
         self.gate.admit.notify_all();
     }
 }
@@ -236,19 +273,21 @@ impl Gate {
     fn new() -> Self {
         Gate {
             state: Mutex::new(GateState {
-                busy: false,
+                fg_busy: false,
+                bg_busy: false,
                 next_seq: 0,
-                waiters: BinaryHeap::new(),
+                fg_waiters: BinaryHeap::new(),
+                bg_waiters: BinaryHeap::new(),
             }),
             admit: Condvar::new(),
         }
     }
 
-    /// Take a place in line at `prio` and block until the channel is free AND this
-    /// caller is the head of the queue. The wait is a predicate loop, as it must be:
+    /// Take a place in line at `prio` and block until this caller's lane is free AND this
+    /// caller is the head of that lane. The wait is a predicate loop, as it must be:
     /// `notify_all` wakes every waiter and the OS may wake one spuriously, so a wake is
-    /// only a hint to re-check, never permission to proceed. Checking the predicate
-    /// under the same mutex that guards `busy` is what makes a lost wakeup impossible.
+    /// only a hint to re-check, never permission to proceed. Checking the predicate under
+    /// the same mutex that guards the lane is what makes a lost wakeup impossible.
     fn acquire(&self, prio: Priority) -> GatePermit<'_> {
         // A caller with nothing to abandon it can only leave this loop by being
         // admitted, so the `None` arm below is unreachable for it.
@@ -260,19 +299,36 @@ impl Gate {
     ///
     /// `abandoned` is re-read on every wake, under the gate's own mutex, so a caller
     /// that has been let go of leaves the queue at the next wake rather than waiting to
-    /// reach the head. `None` means it left: nothing was written to the sidecar and the
-    /// channel was never held, which is the whole point of this. A superseded call costs
-    /// a heap pop, not a round trip.
+    /// reach the head. `None` means it left: nothing was written to the sidecar and no
+    /// lane was ever held, which is the whole point of this. A superseded call costs a
+    /// heap pop, not a round trip.
     fn acquire_unless(&self, prio: Priority, abandoned: &dyn Fn() -> bool) -> Option<GatePermit<'_>> {
+        let background = is_background(prio);
         let mut st = self.state.lock().unwrap();
         let seq = st.next_seq;
         st.next_seq = st.next_seq.wrapping_add(1);
         let me = Ticket { prio, seq };
-        st.waiters.push(me);
-        while st.busy || st.waiters.peek() != Some(&me) {
+        if background {
+            st.bg_waiters.push(me);
+        } else {
+            st.fg_waiters.push(me);
+        }
+        loop {
+            let ready = if background {
+                !st.bg_busy && st.bg_waiters.peek() == Some(&me)
+            } else {
+                !st.fg_busy && st.fg_waiters.peek() == Some(&me)
+            };
+            if ready {
+                break;
+            }
             if abandoned() {
                 // The seq is unique, so this takes out exactly this caller's ticket.
-                st.waiters.retain(|t| *t != me);
+                if background {
+                    st.bg_waiters.retain(|t| *t != me);
+                } else {
+                    st.fg_waiters.retain(|t| *t != me);
+                }
                 drop(st);
                 // Leaving cannot promote anyone who was not already admissible, so this
                 // is belt-and-braces rather than load-bearing.
@@ -281,9 +337,14 @@ impl Gate {
             }
             st = self.admit.wait(st).unwrap();
         }
-        st.waiters.pop();
-        st.busy = true;
-        Some(GatePermit { gate: self })
+        if background {
+            st.bg_waiters.pop();
+            st.bg_busy = true;
+        } else {
+            st.fg_waiters.pop();
+            st.fg_busy = true;
+        }
+        Some(GatePermit { gate: self, background })
     }
 
     /// Re-check every waiter's predicate now. Taking the same mutex the wait is
@@ -294,21 +355,26 @@ impl Gate {
         self.admit.notify_all();
     }
 
-    /// The number of callers currently queued. Test-only: lets a test line callers up
-    /// in a known order before releasing the holder.
+    /// The number of callers currently queued, across both lanes. Test-only: lets a test
+    /// line callers up in a known order before releasing the holder.
     #[cfg(test)]
     fn queued(&self) -> usize {
-        self.state.lock().unwrap().waiters.len()
+        let st = self.state.lock().unwrap();
+        st.fg_waiters.len() + st.bg_waiters.len()
     }
 }
 
-/// The single sidecar channel behind its priority gate. The `Sidecar` itself stays an
-/// `Option` (spawned lazily, dropped and respawned after a transport error), now
-/// reached only by whoever holds the gate — so `do_io` still sees exactly one request
-/// in flight and stays byte-for-byte unchanged.
+/// The sidecar channel behind its two-lane gate. The `Sidecar` itself stays an `Option`
+/// (spawned lazily, dropped and respawned after a transport error). It is now reached by
+/// more than one caller at once: the write of each request is serialised by its mutex,
+/// but the wait for each response holds no lock, so a foreground and a background call
+/// overlap. Answers are matched to their askers by id through the sidecar's router.
 struct SidecarGate {
     gate: Gate,
     sidecar: Mutex<Option<Sidecar>>,
+    /// Bumped on every spawn, so a response wait that fails drops only the sidecar it
+    /// actually used, never a fresh one put in place after a shared failure.
+    generation: std::sync::atomic::AtomicU64,
     /// Every cancellable call that is queued or in flight, against whether the frontend
     /// has since let go of it.
     ///
@@ -337,8 +403,16 @@ impl SidecarGate {
         SidecarGate {
             gate: Gate::new(),
             sidecar: Mutex::new(None),
+            generation: std::sync::atomic::AtomicU64::new(0),
             pending: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// A fresh spawn id. Only the failure paths compare it, so `Relaxed` ordering is
+    /// enough: it orders nothing but itself.
+    fn next_generation(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Start following a cancellable call. Idempotent, and deliberately so: the call is
@@ -437,7 +511,7 @@ impl SidecarGate {
         };
 
         let hold_start = Instant::now();
-        let result = self.locked_io(app, &method, params);
+        let result = self.io(app, &method, params);
         let hold_ms = hold_start.elapsed().as_millis();
 
         // Release the channel BEFORE logging, so the log write never extends the hold
@@ -449,29 +523,59 @@ impl SidecarGate {
         result
     }
 
-    /// The critical section: the gate guarantees exactly one caller is here at a time,
-    /// so this is the only place the sidecar is touched. Spawns it lazily on first use,
-    /// and drops it after a transport error so the next call respawns — unchanged from
-    /// the original single-mutex path.
-    fn locked_io(
+    /// Send one request and wait for its answer. The write is done under the sidecar
+    /// mutex — brief, and it serialises the one shared resource, stdin — but the wait for
+    /// the response is not, so a foreground call and a background call genuinely overlap.
+    /// Spawns the sidecar lazily, and drops it after a transport error so the next call
+    /// respawns; on the wait's own failure it drops only the sidecar this call used, never
+    /// a fresh one a concurrent caller has since put in place.
+    fn io(
         &self,
         app: &AppHandle,
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let mut guard = self
-            .sidecar
-            .lock()
-            .map_err(|_| "sidecar lock poisoned".to_string())?;
-        if guard.is_none() {
-            *guard = Some(spawn_sidecar(app)?);
+        // Send, under the lock: spawn if needed, register the waiter, write the line.
+        let (generation, rx) = {
+            let mut guard = self
+                .sidecar
+                .lock()
+                .map_err(|_| "sidecar lock poisoned".to_string())?;
+            if guard.is_none() {
+                let generation = self.next_generation();
+                *guard = Some(spawn_sidecar(app, generation)?);
+            }
+            let sc = guard.as_mut().unwrap();
+            let generation = sc.generation;
+            match send_request(sc, method, params) {
+                Ok(rx) => (generation, rx),
+                Err(e) => {
+                    // The write failed, so this sidecar is suspect: drop it while the lock
+                    // is already held and let the next call spawn a fresh one.
+                    *guard = None;
+                    return Err(e);
+                }
+            }
+        };
+
+        // Wait, with no lock held, so the other lane's call is free to run alongside this.
+        let deadline = Instant::now() + deadline_for(method);
+        match recv_response(&rx, deadline, method) {
+            Ok(value) => Ok(value),
+            Err(e) => {
+                // A stuck or dead sidecar: drop it so the next call respawns, but only when
+                // it is still the one this call used. A slow timeout must not take out a
+                // healthy sidecar a concurrent caller spawned after a shared failure.
+                let mut guard = self
+                    .sidecar
+                    .lock()
+                    .map_err(|_| "sidecar lock poisoned".to_string())?;
+                if guard.as_ref().map(|s| s.generation) == Some(generation) {
+                    *guard = None;
+                }
+                Err(e)
+            }
         }
-        let result = do_io(guard.as_mut().unwrap(), method.to_string(), params);
-        if result.is_err() {
-            // Drop the (possibly dead) sidecar so the next call spawns a fresh one.
-            *guard = None;
-        }
-        result
     }
 }
 
@@ -508,6 +612,20 @@ fn packaged_command(app: &AppHandle) -> Result<Command, String> {
     // Tell the sidecar this is the packaged build, so it keeps library console
     // output out of the on-disk log (only our own scrubbed lines are persisted).
     command.env("SIDECAR_RELEASE", "1");
+    // The process that holds the unlocked session reads none of these from whatever
+    // environment the app was started in: each would let something else run code in
+    // it (`NODE_OPTIONS=--require`, a module path) or turn its TLS checks off. A
+    // corporate CA added through NODE_EXTRA_CA_CERTS still applies, as it only adds trust.
+    for var in [
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+        "NODE_REPL_EXTERNAL_MODULE",
+        "NODE_V8_COVERAGE",
+        "NODE_DEBUG",
+    ] {
+        command.env_remove(var);
+    }
     Ok(command)
 }
 
@@ -524,7 +642,11 @@ fn locate_packaged_sidecar(app: &AppHandle) -> Result<(std::path::PathBuf, std::
     // install folder's top level stays tidy: <install>\resources\sidecar.exe and
     // <install>\resources\sidecar\server.mjs.
     let res = exe_dir.join("resources");
-    let runtime = res.join(if cfg!(windows) { "sidecar.exe" } else { "sidecar" });
+    // The node runtime binary. On non-Windows it cannot be named `sidecar`, because
+    // `sidecar/` is the directory holding server.mjs and its node_modules right next to
+    // it, and a name is either a file or a directory. Windows sidesteps this with the
+    // `.exe` suffix, so it keeps `sidecar.exe` beside `sidecar/`.
+    let runtime = res.join(if cfg!(windows) { "sidecar.exe" } else { "sidecar-runtime" });
 
     let beside = res.join("sidecar").join("server.mjs");
     let script = if beside.exists() {
@@ -651,7 +773,13 @@ fn scrub(message: &str) -> String {
     let s = scrub_urls(&s);
     let s = scrub_emails(&s);
     let s = scrub_user(&s);
+    // Control characters, but for the newline and tab a stack trace is made of: a
+    // carriage return or an escape sequence in a message would otherwise forge a line
+    // of its own, or repaint the terminal someone reads the log in.
     scrub_runs(&s)
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' && c != '\t' { '?' } else { c })
+        .collect()
 }
 
 /// A PGP armor block, whatever it turns out to hold.
@@ -852,7 +980,7 @@ fn sidecar_log(app: &AppHandle) -> Stdio {
         .unwrap_or_else(|_| Stdio::null())
 }
 
-fn spawn_sidecar(app: &AppHandle) -> Result<Sidecar, String> {
+fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     let mut command = if cfg!(debug_assertions) {
         dev_command()
     } else {
@@ -884,25 +1012,46 @@ fn spawn_sidecar(app: &AppHandle) -> Result<Sidecar, String> {
     let stdin = child.stdin.take().ok_or("sidecar stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("sidecar stdout unavailable")?;
 
-    // One reader thread per sidecar, so a caller can wait for a response with a
-    // deadline instead of blocking on the pipe forever. The channel is bounded on
-    // purpose: with nobody reading, the sender blocks and the pipe fills up behind
-    // it, which is exactly the backpressure a chatty stdout met before, rather than
-    // this buffer growing without limit between calls.
-    let (tx, lines) = std::sync::mpsc::sync_channel::<String>(64);
+    // One reader thread per sidecar. It matches each response to its asker by id and
+    // hands it over through that asker's own one-slot channel, so several requests can be
+    // outstanding at once. A stray non-JSON line (an SDK/openpgp log that reached stdout)
+    // and an answer whose asker has gone both fall through and are dropped.
+    let router: Router = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let reader_router = std::sync::Arc::clone(&router);
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line) {
-                // A closed pipe or a read error means the process is gone. Returning
-                // drops the sender, which wakes a waiting caller with a disconnect
-                // instead of leaving it to sit out its whole deadline.
-                Ok(0) | Err(_) => return,
-                // Fails once the sidecar (and with it the receiver) has been dropped.
+                // A closed pipe or a read error means the process is gone. Dropping every
+                // registered sender wakes each waiting caller with a disconnect at once,
+                // rather than leaving them to sit out their whole deadlines.
+                Ok(0) | Err(_) => {
+                    reader_router.lock().unwrap().clear();
+                    return;
+                }
                 Ok(_) => {
-                    if tx.send(line).is_err() {
-                        return;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match serde_json::from_str::<serde_json::Value>(trimmed) {
+                        Ok(value) => {
+                            if let Some(id) = value.get("id").and_then(serde_json::Value::as_u64) {
+                                let waiter = reader_router.lock().unwrap().remove(&id);
+                                if let Some(tx) = waiter {
+                                    // A one-slot channel the asker still holds; a send only
+                                    // fails if it gave up first, which is fine — the answer
+                                    // is simply no longer wanted.
+                                    let _ = tx.send(value);
+                                }
+                                // No waiter: the asker timed out or its sidecar was
+                                // replaced. Drop the answer.
+                            }
+                            // An id-less JSON line answers no one; drop it too.
+                        }
+                        // Not JSON: a stray log line on stdout. Ignore it.
+                        Err(_) => {}
                     }
                 }
             }
@@ -912,14 +1061,17 @@ fn spawn_sidecar(app: &AppHandle) -> Result<Sidecar, String> {
     let mut sc = Sidecar {
         child,
         stdin,
-        lines,
         next_id: 1,
+        router,
+        generation,
     };
 
-    // Hand over the app directory before anything else, so the sidecar knows
-    // where to keep its (vault-encrypted) caches and session. Stdin only.
+    // Hand over the app directory before anything else, so the sidecar knows where to
+    // keep its (vault-encrypted) caches and session. This one round trip is synchronous:
+    // it runs before the sidecar is reachable by any other caller.
     let init = secure_store::sidecar_init_params(app)?;
-    do_io(&mut sc, "__init".to_string(), init)?;
+    let rx = send_request(&mut sc, "__init", init)?;
+    recv_response(&rx, Instant::now() + deadline_for("__init"), "__init")?;
     Ok(sc)
 }
 
@@ -935,7 +1087,7 @@ fn spawn_sidecar(app: &AppHandle) -> Result<Sidecar, String> {
 ///
 /// Both values sit far past anything a healthy call could reach, because being wrong
 /// costs wildly different amounts in the two directions. Too long only delays
-/// recovery from a hang that used to be permanent. Too short kills a working sidecar
+/// recovery from a hang, which without a deadline is permanent. Too short kills a working sidecar
 /// mid-transfer and takes the unlocked session down with it, which the user sees as
 /// being signed out at random.
 fn deadline_for(method: &str) -> Duration {
@@ -954,53 +1106,62 @@ fn deadline_for(method: &str) -> Duration {
     }
 }
 
-fn do_io(
+/// Register a waiter under a fresh id, write the request line, and hand back the receiver
+/// its response will arrive on. Only the write needs the sidecar — and so the sidecar
+/// mutex the caller holds for it — while the receiver is waited on with no lock, so two
+/// requests on the two lanes overlap. The waiter is registered BEFORE the write, so the
+/// answer can never race in ahead of it.
+fn send_request(
     sc: &mut Sidecar,
-    method: String,
+    method: &str,
     params: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<Receiver<serde_json::Value>, String> {
     let id = sc.next_id;
     sc.next_id += 1;
-    let req = serde_json::json!({ "id": id, "method": method, "params": params });
-    let mut line = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-    line.push('\n');
-    sc.stdin
-        .write_all(line.as_bytes())
-        .map_err(|e| format!("write to sidecar failed: {e}"))?;
-    sc.stdin
-        .flush()
-        .map_err(|e| format!("flush to sidecar failed: {e}"))?;
+    // A one-slot channel: exactly one response ever arrives for an id.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<serde_json::Value>(1);
+    sc.router.lock().unwrap().insert(id, tx);
 
-    // Requests are serialized; skip any stray non-JSON stdout (SDK/openpgp logs)
-    // until the JSON-RPC response line is reached. The deadline covers the whole
-    // answer rather than each line, so a stream of stray lines cannot keep extending
-    // it, which is the shape a stuck sidecar would take if it kept logging.
-    let deadline = Instant::now() + deadline_for(&method);
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let resp_line = match sc.lines.recv_timeout(left) {
-            Ok(line) => line,
-            // Silence past the deadline. A sidecar that is alive but stuck is
-            // indistinguishable from a dead one for everyone queued behind it, and
-            // the gate permit is held until this returns, so waiting forever wedges
-            // every later call as well. Failing here drops the sidecar exactly as a
-            // transport error does, which discards the desynchronised stream with it
-            // rather than resuming a half-read conversation.
-            Err(RecvTimeoutError::Timeout) => {
-                return Err(format!("sidecar did not answer {method} in time"));
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err("sidecar closed unexpectedly".to_string());
-            }
-        };
-        let trimmed = resp_line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let req = serde_json::json!({ "id": id, "method": method, "params": params });
+    let mut line = match serde_json::to_string(&req) {
+        Ok(line) => line,
+        Err(e) => {
+            sc.router.lock().unwrap().remove(&id);
+            return Err(e.to_string());
         }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            return Ok(v);
-        }
-        // Not JSON, a stray log line; keep reading for the real response.
+    };
+    line.push('\n');
+    if let Err(e) = sc.stdin.write_all(line.as_bytes()) {
+        // Nothing went out, so nothing will ever answer this id: take the waiter back out
+        // rather than leave it to be swept only when the sidecar dies.
+        sc.router.lock().unwrap().remove(&id);
+        return Err(format!("write to sidecar failed: {e}"));
+    }
+    if let Err(e) = sc.stdin.flush() {
+        sc.router.lock().unwrap().remove(&id);
+        return Err(format!("flush to sidecar failed: {e}"));
+    }
+    Ok(rx)
+}
+
+/// Wait for one request's response, up to its deadline. The reader matches on id and drops
+/// stray non-JSON stdout, so this is a single receive rather than a skip-until-JSON loop.
+///
+/// Silence past the deadline. A sidecar that is alive but stuck is indistinguishable from
+/// a dead one for everyone queued behind it, so failing here lets the caller drop it
+/// exactly as a transport error does, discarding the desynchronised stream rather than
+/// resuming a half-read conversation.
+fn recv_response(
+    rx: &Receiver<serde_json::Value>,
+    deadline: Instant,
+    method: &str,
+) -> Result<serde_json::Value, String> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    match rx.recv_timeout(left) {
+        Ok(value) => Ok(value),
+        Err(RecvTimeoutError::Timeout) => Err(format!("sidecar did not answer {method} in time")),
+        // The reader dropped the sender: the sidecar's stdout closed, so it is gone.
+        Err(RecvTimeoutError::Disconnected) => Err("sidecar closed unexpectedly".to_string()),
     }
 }
 
@@ -1058,6 +1219,27 @@ pub(crate) fn hydrate_to_temp(app: &AppHandle, uid: &str) -> Result<(std::path::
     Ok((std::path::PathBuf::from(path), size))
 }
 
+/// The sidecar methods only the host may call. Each one either takes a path or hands out
+/// something the host alone should hold: the init keys, a decrypted file on disk, the
+/// viewer's in-memory bytes, the drive's staged uploads (which the sidecar deletes when it
+/// is done with them). A renderer that has been taken over reaches the sidecar only
+/// through `rpc`, so this is the line that keeps it to what the interface itself uses.
+fn host_only(method: &str) -> bool {
+    method.starts_with("__")
+        || matches!(
+            method,
+            "hydrateFile"
+                | "startHydrate"
+                | "hydrateProgress"
+                | "cancelHydrate"
+                | "readOriginalBytes"
+                | "listForMount"
+                | "listAlbumsForMount"
+                | "listExtrasForMount"
+                | "startDropUpload"
+        )
+}
+
 #[tauri::command]
 async fn rpc(
     app: AppHandle,
@@ -1066,6 +1248,18 @@ async fn rpc(
     params: serde_json::Value,
     call_id: Option<CallId>,
 ) -> Result<serde_json::Value, String> {
+    if host_only(&method) {
+        return Err(format!("{method} is not available here"));
+    }
+    if method == "startSaveOriginals" && !save_folder_was_picked(&params) {
+        return Err("choose the folder to save to first".into());
+    }
+    // A lock or a sign-out closes the file-manager drive before the sidecar hears of it,
+    // so it answers nothing from a library the user has just locked away.
+    #[cfg(not(windows))]
+    if matches!(method.as_str(), "lock" | "signOut") {
+        files_drive::session_ended();
+    }
     let shared = state.inner().clone();
     // Registered here rather than inside the task below, so a cancel arriving while the
     // task is still waiting for a thread from the blocking pool already finds the call
@@ -1073,11 +1267,201 @@ async fn rpc(
     if let Some(id) = call_id {
         shared.track(id);
     }
-    tauri::async_runtime::spawn_blocking(move || {
+    #[cfg(not(windows))]
+    let called = method.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         rpc_blocking(&app, &shared, method, params, call_id)
     })
     .await
-    .map_err(|e| format!("sidecar task failed: {e}"))?
+    .map_err(|e| format!("sidecar task failed: {e}"))?;
+    #[cfg(not(windows))]
+    if result.as_ref().is_ok_and(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true)) {
+        match called.as_str() {
+            // The timeline loads right after every unlock: the drive can list again.
+            "getTimeline" => files_drive::session_started(),
+            "startUpload" | "confirmImport" => files_drive::upload_started(),
+            "trashPhotos" | "restorePhotos" | "deletePhotosForever" | "emptyTrash" | "renamePhoto"
+            | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
+            | "removePhotosFromAlbum" | "saveCloudEdit" => files_drive::library_changed(),
+            _ => {}
+        }
+    }
+    result
+}
+
+/// The folders the user picked to save originals into, this session.
+///
+/// A save writes decrypted photos under names their uploader chose, so where it writes
+/// has to be the user's choice and nobody else's. The folder is picked here, by the host,
+/// and `rpc` refuses a save naming any other: a renderer that has been taken over cannot
+/// aim one at a startup folder or anywhere else it would like files to appear.
+static SAVE_FOLDERS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The folder picker for a save. Async, because the dialog waits on the main thread that
+/// a synchronous command would be holding.
+#[tauri::command]
+async fn pick_save_folder(window: tauri::WebviewWindow) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        window.dialog().file().set_parent(&window).blocking_pick_folder()
+    })
+    .await
+    .ok()
+    .flatten()?;
+    let path = picked.into_path().ok()?.to_string_lossy().into_owned();
+    SAVE_FOLDERS.lock().unwrap().push(path.clone());
+    Some(path)
+}
+
+fn save_folder_was_picked(params: &serde_json::Value) -> bool {
+    let dir = params.get("destDir").and_then(|v| v.as_str()).unwrap_or_default();
+    !dir.is_empty() && SAVE_FOLDERS.lock().unwrap().iter().any(|p| p == dir)
+}
+
+/// Linux, the first time a close leaves the app running: say so once, since nothing on
+/// screen shows it any more, and give the background-apps list its line again.
+#[cfg(not(windows))]
+fn announce_background(app: &AppHandle) {
+    static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let first = !TOLD.swap(true, std::sync::atomic::Ordering::SeqCst);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let (title, body, status) = background_texts(&files_drive::app_language(&app));
+        autostart::declare_background(status);
+        if first {
+            files_drive::send_notification(title, body);
+        }
+    });
+}
+
+/// The notice a first close gives, and the background-apps status line, per language.
+#[cfg(not(windows))]
+fn background_texts(lang: &str) -> (&'static str, &'static str, &'static str) {
+    match lang {
+        "hu" => ("A Photos for Proton tovább fut", "A Proton Photos elérhető marad a Fájlokban. Az appot az alkalmazások közül nyithatod meg újra, kilépni a fiókmenüből vagy a Háttéralkalmazások közül tudsz.", "A Proton Photos elérhető a Fájlokban"),
+        "de" => ("Photos for Proton läuft weiter", "Proton Photos bleibt in Dateien erreichbar. Über die Anwendungen wieder öffnen; beenden über das Kontomenü oder die Hintergrund-Apps.", "Proton Photos ist in Dateien erreichbar"),
+        "es" => ("Photos for Proton sigue ejecutándose", "Proton Photos sigue disponible en Archivos. Vuelve a abrir la app desde tus aplicaciones; sal desde el menú de la cuenta o desde las aplicaciones en segundo plano.", "Proton Photos está disponible en Archivos"),
+        "fr" => ("Photos for Proton continue de tourner", "Proton Photos reste accessible dans Fichiers. Rouvrez l'app depuis vos applications ; quittez-la depuis le menu du compte ou les applications en arrière-plan.", "Proton Photos est accessible dans Fichiers"),
+        "it" => ("Photos for Proton resta attivo", "Proton Photos resta disponibile in File. Riapri l'app dalle applicazioni; esci dal menu dell'account o dalle app in background.", "Proton Photos è disponibile in File"),
+        "nl" => ("Photos for Proton blijft draaien", "Proton Photos blijft beschikbaar in Bestanden. Open de app opnieuw via je apps; afsluiten via het accountmenu of de achtergrondapps.", "Proton Photos is beschikbaar in Bestanden"),
+        "pl" => ("Photos for Proton działa dalej", "Proton Photos pozostaje dostępne w Plikach. Otwórz aplikację ponownie z listy aplikacji; zakończ ją z menu konta lub z aplikacji w tle.", "Proton Photos jest dostępne w Plikach"),
+        "cs" => ("Photos for Proton běží dál", "Proton Photos zůstává dostupné v Souborech. Aplikaci znovu otevřete ze seznamu aplikací; ukončíte ji v nabídce účtu nebo v aplikacích na pozadí.", "Proton Photos je dostupné v Souborech"),
+        "sk" => ("Photos for Proton beží ďalej", "Proton Photos zostáva dostupné v Súboroch. Aplikáciu znova otvoríte zo zoznamu aplikácií; ukončíte ju v ponuke účtu alebo v aplikáciách na pozadí.", "Proton Photos je dostupné v Súboroch"),
+        "sl" => ("Photos for Proton deluje naprej", "Proton Photos ostane na voljo v Datotekah. Aplikacijo znova odprete med aplikacijami; zaprete jo v meniju računa ali med aplikacijami v ozadju.", "Proton Photos je na voljo v Datotekah"),
+        _ => ("Photos for Proton keeps running", "Proton Photos stays available in Files. Open the app again from your apps; quit from its account menu or from Background Apps.", "Proton Photos is available in Files"),
+    }
+}
+
+/// Whether the user asked for the app to lock when its window is hidden (to the tray, or
+/// on Linux into the background), read from the same sealed settings the page keeps. Off
+/// when they cannot be read, as the page itself treats it.
+fn lock_on_hide(app: &AppHandle) -> bool {
+    page_setting(app, "lockOnHide").and_then(|b| b.as_bool()).unwrap_or(false)
+}
+
+/// One of the settings the page keeps sealed, for the host to act on; `None` when they
+/// cannot be read.
+pub(crate) fn page_setting(app: &AppHandle, key: &str) -> Option<serde_json::Value> {
+    secure_store::read_sealed(app, "settings.bin")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|v| v.get(key).cloned())
+}
+
+/// The Linux file-manager drive's state, for Settings. Windows has its own Explorer
+/// commands and never asks.
+#[tauri::command]
+fn files_drive_status(app: AppHandle) -> serde_json::Value {
+    #[cfg(not(windows))]
+    return serde_json::to_value(files_drive::status(&app)).unwrap_or_default();
+    #[cfg(windows)]
+    {
+        let _ = app;
+        serde_json::json!({ "enabled": false, "address": null })
+    }
+}
+
+/// Linux: whether closing the window leaves the app running. Windows always keeps
+/// running in the tray, so there it is simply true.
+#[tauri::command]
+fn keep_running() -> bool {
+    #[cfg(not(windows))]
+    return autostart::keep_running();
+    #[cfg(windows)]
+    true
+}
+
+/// Async: turning it on asks the desktop's portal, which may ask the user.
+#[tauri::command]
+async fn set_keep_running(enabled: bool) -> Result<(), String> {
+    #[cfg(not(windows))]
+    return tauri::async_runtime::spawn_blocking(move || autostart::set_keep_running(enabled))
+        .await
+        .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        let _ = enabled;
+        Ok(())
+    }
+}
+
+/// Where the drive listens: `localhost` or a 127.x address, and a port, or an empty one
+/// for any free port. Async, since moving it restarts the server.
+#[tauri::command]
+async fn set_files_drive_address(app: AppHandle, host: String, port: String) -> Result<serde_json::Value, String> {
+    #[cfg(not(windows))]
+    return tauri::async_runtime::spawn_blocking(move || {
+        files_drive::set_address(&app, &host, &port).map(|s| serde_json::to_value(s).unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        let _ = (app, host, port);
+        Err("not available".into())
+    }
+}
+
+/// Whether the drive's `Photos/` is split into year and month folders.
+#[tauri::command]
+fn set_files_drive_by_date(app: AppHandle, enabled: bool) -> serde_json::Value {
+    #[cfg(not(windows))]
+    return serde_json::to_value(files_drive::set_by_date(&app, enabled)).unwrap_or_default();
+    #[cfg(windows)]
+    {
+        let _ = (app, enabled);
+        serde_json::json!({ "enabled": false, "edits": false, "byDate": false, "address": null })
+    }
+}
+
+/// Whether deleting and renaming in the file manager reach the library.
+#[tauri::command]
+fn set_files_drive_edits(app: AppHandle, enabled: bool) -> serde_json::Value {
+    #[cfg(not(windows))]
+    return serde_json::to_value(files_drive::set_edits(&app, enabled)).unwrap_or_default();
+    #[cfg(windows)]
+    {
+        let _ = (app, enabled);
+        serde_json::json!({ "enabled": false, "edits": false, "address": null })
+    }
+}
+
+/// Turn the drive on or off; it applies at once. Async because turning it on asks the
+/// sidecar whether it is unlocked, which must not hold the main thread.
+#[tauri::command]
+async fn set_files_drive(app: AppHandle, enabled: bool) -> Result<serde_json::Value, String> {
+    #[cfg(not(windows))]
+    return tauri::async_runtime::spawn_blocking(move || {
+        serde_json::to_value(files_drive::set_enabled(&app, enabled)).unwrap_or_default()
+    })
+    .await
+    .map_err(|e| e.to_string());
+    #[cfg(windows)]
+    {
+        let _ = (app, enabled);
+        Ok(serde_json::json!({ "enabled": false, "address": null }))
+    }
 }
 
 /// Let go of a call the frontend no longer wants the answer to.
@@ -1227,6 +1611,11 @@ async fn open_captcha(
     let handle = app.clone();
     let builder = WebviewBuilder::new(CAPTCHA_LABEL, WebviewUrl::External(parsed))
         .initialization_script(CAPTCHA_BRIDGE)
+        // A remote page, so no window of its own: whatever it tries to pop up (a help
+        // link, or anything a compromised third-party script would open) goes nowhere.
+        // Its navigation is left free: the challenge loads its puzzle from hosts that are
+        // Proton's to choose, and a sign-in that cannot complete it is worse than the page.
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .on_navigation(move |target| {
             if target.host_str() != Some(CAPTCHA_SENTINEL_HOST) {
                 return true;
@@ -1401,9 +1790,14 @@ fn launch_at_login() -> bool {
 
 /// Set it. The one failure worth reporting is being unable to write the entry, since
 /// a switch that flips back on its own is worse than one that says why it did not.
+///
+/// Async: on Linux the answer comes from the desktop's portal, which may first ask the
+/// user, and the window must not freeze while it does.
 #[tauri::command]
-fn set_launch_at_login(enabled: bool) -> Result<(), String> {
-    autostart::set(enabled)
+async fn set_launch_at_login(enabled: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || autostart::set(enabled))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1437,12 +1831,11 @@ fn reveal_window(window: tauri::WebviewWindow) {
 
 /// Put a window on screen, with its renderer awake.
 ///
-/// The two halves belong together and used to be apart, which is how the app could end
-/// up as an empty transparent pane: the main window's renderer can be suspended while
-/// the window is hidden, and only ONE of the three paths that show it ever resumed.
-/// Any of the other two put a live frame on screen over a renderer that had been told
-/// it was invisible. Every show goes through here now, so the pairing cannot come
-/// apart again. Resuming something that was never suspended is a no-op.
+/// The two halves belong together. The main window's renderer can be suspended while
+/// the window is hidden, and a path that shows the window without resuming it puts a
+/// live frame on screen over a renderer that was told it is invisible, which leaves
+/// the app as an empty transparent pane. Every show goes through here, so the two
+/// cannot come apart. Resuming something that was never suspended is a no-op.
 fn show_main_or_viewer(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
     if window.label() == MAIN_WINDOW {
@@ -1540,11 +1933,17 @@ fn ensure_app_started(app: &AppHandle) {
         if let Err(e) = build_main_window(app) {
             note(app, &format!("[host] main window creation failed: {e}"));
         }
-        if let Err(e) = build_tray(app) {
-            note(app, &format!("[host] tray creation failed: {e}"));
-        }
-        if let Err(e) = build_tray_popup(app) {
-            note(app, &format!("[host] tray popup creation failed: {e}"));
+        // No dependable system tray on the Linux target: GNOME shows no legacy tray icon,
+        // so the app runs as a plain window there and its close is a real quit (below),
+        // rather than a hide to a tray that would not be there to bring it back.
+        #[cfg(windows)]
+        {
+            if let Err(e) = build_tray(app) {
+                note(app, &format!("[host] tray creation failed: {e}"));
+            }
+            if let Err(e) = build_tray_popup(app) {
+                note(app, &format!("[host] tray popup creation failed: {e}"));
+            }
         }
         start_background_services(app);
     });
@@ -1802,6 +2201,20 @@ fn restart_app(app: AppHandle) {
 /// registration and the sync engine connection are per-process, and connecting a second
 /// time would leave two.
 fn start_background_services(app: &AppHandle) {
+    // Linux: the file-manager drive, on the same terms (see files_drive.rs).
+    #[cfg(not(windows))]
+    files_drive::start(app);
+    // Linux: tell the desktop from the start, not only at the first close, that the app
+    // runs in the background, so it is listed among the background apps as soon as its
+    // window goes, and with a line saying why.
+    #[cfg(not(windows))]
+    if autostart::keep_running() {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let (_, _, status) = background_texts(&files_drive::app_language(&app));
+            autostart::declare_background(status);
+        });
+    }
     if cloud_mount::show_in_explorer_enabled() {
         cloud_mount::ensure_folder();
         cloud_mount::mount(app.clone());
@@ -1995,6 +2408,65 @@ fn open_default_apps() -> Result<(), String> {
     Err("choosing a default app is a Windows setting".into())
 }
 
+/// The start of every link a browser sign-in opens: Proton's own sign-in page.
+const SIGN_IN_PREFIX: &str = "https://account.proton.me/desktop/login?app=drive&pv=3#payload=";
+
+/// Whether `url` is a browser sign-in link and nothing else: Proton's page, with a
+/// payload of the characters URL encoding leaves, so the shell is handed no other
+/// address, scheme or argument whatever the renderer asks for.
+fn is_sign_in_url(url: &str) -> bool {
+    let Some(payload) = url.strip_prefix(SIGN_IN_PREFIX) else {
+        return false;
+    };
+    !payload.is_empty()
+        && payload.len() <= 512
+        && payload.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'%' | b'-' | b'_' | b'.'))
+}
+
+/// Opens Proton's sign-in page in the default browser, for a sign-in through it.
+#[tauri::command]
+fn open_sign_in_page(url: String) -> Result<(), String> {
+    if !is_sign_in_url(&url) {
+        return Err("not a Proton sign-in link".into());
+    }
+    #[cfg(windows)]
+    {
+        if shell_open(&url) {
+            return Ok(());
+        }
+        Err("could not open the browser".into())
+    }
+    #[cfg(not(windows))]
+    Err("not available on this system".into())
+}
+
+#[cfg(test)]
+mod sign_in_url_tests {
+    use super::is_sign_in_url;
+
+    #[test]
+    fn a_sign_in_link_is_accepted() {
+        assert!(is_sign_in_url(
+            "https://account.proton.me/desktop/login?app=drive&pv=3#payload=0%3AABCD1234%3Aa2V5%2Bx%2Fy%3D%3D%3Aexternal-drive"
+        ));
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        for url in [
+            "https://account.proton.me/desktop/login?app=drive&pv=3#payload=",
+            "https://evil.example/desktop/login?app=drive&pv=3#payload=0%3AA",
+            "https://account.proton.me.evil.example/desktop/login?app=drive&pv=3#payload=0",
+            "http://account.proton.me/desktop/login?app=drive&pv=3#payload=0",
+            "file:///C:/Windows/System32/calc.exe",
+            "https://account.proton.me/desktop/login?app=drive&pv=3#payload=0 /c calc",
+            "https://account.proton.me/desktop/login?app=drive&pv=3#payload=0\"&calc",
+        ] {
+            assert!(!is_sign_in_url(url), "{url}");
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod default_apps_tests {
     use super::*;
@@ -2066,7 +2538,7 @@ mod capability_tests {
             .as_array()
             .expect("no permissions array")
             .iter()
-            .map(|p| p.as_str().expect("a permission is not a string"))
+            .filter_map(|p| p.as_str())
             .collect();
         for permission in [
             "core:window:allow-close",
@@ -2076,6 +2548,27 @@ mod capability_tests {
             "core:window:allow-set-title",
         ] {
             assert!(granted.contains(&permission), "{permission} is not granted");
+        }
+    }
+
+    /// The renderer opens four fixed pages in the browser and nothing else, so that is
+    /// all it may open: `opener:default` would let a renderer that has been taken over
+    /// open any web address, or reveal any path, on the user's desktop.
+    #[test]
+    fn the_browser_can_be_sent_only_to_the_apps_own_pages() {
+        let cap = capability();
+        let permissions = cap["permissions"].as_array().expect("no permissions array");
+        assert!(
+            !permissions.iter().any(|p| p.as_str().is_some_and(|s| s.starts_with("opener:"))),
+            "an unscoped opener permission is granted"
+        );
+        let scoped = permissions
+            .iter()
+            .find(|p| p["identifier"] == "opener:allow-open-url")
+            .expect("the scoped opener permission is missing");
+        for entry in scoped["allow"].as_array().expect("no allow list") {
+            let url = entry["url"].as_str().expect("an entry without a url");
+            assert!(url.starts_with("https://") && !url.contains('*'), "{url} is not one fixed page");
         }
     }
 }
@@ -2153,6 +2646,7 @@ pub fn run() {
             cloud_mount::free_up_selected,
             cloud_mount::free_up_all,
             cloud_mount::hydrated_uids,
+            cloud_mount::reveal_photo,
             cloud_mount::local_usage,
             cloud_mount::show_in_explorer,
             cloud_mount::set_show_in_explorer,
@@ -2166,15 +2660,26 @@ pub fn run() {
             file_association_enabled,
             set_file_association,
             open_default_apps,
+            open_sign_in_page,
             local_file::take_pending_open,
             local_file::local_file_info,
             local_file::local_file_url,
             local_file::decode_preview,
             local_file::rename_local_file,
             local_file::delete_local_file,
+            photo_edit::local_editor_source,
+            photo_edit::save_local_edit,
             local_folder::list_media_folder,
             local_folder::local_thumbnails,
-            upload_frame::upload_frames
+            upload_frame::upload_frames,
+            files_drive_status,
+            set_files_drive,
+            set_files_drive_edits,
+            set_files_drive_by_date,
+            set_files_drive_address,
+            keep_running,
+            set_keep_running,
+            pick_save_folder
         ])
         .setup(|app| {
             // The file a cold launch was asked to open. The single-instance callback
@@ -2195,11 +2700,13 @@ pub fn run() {
             autostart::refresh();
 
             // Our own temp leftovers, swept unconditionally: orphaned plaintext
-            // hydration files must not linger, and this used to hang off the mount,
-            // so opting out of Explorer meant they were never cleaned at all. A viewer
+            // hydration files must not linger, and tied to the mount they would never
+            // be cleaned for anyone who opts out of Explorer. A viewer
             // launch sweeps too, because the folder emptied here is the one its own
             // decoded previews are staged in.
             cloud_mount::reap_temp_leftovers();
+            #[cfg(not(windows))]
+            files_drive::reap(app.handle());
             // A launch that exists only to show a file stops here, with one window on
             // screen and nothing else built. What `ensure_app_started` holds is the app
             // starting up, and none of it is on the path from a double-click to a
@@ -2249,11 +2756,48 @@ pub fn run() {
                 // for real is the tray's own Quit. Suspending the now-hidden WebView2
                 // stops it holding its renderer memory while nothing is on screen.
                 MAIN_WINDOW => {
-                    let _ = window.hide();
-                    api.prevent_close();
-                    let _ = app.emit("window-hidden", ());
+                    // Windows closes to the tray and keeps running; the Linux build has no
+                    // tray, so closing the main window quits rather than leaving the app
+                    // running invisibly with no icon to reopen it.
                     #[cfg(windows)]
-                    webview_power::suspend(app);
+                    {
+                        let _ = window.hide();
+                        api.prevent_close();
+                        // Locked from here rather than left to the page: the page is
+                        // suspended a moment later and would not act on the event until
+                        // it is woken, which left the session open behind the tray.
+                        if lock_on_hide(app) {
+                            let locking = app.clone();
+                            std::thread::spawn(move || {
+                                let _ = sidecar_rpc(&locking, "lock", serde_json::json!({}));
+                            });
+                        }
+                        let _ = app.emit("window-hidden", ());
+                        webview_power::suspend(app);
+                    }
+                    // Linux, when asked to keep running (the default): the window only
+                    // hides, and the app goes on serving the file-manager drive. It
+                    // comes back when the app is started again, and quits from its
+                    // account menu or the desktop's list of background apps.
+                    #[cfg(not(windows))]
+                    {
+                        if autostart::keep_running() {
+                            let _ = window.hide();
+                            api.prevent_close();
+                            if lock_on_hide(app) {
+                                files_drive::session_ended();
+                                let locking = app.clone();
+                                std::thread::spawn(move || {
+                                    let _ = sidecar_rpc(&locking, "lock", serde_json::json!({}));
+                                });
+                            }
+                            announce_background(app);
+                            let _ = app.emit("window-hidden", ());
+                        } else {
+                            let _ = (window, api);
+                            app.exit(0);
+                        }
+                    }
                 }
                 // The popup dismisses itself on click-outside and is shown again from
                 // the tray, so it is hidden rather than destroyed: there would be
@@ -2308,24 +2852,25 @@ mod gate_tests {
         }
     }
 
-    // (a) Highest priority first, and FIFO within one priority.
+    // (a) Highest priority first, and FIFO within one priority — shown on the foreground
+    // lane. The background lane runs the identical code, and (b) proves the two are
+    // independent, so one lane's ordering stands for both.
     #[test]
     fn admits_by_priority_then_fifo() {
         with_watchdog(10, || {
             let gate = Arc::new(Gate::new());
-            // Hold the gate with a low-priority caller so every waiter below must queue.
-            let holder = gate.acquire(Priority::Background);
+            // Hold the FOREGROUND lane so every foreground waiter below must queue.
+            let holder = gate.acquire(Priority::UserAction);
 
             let order = Arc::new(Mutex::new(Vec::<u32>::new()));
             // Queue callers ONE AT A TIME (waiting until each is in the heap before
             // launching the next), so arrival order — and thus the FIFO tiebreak — is
-            // deterministic: ids 1,2 Background; 3,5 Interactive; 4 UserAction.
+            // deterministic. All foreground: ids 1,2 UserAction; 3,4 Interactive.
             let plan = [
-                (1u32, Priority::Background),
-                (2, Priority::Background),
+                (1u32, Priority::UserAction),
+                (2, Priority::UserAction),
                 (3, Priority::Interactive),
-                (4, Priority::UserAction),
-                (5, Priority::Interactive),
+                (4, Priority::Interactive),
             ];
             let mut threads = Vec::new();
             for (id, prio) in plan {
@@ -2340,53 +2885,76 @@ mod gate_tests {
                 wait_until_queued(&gate, already + 1);
             }
 
-            // Everyone is queued behind the holder; releasing lets the gate drain by
+            // Everyone is queued behind the holder; releasing lets the lane drain by
             // priority, then FIFO within a priority.
             drop(holder);
             for t in threads {
                 t.join().unwrap();
             }
 
-            // Interactive first (3 before 5), then UserAction (4), then Background
-            // (1 before 2).
-            assert_eq!(*order.lock().unwrap(), vec![3, 5, 4, 1, 2]);
+            // Interactive first (3 before 4), then UserAction (1 before 2).
+            assert_eq!(*order.lock().unwrap(), vec![3, 4, 1, 2]);
         });
     }
 
-    // (b)+(c) Mutual exclusion under many concurrent, mixed-priority callers, and the
-    // whole thing terminates.
+    // (b) The two lanes are independent: a background call runs while a foreground one is
+    // held, and a foreground call runs while a background one is held. Either acquire
+    // would hang here — and trip the watchdog — if the gate serialised the two.
     #[test]
-    fn never_admits_two_at_once() {
+    fn the_two_lanes_run_independently() {
+        with_watchdog(10, || {
+            let gate = Gate::new();
+            let fg = gate.acquire(Priority::Interactive);
+            let bg = gate.acquire(Priority::Background);
+            drop(bg);
+            drop(fg);
+            // And the other way round.
+            let bg = gate.acquire(Priority::Background);
+            drop(gate.acquire(Priority::Interactive));
+            drop(bg);
+        });
+    }
+
+    // (c)+(d) Mutual exclusion holds WITHIN each lane under many concurrent, mixed-priority
+    // callers; at most two run at once (one per lane); and the whole thing terminates.
+    #[test]
+    fn never_admits_two_on_one_lane() {
         with_watchdog(20, || {
             let gate = Arc::new(Gate::new());
-            let inside = Arc::new(AtomicUsize::new(0));
-            let overlaps = Arc::new(AtomicUsize::new(0));
-            let peak = Arc::new(AtomicUsize::new(0));
+            let fg_inside = Arc::new(AtomicUsize::new(0));
+            let bg_inside = Arc::new(AtomicUsize::new(0));
+            let lane_overlaps = Arc::new(AtomicUsize::new(0));
+            let peak_total = Arc::new(AtomicUsize::new(0));
 
             let mut threads = Vec::new();
             for t in 0..16u32 {
                 let gate_t = Arc::clone(&gate);
-                let inside_t = Arc::clone(&inside);
-                let overlaps_t = Arc::clone(&overlaps);
-                let peak_t = Arc::clone(&peak);
+                let fg_t = Arc::clone(&fg_inside);
+                let bg_t = Arc::clone(&bg_inside);
+                let overlaps_t = Arc::clone(&lane_overlaps);
+                let peak_t = Arc::clone(&peak_total);
                 threads.push(thread::spawn(move || {
-                    // Rotate through the priorities so the heap really reorders callers.
+                    // Rotate through the priorities so both lanes and the heap are worked.
                     let prio = match t % 3 {
                         0 => Priority::Background,
                         1 => Priority::UserAction,
                         _ => Priority::Interactive,
                     };
+                    let background = super::is_background(prio);
                     for _ in 0..250 {
                         let permit = gate_t.acquire(prio);
-                        // A shared counter that must never exceed 1 while the gate holds.
-                        let now = inside_t.fetch_add(1, Ordering::SeqCst) + 1;
+                        let lane = if background { &bg_t } else { &fg_t };
+                        // A per-lane counter that must never exceed 1 while the lane holds.
+                        let now = lane.fetch_add(1, Ordering::SeqCst) + 1;
                         if now > 1 {
                             overlaps_t.fetch_add(1, Ordering::SeqCst);
                         }
-                        peak_t.fetch_max(now, Ordering::SeqCst);
+                        // Across both lanes, at most two hold at once (one per lane).
+                        let total = fg_t.load(Ordering::SeqCst) + bg_t.load(Ordering::SeqCst);
+                        peak_t.fetch_max(total, Ordering::SeqCst);
                         // A brief, real critical section widens any overlap window.
                         thread::yield_now();
-                        inside_t.fetch_sub(1, Ordering::SeqCst);
+                        lane.fetch_sub(1, Ordering::SeqCst);
                         drop(permit);
                     }
                 }));
@@ -2396,14 +2964,13 @@ mod gate_tests {
             }
 
             assert_eq!(
-                overlaps.load(Ordering::SeqCst),
+                lane_overlaps.load(Ordering::SeqCst),
                 0,
-                "two RPCs were admitted at once"
+                "two RPCs were admitted on one lane at once"
             );
-            assert_eq!(
-                peak.load(Ordering::SeqCst),
-                1,
-                "more than one caller held the gate simultaneously"
+            assert!(
+                peak_total.load(Ordering::SeqCst) <= 2,
+                "more than two callers held the gate simultaneously"
             );
         });
     }

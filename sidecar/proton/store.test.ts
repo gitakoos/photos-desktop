@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -30,6 +30,7 @@ import {
   OriginalSealer,
   SESSION_FILE,
   clearDataKey,
+  decryptOriginalTo,
   setDataKey,
   seal,
   unseal,
@@ -90,7 +91,7 @@ describe("store seal/unseal (AES-256-GCM)", () => {
 
 // Sign-out and a vault-key change both go through wipeCache. Both caches are
 // sealed with the account's key, so neither may outlive the account: leaving the
-// search-index metadata behind used to strand the previous account's file names
+// search-index metadata behind would strand the previous account's file names
 // on disk.
 describe("wipeCache", () => {
   it("removes the search metadata as well as the thumbnails", () => {
@@ -133,8 +134,8 @@ describe("wipeCache", () => {
 
 // Both small sealed files are rewritten in place during ordinary use: the session on
 // every token refresh, the pin list on every pin. A bare write truncates before it
-// writes, so a crash mid-write leaves a blob that never opens again. That used to brick
-// the unlock, since the only route out of it signed the account out and took every
+// writes, so a crash mid-write leaves a blob that never opens again. That would brick
+// the unlock, since the only route out of it signs the account out and takes every
 // offline photo with it.
 describe("sealed files: writing and recovering", () => {
   let dir: string;
@@ -243,6 +244,24 @@ describe("stored originals", () => {
     setDataKey(randomBytes(32));
     dir = mkdtempSync(join(tmpdir(), "pfp-orig-test-"));
     initStore(dir);
+  });
+
+  it("fails, rather than hanging or crashing, when the staged copy cannot be written", async () => {
+    // Large enough that the write stream asks for a pause. Before, a failed write never
+    // sent the 'drain' that pause waited for, so the open hung for good, and the stream's
+    // unheard 'error' ended the whole process.
+    await storeOriginal("uid-big", randomBytes(4 * 1024 * 1024));
+    const folder = mkdtempSync(join(tmpdir(), "pfp-not-a-file-"));
+
+    const outcome = await Promise.race([
+      decryptOriginalTo("uid-big", folder).then(
+        () => "written",
+        () => "failed",
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("hung"), 10_000)),
+    ]);
+
+    expect(outcome).toBe("failed");
   });
 
   it("round-trips a photo through the streaming sealer", async () => {

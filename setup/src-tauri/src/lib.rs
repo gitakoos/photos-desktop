@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -62,7 +62,7 @@ use file_assoc::{APP_EXE, APP_NAME, LEGACY_APP_EXE, PACK_ID};
 #[path = "../../../app/src-tauri/src/autostart.rs"]
 pub mod autostart;
 
-const VERSION: &str = "0.2.0-beta.1";
+const VERSION: &str = "1.0.0";
 const PUBLISHER: &str = "Akoos";
 const DATA_DIR_NAME: &str = "eu.akoos.photos.desktop"; // where the app keeps its vault/caches
 

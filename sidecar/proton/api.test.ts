@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -24,7 +24,33 @@ import { describe, it, expect, afterAll, beforeAll } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { makeSdkHttpClient } from "./api.ts";
+import { isApiUrl, makeSdkHttpClient, userAgentFor } from "./api.ts";
+
+describe("isApiUrl", () => {
+  it("takes the API origin, any path on it", () => {
+    expect(isApiUrl("https://drive-api.proton.me/drive/v2/volumes")).toBe(true);
+    expect(isApiUrl("https://drive-api.proton.me")).toBe(true);
+  });
+
+  it("refuses a host that only starts with the API's name", () => {
+    expect(isApiUrl("https://drive-api.proton.me.example.com/x")).toBe(false);
+    expect(isApiUrl("https://drive-api.proton.me@example.com/x")).toBe(false);
+    expect(isApiUrl("https://drive-api.proton.me:8443/x")).toBe(false);
+    expect(isApiUrl("http://drive-api.proton.me/x")).toBe(false);
+    expect(isApiUrl("not a url")).toBe(false);
+  });
+});
+
+describe("userAgentFor", () => {
+  it("keeps the Windows string byte for byte", () => {
+    expect(userAgentFor("win32")).toBe("AkoosProtonPhotos/2.3.10 (Windows 11; Desktop)");
+  });
+
+  it("names the system the app runs on everywhere else", () => {
+    expect(userAgentFor("linux")).toBe("AkoosProtonPhotos/2.3.10 (Linux; Desktop)");
+    expect(userAgentFor("darwin")).toBe("AkoosProtonPhotos/2.3.10 (macOS; Desktop)");
+  });
+});
 
 // A local server standing in for the connection that never answers: the laptop that
 // resumed from sleep, the captive portal that swallowed the request. Nothing here

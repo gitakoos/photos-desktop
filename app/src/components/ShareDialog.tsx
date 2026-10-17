@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -36,6 +36,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { rpc } from "../lib/rpc";
 import { useT, type TFunc } from "../lib/i18n";
+import { locale } from "../lib/format";
 import { Confirm } from "./Confirm";
 import { CloseIcon, PersonAddIcon } from "./icons";
 import "../styles/Confirm.css";
@@ -89,7 +90,7 @@ const fromDateField = (value: string): number => {
 };
 
 const showDate = (ms: number): string =>
-  new Date(ms).toLocaleDateString(navigator.language || "en", {
+  new Date(ms).toLocaleDateString(locale, {
     year: "numeric",
     month: "short",
     day: "numeric",

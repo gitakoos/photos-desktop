@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -25,6 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { rpc } from "../lib/rpc";
 import { useT } from "../lib/i18n";
+import { isWindows } from "../lib/platform";
 import { CloseIcon } from "./icons";
 import "../styles/UpdateBanner.css";
 
@@ -38,7 +39,7 @@ type Info = { tag: string; version: string; notes: string; size: number };
  * then a final release beats a prerelease of the same numbers, then the prerelease
  * label lexically ("0.1.0" > "0.1.0-beta" > "0.1.0-alpha").
  */
-function isNewer(latest: string, current: string): boolean {
+export function isNewer(latest: string, current: string): boolean {
   const parse = (v: string) => {
     const [core, pre = ""] = v.split("-", 2);
     return { nums: core.split(".").map((n) => parseInt(n, 10) || 0), pre };
@@ -65,6 +66,9 @@ export function UpdateBanner() {
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
+    // The Linux (Flatpak) build is updated through Flatpak, so it never checks for or
+    // offers an in-app update: the self-updater downloads a Windows installer.
+    if (!isWindows) return;
     // A short delay so the check does not compete with the startup session restore.
     const id = setTimeout(async () => {
       try {

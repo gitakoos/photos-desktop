@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -519,7 +519,10 @@ mod tests {
         entries.into_iter().map(|e| e.name).collect()
     }
 
+    // The shell's order and the placeholder check are Windows' own; elsewhere the
+    // folder viewer does not exist and these would test the stand-ins.
     #[test]
+    #[cfg(windows)]
     fn a_run_of_digits_sorts_as_a_number() {
         // The whole reason for asking the shell: plain text order puts IMG_10 before
         // IMG_9, and a filmstrip in that order does not match the folder behind it.
@@ -570,6 +573,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn only_media_files_are_listed_and_the_order_is_the_shells() {
         let dir = std::env::temp_dir().join(format!("pfp-folder-test-{}", local_file::staged_name()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -622,6 +626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn an_ordinary_file_is_not_treated_as_a_placeholder() {
         let dir = std::env::temp_dir().join(format!("pfp-folder-test-{}", local_file::staged_name()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
-const REPO = "PhotosforProton/photos-desktop";
+const REPO = "gitakoos/photos-desktop";
 const UA = { "User-Agent": "PhotosForProton-Updater" };
 
 export type UpdateInfo = {

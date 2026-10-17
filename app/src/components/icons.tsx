@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -38,42 +38,60 @@
 
 type Props = { size?: number };
 
-/** Icons.Filled.Info */
+/** A circled i, outlined. */
 export function InfoIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10s10 -4.48 10 -10S17.52 2 12 2ZM13 17h-2v-6h2v6ZM13 9h-2L11 7h2v2Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 16v-4" />
+      <path d="M12 8h0.01" />
     </svg>
   );
 }
 
-/** Icons.Filled.DeleteOutline — the shape Android uses for every destructive action. */
+/** The lidded bin, the outline the sidebar's trash draws, for every destructive action. */
 export function TrashIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M6 19c0 1.1 0.9 2 2 2h8c1.1 0 2 -0.9 2 -2L18 7L6 7v12ZM8 9h8v10L8 19L8 9ZM15.5 4l-1 -1h-5l-1 1L5 4v2h14L19 4Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1 -2 2H7a2 2 0 0 1 -2 -2V6m3 0V4a2 2 0 0 1 2 -2h4a2 2 0 0 1 2 2v2" />
+      <path d="M10 11v6M14 11v6" />
     </svg>
   );
 }
 
-/** Icons.Filled.Edit — the thing it sits next to is editable. */
+/** A pencil outline — the thing it sits next to is editable. */
 export function PencilIcon({ size = 15 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M3 17.25V21h3.75L17.81 9.94l-3.75 -3.75L3 17.25ZM20.71 7.04c0.39 -0.39 0.39 -1.02 0 -1.41l-2.34 -2.34c-0.39 -0.39 -1.02 -0.39 -1.41 0l-1.83 1.83l3.75 3.75l1.83 -1.83Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5 -5.5L17 3z" />
+      <path d="M15 5l4 4" />
     </svg>
   );
 }
 
-/** Favorite mark: Icons.Filled.FavoriteBorder when off, Icons.Filled.Favorite once the tag is set. */
+/** Favorite mark: a stroked heart when off, a solid one once the tag is set. The solid
+    is what the grid cell badges too, so that stays filled while the toggle outlines. */
 export function HeartIcon({ size = 17, filled = false }: Props & { filled?: boolean }) {
+  if (filled) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M12 21.35l-1.45 -1.32C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3c1.74 0 3.41 0.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5c0 3.78 -3.4 6.86 -8.55 11.54L12 21.35Z" />
+      </svg>
+    );
+  }
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M19 14c1.49 -1.46 3 -3.21 3 -5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0 -3 0.5 -4.5 2 -1.5 -1.5 -2.74 -2 -4.5 -2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" />
+    </svg>
+  );
+}
+
+/** Icons.AutoMirrored.Filled.OpenInNew — the row it sits on opens in the browser. */
+export function OpenInNewIcon({ size = 15 }: Props) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      {filled ? (
-        <path d="M12 21.35l-1.45 -1.32C5.4 15.36 2 12.28 2 8.5C2 5.42 4.42 3 7.5 3c1.74 0 3.41 0.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3C19.58 3 22 5.42 22 8.5c0 3.78 -3.4 6.86 -8.55 11.54L12 21.35Z" />
-      ) : (
-        <path d="M16.5 3c-1.74 0 -3.41 0.81 -4.5 2.09C10.91 3.81 9.24 3 7.5 3C4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45 -1.32C18.6 15.36 22 12.28 22 8.5C22 5.42 19.58 3 16.5 3ZM12.1 18.55l-0.1 0.1l-0.1 -0.1C7.14 14.24 4 11.39 4 8.5C4 6.5 5.5 5 7.5 5c1.54 0 3.04 0.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5c0 2.89 -3.14 5.74 -7.9 10.05Z" />
-      )}
+      <path d="M19 19H5V5h7V3H5c-1.11 0 -2 0.9 -2 2v14c0 1.1 0.89 2 2 2h14c1.1 0 2 -0.9 2 -2v-7h-2v7ZM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7Z" />
     </svg>
   );
 }
@@ -87,11 +105,30 @@ export function CloseIcon({ size = 16 }: Props) {
   );
 }
 
-/** Icons.Filled.ViewList: everything the viewer can open, as a list. */
+/** A list, outlined: everything the viewer can open, as a list. */
 export function ListIcon({ size = 17 }: Props) {
   return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M8 6h13M8 12h13M8 18h13" />
+      <path d="M3 6h0.01M3 12h0.01M3 18h0.01" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.PhotoLibrary — the Albums destination. */
+export function CollectionsIcon({ size = 17 }: Props) {
+  return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M4 6h4v4H4V6ZM4 12h4v4H4v-4ZM4 18h4v3H4v-3ZM10 6h10v4H10V6ZM10 12h10v4H10v-4ZM10 18h10v3H10v-3Z" />
+      <path d="M22 16V4c0 -1.1 -0.9 -2 -2 -2H8c-1.1 0 -2 0.9 -2 2v12c0 1.1 0.9 2 2 2h12c1.1 0 2 -0.9 2 -2ZM11 12l2.03 2.71L16 11l4 5H8l3 -4ZM2 6v14c0 1.1 0.9 2 2 2h14v-2H4V6H2Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.Menu — collapses and expands the sidebar. */
+export function MenuIcon({ size = 18 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M3 18h18v-2H3v2ZM3 13h18v-2H3v2ZM3 6v2h18V6H3Z" />
     </svg>
   );
 }
@@ -105,38 +142,103 @@ export function ChevronLeftIcon({ size = 16 }: Props) {
   );
 }
 
-/** Icons.Filled.Settings */
+/** A double chevron, the collapse control on the sidebar head. Points left to fold the
+    rail away; the sidebar rotates it 180° when collapsed so it points back out. */
+export function ChevronsLeftIcon({ size = 16 }: Props) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M11 7l-5 5l5 5" />
+      <path d="M18 7l-5 5l5 5" />
+    </svg>
+  );
+}
+
+/** A three-quarter ring, spun by CSS to mark background work (indexing, syncing). */
+export function SpinnerIcon({ size = 16 }: Props) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.4}
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M12 3a9 9 0 1 0 9 9" />
+    </svg>
+  );
+}
+
+/** A pushpin, filled once an album is pinned to the top of the sidebar list. */
+export function PinIcon({ size = 14, filled = false }: { size?: number; filled?: boolean }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1 -1.11 1.79l-1.78 0.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1 -1v-0.76a2 2 0 0 0 -1.11 -1.79l-1.78 -0.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1 -1a2 2 0 0 0 0 -4H8a2 2 0 0 0 0 4a1 1 0 0 1 1 1z" />
+    </svg>
+  );
+}
+
+/** A gear, outlined. */
 export function GearIcon({ size = 14 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M19.14 12.94c0.04 -0.3 0.06 -0.61 0.06 -0.94c0 -0.32 -0.02 -0.64 -0.07 -0.94l2.03 -1.58c0.18 -0.14 0.23 -0.41 0.12 -0.61l-1.92 -3.32c-0.12 -0.22 -0.37 -0.29 -0.59 -0.22l-2.39 0.96c-0.5 -0.38 -1.03 -0.7 -1.62 -0.94L14.4 2.81c-0.04 -0.24 -0.24 -0.41 -0.48 -0.41h-3.84c-0.24 0 -0.43 0.17 -0.47 0.41L9.25 5.35C8.66 5.59 8.12 5.92 7.63 6.29L5.24 5.33c-0.22 -0.08 -0.47 0 -0.59 0.22L2.74 8.87C2.62 9.08 2.66 9.34 2.86 9.48l2.03 1.58C4.84 11.36 4.8 11.69 4.8 12s0.02 0.64 0.07 0.94l-2.03 1.58c-0.18 0.14 -0.23 0.41 -0.12 0.61l1.92 3.32c0.12 0.22 0.37 0.29 0.59 0.22l2.39 -0.96c0.5 0.38 1.03 0.7 1.62 0.94l0.36 2.54c0.05 0.24 0.24 0.41 0.48 0.41h3.84c0.24 0 0.44 -0.17 0.47 -0.41l0.36 -2.54c0.59 -0.24 1.13 -0.56 1.62 -0.94l2.39 0.96c0.22 0.08 0.47 0 0.59 -0.22l1.92 -3.32c0.12 -0.22 0.07 -0.47 -0.12 -0.61L19.14 12.94ZM12 15.6c-1.98 0 -3.6 -1.62 -3.6 -3.6s1.62 -3.6 3.6 -3.6s3.6 1.62 3.6 3.6S13.98 15.6 12 15.6Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12.22 2h-0.44a2 2 0 0 0 -2 2v0.18a2 2 0 0 1 -1 1.73l-0.43 0.25a2 2 0 0 1 -2 0l-0.15 -0.08a2 2 0 0 0 -2.73 0.73l-0.22 0.38a2 2 0 0 0 0.73 2.73l0.15 0.1a2 2 0 0 1 1 1.72v0.51a2 2 0 0 1 -1 1.74l-0.15 0.09a2 2 0 0 0 -0.73 2.73l0.22 0.38a2 2 0 0 0 2.73 0.73l0.15 -0.08a2 2 0 0 1 2 0l0.43 0.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h0.44a2 2 0 0 0 2 -2v-0.18a2 2 0 0 1 1 -1.73l0.43 -0.25a2 2 0 0 1 2 0l0.15 0.08a2 2 0 0 0 2.73 -0.73l0.22 -0.39a2 2 0 0 0 -0.73 -2.73l-0.15 -0.08a2 2 0 0 1 -1 -1.74v-0.5a2 2 0 0 1 1 -1.74l0.15 -0.09a2 2 0 0 0 0.73 -2.73l-0.22 -0.38a2 2 0 0 0 -2.73 -0.73l-0.15 0.08a2 2 0 0 1 -2 0l-0.43 -0.25a2 2 0 0 1 -1 -1.73V4a2 2 0 0 0 -2 -2z" />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   );
 }
 
-/** Icons.AutoMirrored.Filled.ExitToApp */
+/** Leaving: a door with an arrow out, outlined. */
 export function SignOutIcon({ size = 15 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M10.09 15.59L11.5 17l5 -5l-5 -5l-1.41 1.41L12.67 11H3v2h9.67l-2.58 2.59ZM19 3H5c-1.11 0 -2 0.9 -2 2v4h2V5h14v14H5v-4H3v4c0 1.1 0.89 2 2 2h14c1.1 0 2 -0.9 2 -2V5c0 -1.1 -0.9 -2 -2 -2Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M9 21H5a2 2 0 0 1 -2 -2V5a2 2 0 0 1 2 -2h4" />
+      <path d="M16 17l5 -5 -5 -5" />
+      <path d="M21 12H9" />
     </svg>
   );
 }
 
-/** Icons.AutoMirrored.Filled.OpenInNew — "open the main window". */
+/** External-link, outlined: "open the main window". */
 export function OpenWindowIcon({ size = 16 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M19 19H5V5h7V3H5c-1.11 0 -2 0.9 -2 2v14c0 1.1 0.89 2 2 2h14c1.1 0 2 -0.9 2 -2v-7h-2v7ZM14 3v2h3.59l-9.83 9.83l1.41 1.41L19 6.41V10h2V3h-7Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M15 3h6v6" />
+      <path d="M10 14L21 3" />
+      <path d="M18 13v6a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2V8a2 2 0 0 1 2 -2h6" />
     </svg>
   );
 }
 
-/** Icons.Filled.Lock — the account is locked until the password is re-entered. */
+/** A padlock, outlined: the account is locked until the password is re-entered. */
 export function LockIcon({ size = 16 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M18 8h-1V6c0 -2.76 -2.24 -5 -5 -5S7 3.24 7 6v2H6c-1.1 0 -2 0.9 -2 2v10c0 1.1 0.9 2 2 2h12c1.1 0 2 -0.9 2 -2V10c0 -1.1 -0.9 -2 -2 -2zm-6 9c-1.1 0 -2 -0.9 -2 -2s0.9 -2 2 -2s2 0.9 2 2s-0.9 2 -2 2zm3.1 -9H8.9V6c0 -1.71 1.39 -3.1 3.1 -3.1c1.71 0 3.1 1.39 3.1 3.1v2z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+      <path d="M7 11V7a5 5 0 0 1 10 0v4" />
     </svg>
   );
 }
@@ -147,35 +249,57 @@ export function LockIcon({ size = 16 }: Props) {
  */
 export function PowerIcon({ size = 16 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M13 3h-2v10h2L13 3ZM17.83 5.17l-1.42 1.42C17.99 7.86 19 9.81 19 12c0 3.87 -3.13 7 -7 7s-7 -3.13 -7 -7c0 -2.19 1.01 -4.14 2.58 -5.42L6.17 5.17C4.23 6.82 3 9.26 3 12c0 4.97 4.03 9 9 9s9 -4.03 9 -9c0 -2.74 -1.23 -5.18 -3.17 -6.83Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 2v10" />
+      <path d="M18.4 6.6a9 9 0 1 1 -12.77 0.04" />
     </svg>
   );
 }
 
-/** Icons.Filled.CloudUpload — the one upload mark, wherever uploading is offered. */
+/** An open folder, outlined: where a photo's copy on this computer is shown. */
+export function FolderOpenIcon({ size = 15 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M5 19l2.757 -7.351a1 1 0 0 1 .936 -.649h12.307a1 1 0 0 1 .986 1.164l-.996 5.211a2 2 0 0 1 -1.964 1.625h-14.026a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v2" />
+    </svg>
+  );
+}
+
+/** The one upload mark, outlined: an arrow rising out of a tray, the download's mirror. */
 export function UploadArrowIcon({ size = 15 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5 -2.24 5 -5c0 -2.64 -2.05 -4.78 -4.65 -4.96ZM14 13v4h-4v-4H7l5 -5l5 5h-3Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M21 15v4a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2v-4" />
+      <path d="M17 8l-5 -5 -5 5" />
+      <path d="M12 3v12" />
     </svg>
   );
 }
 
-/** Icons.Filled.FileDownload — the download mark Android uses for the same action. */
+/** The download mark, outlined: an arrow dropping into a tray. */
 export function DownloadIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M19 9h-4V3H9v6H5l7 7l7 -7ZM5 18v2h14v-2H5Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M21 15v4a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2v-4" />
+      <path d="M7 10l5 5 5 -5" />
+      <path d="M12 15V3" />
     </svg>
   );
 }
 
-/** Icons.Filled.Cloud — the photo lives in Drive. Green says it is on this device too. */
-export function CloudIcon({ size = 17 }: Props) {
+/** A cloud — the photo lives in Drive. Solid as a grid-cell badge, outlined as a
+    menu or toolbar action, so it sits with whichever set surrounds it. */
+export function CloudIcon({ size = 17, filled = false }: Props & { filled?: boolean }) {
+  if (filled) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5 -2.24 5 -5c0 -2.64 -2.05 -4.78 -4.65 -4.96Z" />
+      </svg>
+    );
+  }
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4C9.11 4 6.6 5.64 5.35 8.04C2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5 -2.24 5 -5c0 -2.64 -2.05 -4.78 -4.65 -4.96Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M17.5 19H9a7 7 0 1 1 6.71 -9h1.79a4.5 4.5 0 1 1 0 9Z" />
     </svg>
   );
 }
@@ -185,10 +309,18 @@ export function CloudIcon({ size = 17 }: Props) {
  * Deliberately not the cloud: that one marks the File Explorer copy, and the two are
  * different places a photo can be kept.
  */
-export function OfflinePinIcon({ size = 17 }: Props) {
+export function OfflinePinIcon({ size = 17, filled = false }: Props & { filled?: boolean }) {
+  if (filled) {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+        <path d="M12 2C6.48 2 2 6.48 2 12S6.48 22 12 22S22 17.52 22 12S17.52 2 12 2ZM17 18H7v-2h10v2ZM10.3 14L7 10.7L8.41 9.29L10.3 11.18L15.6 5.88L17 7.3L10.3 14Z" />
+      </svg>
+    );
+  }
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12 2C6.48 2 2 6.48 2 12S6.48 22 12 22S22 17.52 22 12S17.52 2 12 2ZM17 18H7v-2h10v2ZM10.3 14L7 10.7L8.41 9.29L10.3 11.18L15.6 5.88L17 7.3L10.3 14Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9 12l2 2 4 -4" />
     </svg>
   );
 }
@@ -203,26 +335,32 @@ export function OfflinePinIcon({ size = 17 }: Props) {
  */
 export function ImageIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M21 19V5c0 -1.1 -0.9 -2 -2 -2H5c-1.1 0 -2 0.9 -2 2v14c0 1.1 0.9 2 2 2h14c1.1 0 2 -0.9 2 -2ZM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5 -4.5Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="M21 15l-3.09 -3.09a2 2 0 0 0 -2.82 0L6 21" />
     </svg>
   );
 }
 
-/** Icons.Filled.DeleteSweep — give the device copy back, keeping the photo in Drive. */
+/** An eraser: give the device copy back, keeping the photo in Drive. */
 export function SweepIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M15 16h4v2h-4v-2Zm0 -8h7v2h-7V8Zm0 4h6v2h-6v-2ZM3 18c0 1.1 0.9 2 2 2h6c1.1 0 2 -0.9 2 -2V8H3v10ZM14 5h-3l-1 -1H6L5 5H2v2h12V5Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M7 21l-4.3 -4.3c-1 -1 -1 -2.5 0 -3.4l9.6 -9.6c1 -1 2.5 -1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21" />
+      <path d="M22 21H7" />
+      <path d="M5 11l9 9" />
     </svg>
   );
 }
 
-/** Icons.Filled.DeleteForever */
+/** The bin with an X: deleting for good, told apart from the plain trash. */
 export function DeleteForeverIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M6 19c0 1.1 0.9 2 2 2h8c1.1 0 2 -0.9 2 -2V7H6v12Zm2.46 -7.12l1.41 -1.41L12 12.59l2.12 -2.12l1.41 1.41L13.41 14l2.12 2.12l-1.41 1.41L12 15.41l-2.12 2.12l-1.41 -1.41L10.59 14l-2.13 -2.12ZM15.5 4l-1 -1h-5l-1 1H5v2h14V4h-3.5Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1 -2 2H7a2 2 0 0 1 -2 -2V6m3 0V4a2 2 0 0 1 2 -2h4a2 2 0 0 1 2 2v2" />
+      <path d="M10 11l4 6M14 11l-4 6" />
     </svg>
   );
 }
@@ -245,11 +383,12 @@ export function CheckIcon({ size = 12 }: Props) {
   );
 }
 
-/** Icons.Filled.Search */
+/** A magnifier, outlined. */
 export function SearchIcon({ size = 16 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M15.5 14h-0.79l-0.28 -0.27C15.41 12.59 16 11.11 16 9.5C16 5.91 13.09 3 9.5 3S3 5.91 3 9.5S5.91 16 9.5 16c1.61 0 3.09 -0.59 4.23 -1.57l0.27 0.28v0.79l5 4.99L20.49 19l-4.99 -5ZM9.5 14C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5S14 7.01 14 9.5S11.99 14 9.5 14Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="11" cy="11" r="8" />
+      <path d="M21 21l-4.3 -4.3" />
     </svg>
   );
 }
@@ -307,29 +446,33 @@ export function RawIcon({ size = 11 }: Props) {
   );
 }
 
-/** Icons.Filled.FilterList */
+/** A funnel, outlined. */
 export function FilterIcon({ size = 14 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M10 18h4v-2h-4v2ZM3 6v2h18L21 6L3 6ZM6 13h12v-2L6 11v2Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z" />
     </svg>
   );
 }
 
-/** Icons.Filled.Refresh */
+/** A clockwise arrow loop, outlined: refresh, and the restore-from-trash action. */
 export function RefreshIcon({ size = 16 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0 -7.99 3.58 -7.99 8s3.57 8 7.99 8c3.73 0 6.84 -2.55 7.73 -6h-2.08c-0.82 2.33 -3.04 4 -5.65 4c-3.31 0 -6 -2.69 -6 -6s2.69 -6 6 -6c1.66 0 3.14 0.69 4.22 1.78L13 11h7V4l-2.35 2.35Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M21 12a9 9 0 1 1 -3 -6.7L21 8" />
+      <path d="M21 3v5h-5" />
     </svg>
   );
 }
 
-/** Icons.Filled.Share */
+/** The three-node share mark, outlined. */
 export function ShareIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M18 16.08c-0.76 0 -1.44 0.3 -1.96 0.77L8.91 12.7c0.05 -0.23 0.09 -0.46 0.09 -0.7s-0.04 -0.47 -0.09 -0.7l7.05 -4.11c0.54 0.5 1.25 0.81 2.04 0.81c1.66 0 3 -1.34 3 -3s-1.34 -3 -3 -3s-3 1.34 -3 3c0 0.24 0.04 0.47 0.09 0.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0 -3 1.34 -3 3s1.34 3 3 3c0.79 0 1.5 -0.31 2.04 -0.81l7.12 4.16c-0.05 0.21 -0.08 0.43 -0.08 0.65c0 1.61 1.31 2.92 2.92 2.92s2.92 -1.31 2.92 -2.92s-1.31 -2.92 -2.92 -2.92Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="18" cy="5" r="3" />
+      <circle cx="6" cy="12" r="3" />
+      <circle cx="18" cy="19" r="3" />
+      <path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98" />
     </svg>
   );
 }
@@ -341,53 +484,123 @@ export function ShareIcon({ size = 17 }: Props) {
  */
 export function LibraryAddIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M4 6H2v14c0 1.1 0.9 2 2 2h14v-2H4V6Zm16 -4H8c-1.1 0 -2 0.9 -2 2v12c0 1.1 0.9 2 2 2h12c1.1 0 2 -0.9 2 -2V4c0 -1.1 -0.9 -2 -2 -2Zm-1 9h-4v4h-2v-4H9V9h4V5h2v4h4v2Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+      <path d="M4 16c-1.1 0 -2 -0.9 -2 -2V4c0 -1.1 0.9 -2 2 -2h10c1.1 0 2 0.9 2 2" />
+      <path d="M15 12v6M12 15h6" />
     </svg>
   );
 }
 
-/** Icons.Filled.LibraryRemove — the same shape as LibraryAdd, taking away. */
+/** The same stacked-frames mark as LibraryAdd, taking away. */
 export function LibraryRemoveIcon({ size = 17 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M4 6H2v14c0 1.1 0.9 2 2 2h14v-2H4V6Zm16 -4H8c-1.1 0 -2 0.9 -2 2v12c0 1.1 0.9 2 2 2h12c1.1 0 2 -0.9 2 -2V4c0 -1.1 -0.9 -2 -2 -2Zm-1 9H9V9h10v2Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+      <path d="M4 16c-1.1 0 -2 -0.9 -2 -2V4c0 -1.1 0.9 -2 2 -2h10c1.1 0 2 0.9 2 2" />
+      <path d="M12 15h6" />
     </svg>
   );
 }
 
-/** Icons.AutoMirrored.Filled.CallReceived — sharing that points at you. */
+/** An arrow pointing down at you, outlined: sharing that points at you. */
 export function CallReceivedIcon({ size = 14 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M20 5.41L18.59 4L7 15.59V9H5v10h10v-2H8.41Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M17 7L7 17" />
+      <path d="M17 17H7V7" />
     </svg>
   );
 }
 
-/** Icons.AutoMirrored.Filled.CallMade — sharing that points away from you. */
+/** An arrow pointing up and away, outlined: sharing that points away from you. */
 export function CallMadeIcon({ size = 14 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M9 5v2h6.59L4 18.59L5.41 20L17 8.41V15h2V5Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M7 17L17 7" />
+      <path d="M7 7h10v10" />
     </svg>
   );
 }
 
-/** Icons.Filled.SwapHoriz — the mark on a pill that turns round when clicked. */
+/** Two arrows swapping, outlined: the mark on a pill that turns round when clicked. */
 export function SwapHorizIcon({ size = 14 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M6.99 11L3 15l3.99 4v-3H14v-2H6.99v-3ZM21 9l-3.99 -4v3H10v2h7.01v3L21 9Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M8 3L4 7l4 4" />
+      <path d="M4 7h16" />
+      <path d="M16 21l4 -4 -4 -4" />
+      <path d="M20 17H4" />
     </svg>
   );
 }
 
-/** Icons.Filled.PersonAdd */
+/** A person with a plus, outlined. */
 export function PersonAddIcon({ size = 16 }: Props) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M15 12c2.21 0 4 -1.79 4 -4s-1.79 -4 -4 -4s-4 1.79 -4 4s1.79 4 4 4ZM6 10V7H4v3H1v2h3v3h2v-3h3v-2H6ZM15 14c-2.67 0 -8 1.34 -8 4v2h16v-2c0 -2.66 -5.33 -4 -8 -4Z" />
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M16 21v-2a4 4 0 0 0 -4 -4H6a4 4 0 0 0 -4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M19 8v6M22 11h-6" />
+    </svg>
+  );
+}
+
+/*
+ * The left navigation's own marks. Unlike the filled Material set above, these are drawn
+ * as light, even outlines on the same 24x24 grid, so the sidebar rail reads the way the
+ * Proton Drive desktop one does rather than as a row of solid glyphs. They live only in
+ * the navigation; every badge and menu keeps the filled shape it shares with Android.
+ */
+
+/** The timeline. */
+export function NavPhotosIcon({ size = 20 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="3" width="18" height="18" rx="3.2" />
+      <circle cx="8.5" cy="8.5" r="1.6" />
+      <path d="M21 15l-5 -5L5 21" />
+    </svg>
+  );
+}
+
+/** Albums: a photo card with another behind it. */
+export function NavAlbumsIcon({ size = 20 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="8" width="13" height="13" rx="2.6" />
+      <path d="M7 8V6a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-2" />
+      <path d="M3.6 17.4l3 -2.5 2.5 2 3.4 -3" />
+    </svg>
+  );
+}
+
+/** Shared: the link mark Proton Drive uses for shared links. */
+export function NavSharedIcon({ size = 20 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M10 13a5 5 0 0 0 7.54 0.54l3 -3a5 5 0 0 0 -7.07 -7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0 -7.54 -0.54l-3 3a5 5 0 0 0 7.07 7.07l1.71 -1.71" />
+    </svg>
+  );
+}
+
+/** Trash: the lidded bin Proton Drive uses, two marks on the body. */
+export function NavTrashIcon({ size = 20 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1 -2 2H7a2 2 0 0 1 -2 -2V6m3 0V4a2 2 0 0 1 2 -2h4a2 2 0 0 1 2 2v2" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+/** A plain plus, for the "new" affordances in the sidebar. */
+export function PlusIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 5v14M5 12h14" />
     </svg>
   );
 }
@@ -433,6 +646,94 @@ export function VolumeOffIcon({ size = 17 }: Props) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
       <path d="M16.5 12c0 -1.77 -1.02 -3.29 -2.5 -4.03v2.21l2.45 2.45c0.03 -0.2 0.05 -0.41 0.05 -0.63ZM19 12c0 0.94 -0.2 1.82 -0.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0 -4.28 -2.99 -7.86 -7 -8.77v2.06c2.89 0.86 5 3.54 5 6.71ZM4.27 3L3 4.27L7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-0.67 0.52 -1.42 0.93 -2.25 1.18v2.06c1.38 -0.31 2.63 -0.95 3.69 -1.81L19.73 21L21 19.73L12 10.73L4.27 3ZM12 4L9.91 6.09L12 8.18V4Z" />
+    </svg>
+  );
+}
+
+/*
+ * The photo editor's tool marks, each the Material symbol the Android editor draws for
+ * the same tool, on the same 24x24 viewport as the rest of the set.
+ */
+
+/** Icons.Filled.Tune: the adjustment sliders. */
+export function TuneIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M3 17v2h6v-2H3ZM3 5v2h10V5H3Zm10 16v-2h8v-2h-8v-2h-2v6h2ZM7 9v2H3v2h4v2h2V9H7Zm14 4v-2H11v2h10Zm-6 -4h2V7h4V5h-4V3h-2v6Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.Palette: the filter presets. */
+export function PaletteIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 2C6.49 2 2 6.49 2 12s4.49 10 10 10c1.38 0 2.5 -1.12 2.5 -2.5c0 -0.61 -0.23 -1.2 -0.64 -1.67c-0.08 -0.1 -0.13 -0.21 -0.13 -0.33c0 -0.28 0.22 -0.5 0.5 -0.5H16c3.31 0 6 -2.69 6 -6c0 -4.96 -4.49 -9 -10 -9Zm5.5 11c-0.83 0 -1.5 -0.67 -1.5 -1.5s0.67 -1.5 1.5 -1.5s1.5 0.67 1.5 1.5s-0.67 1.5 -1.5 1.5Zm-3 -4c-0.83 0 -1.5 -0.67 -1.5 -1.5S13.67 6 14.5 6s1.5 0.67 1.5 1.5S15.33 9 14.5 9ZM5 11.5C5 10.67 5.67 10 6.5 10s1.5 0.67 1.5 1.5S7.33 13 6.5 13S5 12.33 5 11.5Zm6 -4C11 8.33 10.33 9 9.5 9S8 8.33 8 7.5S8.67 6 9.5 6s1.5 0.67 1.5 1.5Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.Crop: the crop tool. */
+export function CropIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M7 17V1H5v4H1v2h4v10c0 1.1 0.9 2 2 2h10v4h2v-4h4v-2H7V17ZM17 15h2V7c0 -1.1 -0.9 -2 -2 -2H9v2h8v8Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.Brush: the redaction strokes. */
+export function BrushIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M7 14c-1.66 0 -3 1.34 -3 3c0 1.31 -1.16 2 -2 2c0.92 1.22 2.49 2 4 2c2.21 0 4 -1.79 4 -4c0 -1.66 -1.34 -3 -3 -3Zm13.71 -9.37l-1.34 -1.34c-0.39 -0.39 -1.02 -0.39 -1.41 0L9 12.25L11.75 15l8.96 -8.96c0.39 -0.39 0.39 -1.02 0 -1.41Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.RotateRight: turn the image a quarter clockwise. */
+export function RotateRightIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M15.55 5.55L11 1v3.07C7.06 4.56 4 7.92 4 12s3.05 7.44 7 7.93v-2.02c-2.84 -0.48 -5 -2.94 -5 -5.91s2.16 -5.43 5 -5.91V10l4.55 -4.45ZM19.93 11c-0.17 -1.39 -0.72 -2.73 -1.62 -3.89l-1.42 1.42c0.54 0.75 0.88 1.6 1.02 2.47h2.02ZM13 17.9v2.02c1.39 -0.17 2.74 -0.71 3.9 -1.61l-1.44 -1.44c-0.75 0.54 -1.59 0.89 -2.46 1.03Zm3.89 -2.42l1.42 1.41c0.9 -1.16 1.45 -2.5 1.62 -3.89h-2.02c-0.14 0.87 -0.48 1.72 -1.02 2.48Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.Flip: mirror the image across a vertical axis. */
+export function FlipHorizontalIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M15 21h2v-2h-2v2Zm4 -12h2V7h-2v2ZM3 5v14c0 1.1 0.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0 -2 0.9 -2 2Zm16 -2v2h2c0 -1.1 -0.9 -2 -2 -2Zm-8 20h2V1h-2v22Zm8 -6h2v-2h-2v2ZM15 5h2V3h-2v2Zm4 8h2v-2h-2v2Zm0 8c1.1 0 2 -0.9 2 -2h-2v2Z" />
+    </svg>
+  );
+}
+
+/** The vertical-axis flip, drawn as the same mark turned a quarter so its mirror line lies flat. */
+export function FlipVerticalIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <g transform="rotate(90 12 12)">
+        <path d="M15 21h2v-2h-2v2Zm4 -12h2V7h-2v2ZM3 5v14c0 1.1 0.9 2 2 2h4v-2H5V5h4V3H5c-1.1 0 -2 0.9 -2 2Zm16 -2v2h2c0 -1.1 -0.9 -2 -2 -2Zm-8 20h2V1h-2v22Zm8 -6h2v-2h-2v2ZM15 5h2V3h-2v2Zm4 8h2v-2h-2v2Zm0 8c1.1 0 2 -0.9 2 -2h-2v2Z" />
+      </g>
+    </svg>
+  );
+}
+
+/** Icons.AutoMirrored.Filled.Undo */
+export function UndoIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12.5 8c-2.65 0 -5.05 0.99 -6.9 2.6L2 7v9h9l-3.62 -3.62c1.39 -1.16 3.16 -1.88 5.12 -1.88c3.54 0 6.55 2.31 7.6 5.5l2.37 -0.78C21.08 11.03 17.15 8 12.5 8Z" />
+    </svg>
+  );
+}
+
+/** Icons.AutoMirrored.Filled.Redo */
+export function RedoIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M18.4 10.6C16.55 8.99 14.15 8 11.5 8c-4.65 0 -8.58 3.03 -9.96 7.22L3.9 16c1.05 -3.19 4.05 -5.5 7.6 -5.5c1.95 0 3.73 0.72 5.12 1.88L13 16h9V7l-3.6 3.6Z" />
     </svg>
   );
 }

@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -44,8 +44,8 @@ describe("rpc response framing", () => {
     expect(JSON.parse(lines[0])).toEqual({ id: 7, ok: true, result: { pinned: [] } });
   });
 
-  // The latent one: a throw inside the write used to land in the unhandled-rejection
-  // handler and be logged, with no line ever produced.
+  // A throw inside the write must still produce a line, not only a log entry from the
+  // unhandled-rejection handler.
   it("still answers when the payload cannot be serialised", () => {
     const { lines, write } = channel();
     const circular: Record<string, unknown> = { id: 12, ok: true };

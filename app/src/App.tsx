@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -33,14 +33,28 @@ import { applyTheme, type ThemeMode } from "./lib/theme";
 import { useT } from "./lib/i18n";
 import "./styles/App.css";
 
-type Phase = "credentials" | "twofa" | "captcha";
+type Phase = "credentials" | "twofa" | "captcha" | "browser" | "protect";
 type MenuState = { x: number; y: number } | null;
 type LoginResult =
   | { status: "ok"; email: string }
   | { status: "2fa" }
   | { status: "hv"; url: string }
+  | { status: "protect"; email: string }
+  | { status: "relogin" }
   | { status: "error"; error: string };
-type LockStatus = { hasVault: boolean; unlocked: boolean; email: string | null };
+type BrowserStatus = LoginResult | { status: "waiting" } | { status: "cancelled" };
+type LockStatus = {
+  hasVault: boolean;
+  unlocked: boolean;
+  email: string | null;
+  mode: "password" | "device" | null;
+  protect: boolean;
+};
+
+/** How often the app asks whether the sign-in in the browser has finished. */
+const BROWSER_POLL_MS = 1500;
+/** As the sidecar requires of a password of the user's own. */
+const MIN_APP_PASSWORD = 8;
 
 function App() {
   const t = useT();
@@ -57,6 +71,12 @@ function App() {
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState>(null);
   const [hvUrl, setHvUrl] = useState<string | null>(null);
+  const [passwordForm, setPasswordForm] = useState(false);
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [protection, setProtection] = useState<"password" | "device">("password");
+  const [appPassword, setAppPassword] = useState("");
+  const [appPassword2, setAppPassword2] = useState("");
   const captchaBoxRef = useRef<HTMLDivElement>(null);
   // The tray listeners register once on mount, so they read the live email
   // through this ref instead of a stale closure captured at registration.
@@ -99,8 +119,16 @@ function App() {
         // Otherwise ask the sidecar what it holds. A saved-but-locked account
         // (cold start) always needs the password before the session is readable.
         const s = await rpc<LockStatus>("lockStatus");
-        if (s.unlocked && s.email) {
+        if (s.protect) {
+          // A browser sign-in finished before a reload, and still waits for its choice.
+          setPhase("protect");
+        } else if (s.unlocked && s.email) {
           setEmail(s.email);
+        } else if (s.unlocked) {
+          // The vault is open but its session lapsed: a sign-in again, into the same vault.
+        } else if (s.hasVault && s.mode === "device") {
+          // Nothing to ask: this Windows account opens the vault.
+          await applyResult(await rpc<LoginResult>("unlockDevice"));
         } else if (s.hasVault) {
           setLocked({ email: s.email });
         }
@@ -135,6 +163,11 @@ function App() {
     } else if (r.status === "hv") {
       setHvUrl(r.url);
       setPhase("captcha");
+    } else if (r.status === "protect") {
+      setPhase("protect");
+    } else if (r.status === "relogin") {
+      setPhase("credentials");
+      setStatus(t("login.sessionEnded"));
     } else {
       setStatus(r.error);
     }
@@ -227,6 +260,107 @@ function App() {
     };
   }, [phase, hvUrl]);
 
+  /** Opens Proton's sign-in page in the browser and waits for it here. */
+  async function onBrowserSignIn(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setStatus("");
+    try {
+      const { url } = await rpc<{ url: string }>("startBrowserLogin");
+      setBrowserUrl(url);
+      setCopied(false);
+      setPhase("browser");
+      await invoke("open_sign_in_page", { url }).catch(() => setStatus(t("login.browserNotOpened")));
+    } catch (err) {
+      setStatus(String(err));
+    }
+    setBusy(false);
+  }
+
+  async function cancelBrowserSignIn() {
+    await rpc("cancelBrowserLogin").catch(() => {});
+    setBrowserUrl(null);
+    setPhase("credentials");
+  }
+
+  // While the browser sign-in is open: ask now and then whether Proton has answered.
+  useEffect(() => {
+    if (phase !== "browser") return;
+    let stopped = false;
+    let timer = 0;
+    const ask = async () => {
+      let r: BrowserStatus;
+      try {
+        r = await rpc<BrowserStatus>("browserLoginStatus");
+      } catch (err) {
+        r = { status: "error", error: String(err) };
+      }
+      if (stopped) return;
+      if (r.status === "waiting") {
+        timer = window.setTimeout(ask, BROWSER_POLL_MS);
+        return;
+      }
+      setBrowserUrl(null);
+      if (r.status === "cancelled") {
+        setPhase("credentials");
+      } else if (r.status === "error") {
+        setPhase("credentials");
+        setStatus(r.error === "timeout" ? t("login.browserTimeout") : r.error);
+      } else {
+        await applyResult(r);
+      }
+    };
+    timer = window.setTimeout(ask, BROWSER_POLL_MS);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [phase]);
+
+  async function copySignInLink() {
+    if (!browserUrl) return;
+    try {
+      await navigator.clipboard.writeText(browserUrl);
+      setCopied(true);
+    } catch {
+      /* the link stays on offer through the button */
+    }
+  }
+
+  /** Seals the browser sign-in the way the user picked. */
+  async function onProtect(e: FormEvent) {
+    e.preventDefault();
+    setStatus("");
+    if (protection === "password") {
+      if (appPassword.length < MIN_APP_PASSWORD) {
+        setStatus(t("protect.tooShort", { n: MIN_APP_PASSWORD }));
+        return;
+      }
+      if (appPassword !== appPassword2) {
+        setStatus(t("protect.mismatch"));
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      const r = await rpc<LoginResult>("protectSession", {
+        password: protection === "password" ? appPassword : null,
+      });
+      if (r.status === "ok") {
+        setAppPassword("");
+        setAppPassword2("");
+      }
+      if (r.status === "error" && r.error === "too short") {
+        setStatus(t("protect.tooShort", { n: MIN_APP_PASSWORD }));
+      } else {
+        await applyResult(r);
+      }
+    } catch (err) {
+      setStatus(String(err));
+    }
+    setBusy(false);
+  }
+
   async function onSignIn(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
@@ -245,6 +379,7 @@ function App() {
     setEmail(null);
     setLocked(null);
     setPhase("credentials");
+    setPasswordForm(false);
     setUsername("");
     setPassword("");
     setCode("");
@@ -279,6 +414,9 @@ function App() {
           /* leave it unlocked if the setting cannot be read */
         }
         if (!lockOnHide) return;
+        // A vault this Windows account opens has no password to lock behind.
+        const vault = await rpc<LockStatus>("lockStatus").catch(() => null);
+        if (vault?.mode === "device") return;
         await rpc("lock").catch(() => {});
         // Remember the email so the lock screen can greet the same account.
         setLocked({ email: current });
@@ -354,6 +492,22 @@ function App() {
             <p className="login-sub">{t("login.subtitle")}</p>
 
             {phase === "credentials" && (
+              <form className="login-form" onSubmit={onBrowserSignIn}>
+                <button type="submit" disabled={busy}>
+                  {t("login.withBrowser")}
+                </button>
+                <p className="login-hint">{t("login.withBrowserHint")}</p>
+                {!passwordForm && (
+                  <button type="button" className="link" onClick={() => setPasswordForm(true)}>
+                    {t("login.withPassword")}
+                  </button>
+                )}
+              </form>
+            )}
+
+            {phase === "credentials" && passwordForm && <div className="login-or">{t("login.or")}</div>}
+
+            {phase === "credentials" && passwordForm && (
               <form className="login-form" onSubmit={onSignIn}>
                 <label>
                   <span>{t("login.emailLabel")}</span>
@@ -379,6 +533,77 @@ function App() {
                 </label>
                 <button type="submit" disabled={busy}>
                   {busy ? t("login.signingIn") : t("login.signIn")}
+                </button>
+              </form>
+            )}
+
+            {phase === "browser" && (
+              <div className="login-form">
+                <p className="login-hint">{t("login.browserWaiting")}</p>
+                <button type="button" className="login-secondary" onClick={() => browserUrl && void invoke("open_sign_in_page", { url: browserUrl }).catch(() => {})}>
+                  {t("login.browserOpenAgain")}
+                </button>
+                <button type="button" className="login-secondary" onClick={() => void copySignInLink()}>
+                  {copied ? t("login.browserCopied") : t("login.browserCopy")}
+                </button>
+                <button type="button" className="link" onClick={() => void cancelBrowserSignIn()}>
+                  {t("common.cancel")}
+                </button>
+              </div>
+            )}
+
+            {phase === "protect" && (
+              <form className="login-form" onSubmit={onProtect}>
+                <p className="login-hint">{t("protect.intro")}</p>
+                <label className="login-choice">
+                  <input
+                    type="radio"
+                    name="protection"
+                    checked={protection === "password"}
+                    onChange={() => setProtection("password")}
+                  />
+                  <span>
+                    <strong>{t("protect.password")}</strong>
+                    <small>{t("protect.passwordDesc")}</small>
+                  </span>
+                </label>
+                {protection === "password" && (
+                  <>
+                    <label>
+                      <span>{t("protect.newPassword")}</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        autoFocus
+                        value={appPassword}
+                        onChange={(e) => setAppPassword(e.currentTarget.value)}
+                      />
+                    </label>
+                    <label>
+                      <span>{t("protect.repeatPassword")}</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={appPassword2}
+                        onChange={(e) => setAppPassword2(e.currentTarget.value)}
+                      />
+                    </label>
+                  </>
+                )}
+                <label className="login-choice">
+                  <input
+                    type="radio"
+                    name="protection"
+                    checked={protection === "device"}
+                    onChange={() => setProtection("device")}
+                  />
+                  <span>
+                    <strong>{t("protect.device")}</strong>
+                    <small>{t("protect.deviceDesc")}</small>
+                  </span>
+                </label>
+                <button type="submit" disabled={busy}>
+                  {t("protect.continue")}
                 </button>
               </form>
             )}
@@ -426,6 +651,7 @@ function App() {
             )}
 
             {status && <p className="login-status">{status}</p>}
+            {phase === "credentials" && <p className="login-note">{t("login.unofficial")}</p>}
           </div>
         </div>
       )}

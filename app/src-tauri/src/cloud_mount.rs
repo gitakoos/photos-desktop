@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -383,9 +383,22 @@ fn sanitize_name(name: &str) -> String {
     let trimmed = cleaned.trim().trim_matches('.').trim().to_string();
     if trimmed.is_empty() {
         "photo".to_string()
+    } else if is_reserved_device_name(&trimmed) {
+        // `NUL.jpg` or `COM1` names a device, not a file, in any Windows folder.
+        format!("_{trimmed}")
     } else {
         trimmed
     }
+}
+
+/// CON, PRN, AUX, NUL, COM1-9 and LPT1-9, with or without an extension, in any case.
+#[cfg(windows)]
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
 /// uid -> the placeholder paths (relative to the sync root) that stand for it,
@@ -1269,7 +1282,7 @@ pub fn sync_now(app: tauri::AppHandle) {
         // Explorer integration off.
         if show_in_explorer_enabled() {
             // Scoped to this block, so the busy mark is cleared before the refresh
-            // below, exactly where the paired call used to clear it.
+            // below.
             let _busy = BusyGuard::new(&app);
             // `false` = never auto-download the whole library; only synced albums sync.
             if let Err(e) = try_populate(&app, false) {
@@ -1554,12 +1567,23 @@ fn unique_name(base: &str, seen: &mut std::collections::HashSet<String>) -> Stri
     base.to_string()
 }
 
+/// The outcome of a pin pass: how many copies were kept offline in place, and the
+/// selected uids the mount has no placeholder for. Those last cannot be pinned (a
+/// photo shared with me, or one that lives only inside an album), so the caller saves
+/// them as ordinary files instead rather than reporting them as not downloaded.
+#[derive(serde::Serialize)]
+pub struct PinResult {
+    kept: u32,
+    missing: Vec<String>,
+}
+
 /// "Download" from the app = keep the selected photos offline: pin their Explorer
 /// placeholders, which the OS then hydrates in place (fetch_data downloads them).
 /// One entry per photo, ending as a green check — no duplicate file, no "waiting to
-/// sync". Runs off the main thread; unknown uids (not yet populated) are skipped.
+/// sync". Runs off the main thread; a uid the mount has no placeholder for is not
+/// skipped silently but returned in `missing` for the caller to save another way.
 #[tauri::command]
-pub async fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) -> u32 {
+pub async fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) -> PinResult {
     #[cfg(windows)]
     {
         tauri::async_runtime::spawn_blocking(move || {
@@ -1569,18 +1593,23 @@ pub async fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) -> u32 {
             // cleared early after the first one.
             let _busy = BusyGuard::new(&app);
             let base = sync_root_path();
-            // The primary (`Photos\`) copy of each selection, paired with its uid. Album
-            // copies stay cloud-only until opened, so a download never silently duplicates
-            // every album photo on disk. Keeping offline never pins ("always keep"), which
-            // is what made "Free up space" fail with 0x8007017B.
-            let pairs: Vec<(String, String)> = {
+            // Split the selection into the primary (`Photos\`) copies the mount knows
+            // about, each paired with its relative path, and the uids it has no
+            // placeholder for. Album copies stay cloud-only until opened, so a download
+            // never silently duplicates every album photo on disk. Keeping offline never
+            // pins ("always keep"), which is what made "Free up space" fail with
+            // 0x8007017B.
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            let mut missing: Vec<String> = Vec::new();
+            {
                 let index = mount_index().lock().unwrap();
-                uids.iter()
-                    .filter_map(|u| index.get(u).and_then(|v| v.first()).map(|rel| (u.clone(), rel.clone())))
-                    .collect()
-            };
-            // Counts only, no uids: how many of the selection the mount knows about, so a
-            // shortfall separates "not in the index yet" from "the hydrate failed".
+                for u in &uids {
+                    match index.get(u).and_then(|v| v.first()) {
+                        Some(rel) => pairs.push((u.clone(), rel.clone())),
+                        None => missing.push(u.clone()),
+                    }
+                }
+            }
             crate::note(
                 &app,
                 &format!("[download] make offline: {} of {} selected found in the mount", pairs.len(), uids.len()),
@@ -1589,16 +1618,21 @@ pub async fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) -> u32 {
                 .iter()
                 .filter(|(uid, rel)| keep_offline_one(&app, &base, rel, Some(uid.as_str())))
                 .count() as u32;
-            crate::note(&app, &format!("[download] kept {ok} offline (freeable)"));
-            ok
+            crate::note(
+                &app,
+                &format!("[download] kept {ok} offline (freeable); {} not in the mount", missing.len()),
+            );
+            PinResult { kept: ok, missing }
         })
         .await
-        .unwrap_or(0)
+        .unwrap_or_else(|_| PinResult { kept: 0, missing: Vec::new() })
     }
     #[cfg(not(windows))]
     {
-        let _ = (app, uids);
-        0
+        let _ = &app;
+        // No mount on this platform, so nothing pins in place: the whole selection
+        // falls through to the save-to-folder path.
+        PinResult { kept: 0, missing: uids }
     }
 }
 
@@ -1791,6 +1825,44 @@ pub fn hydrated_uids() -> Vec<String> {
     Vec::new()
 }
 
+/// Opens File Explorer on a photo's copy in the Proton Photos folder, with it selected.
+///
+/// The path comes from the mount's own index, never from the caller: the renderer
+/// names a photo by its uid and can make this open nothing outside the sync root. A
+/// hydrated copy is preferred, since that is the one the user has on this device.
+/// Selecting a placeholder in Explorer reads its directory entry and never its data.
+#[tauri::command]
+pub fn reveal_photo(uid: String) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        let base = sync_root_path();
+        let rel = {
+            let index = mount_index().lock().unwrap();
+            let rels = index.get(&uid).ok_or("This photo is not in the Proton Photos folder.")?;
+            rels.iter()
+                .find(|rel| is_hydrated(&base, rel))
+                .or_else(|| rels.first())
+                .cloned()
+                .ok_or("This photo is not in the Proton Photos folder.")?
+        };
+        let path = base.join(rel);
+        // `/select,` takes the path quoted as one piece, which the default argument
+        // quoting does not produce. A Windows file name can never hold a quote itself.
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = uid;
+        Err("Not available on this system.".into())
+    }
+}
+
 #[cfg(all(test, windows))]
 mod uid_list_tests {
     use super::looks_like_uid_list;
@@ -1814,6 +1886,22 @@ mod uid_list_tests {
         assert!(!looks_like_uid_list("\u{1}\u{2}\u{3}"), "control bytes are not a uid");
         assert!(!looks_like_uid_list("{\"seen\":[]}"), "nor is anything punctuated");
         assert!(!looks_like_uid_list("two words"), "nor is prose");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod name_tests {
+    use super::sanitize_name;
+
+    #[test]
+    fn a_device_name_never_becomes_a_placeholder() {
+        assert_eq!(sanitize_name("NUL.jpg"), "_NUL.jpg");
+        assert_eq!(sanitize_name("com1"), "_com1");
+        assert_eq!(sanitize_name("Lpt9.mp4"), "_Lpt9.mp4");
+        // Only the exact device stems: these are ordinary names.
+        assert_eq!(sanitize_name("CONCERT.jpg"), "CONCERT.jpg");
+        assert_eq!(sanitize_name("COM10.jpg"), "COM10.jpg");
+        assert_eq!(sanitize_name("COM0.jpg"), "COM0.jpg");
     }
 }
 

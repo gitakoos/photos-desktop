@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -32,14 +32,26 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { randomUUID } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, rmSync, utimesSync } from "node:fs";
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { WritableStream } from "node:stream/web";
+
+import { PhotoTag } from "@protontech/drive-sdk";
 
 import { isOfflineReady } from "./offline.ts";
 import { nodeDurationMs, nodeName, toMillis } from "./nodes.ts";
+import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { decryptOriginalTo, metaGet, metaPut, originalGet, originalSize } from "./store.ts";
+import { guarded, writeChunk } from "./fileWrites.ts";
 
 // Cap for in-memory video playback. A larger file would strain the sidecar heap
 // and the JSON-RPC channel, so past it the app offers a download instead.
@@ -61,7 +73,13 @@ const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
 const MAX_INMEMORY_ORIGINAL = 16 * 1024 * 1024;
 
 export type VideoBytes = { base64: string; mime: string };
-export type MountItem = { uid: string; name: string; size: number; captureTime: number };
+export type MountItem = {
+  uid: string;
+  name: string;
+  size: number;
+  captureTime: number;
+  favorite: boolean;
+};
 export type MountPage = { items: MountItem[]; total: number };
 export type HydratedFile = { path: string; size: number };
 
@@ -86,7 +104,7 @@ export type OriginalStatus =
 // here as each original lands, instead of one long call that reports only at the end.
 export type SaveStatus = { running: boolean; total: number; done: number; failed: number };
 
-let mountUids: { uid: string; captureTime: number }[] | null = null;
+let mountUids: { uid: string; captureTime: number; favorite: boolean }[] | null = null;
 
 const saveState: SaveStatus = { running: false, total: 0, done: 0, failed: 0 };
 
@@ -109,6 +127,85 @@ export function resetDownloadState(): void {
   // and empty the staging directory outright.
   releaseOriginal();
   clearViewDir();
+}
+
+/**
+ * A cloud-provided name made safe as a bare file name in the destination folder.
+ *
+ * The name is chosen by whoever owns the photo, which for a shared-with-me item is
+ * not the person saving it, so it is untrusted: the characters Windows forbids and any
+ * path separator become "_", leading/trailing whitespace and dots are stripped, and an
+ * empty result falls back to a fixed stem. Without this a name like "..\..\evil.jpg"
+ * would escape the chosen folder when joined onto it. Mirrors the mount's own
+ * `sanitize_name` (cloud_mount.rs) so both download modes name a file the same way.
+ */
+export function safeFileName(name: string): string {
+  const cleaned = Array.from(name)
+    .map((c) => ('\\/:*?"<>|'.includes(c) || c.charCodeAt(0) < 32 ? "_" : c))
+    .join("");
+  const trimmed = cleaned.trim().replace(/^\.+|\.+$/g, "").trim();
+  if (!trimmed) return "photo";
+  // `NUL.jpg` or `COM1` names a device, not a file, in any Windows folder.
+  return /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(trimmed) ? `_${trimmed}` : trimmed;
+}
+
+/** Every extension a photo or video is known by, lowercased with its dot. */
+const MEDIA_EXTENSIONS = new Set(
+  (
+    ".jpg .jpeg .jpe .png .webp .gif .avif .bmp .tif .tiff .heic .heif .jxl .dng .cr2 .cr3 .nef " +
+    ".arw .raf .orf .rw2 .pef .srw .raw .mp4 .mov .m4v .webm .mkv .3gp .3g2 .avi .wmv .mpg .mpeg " +
+    ".ts .mts .m2ts"
+  ).split(" "),
+);
+
+/** The extension a file of this media type is saved with when its name carries none. */
+const EXTENSION_FOR_TYPE: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/avif": ".avif",
+  "image/tiff": ".tif",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
+  "image/x-adobe-dng": ".dng",
+  "video/mp4": ".mp4",
+  "video/quicktime": ".mov",
+  "video/x-m4v": ".m4v",
+  "video/webm": ".webm",
+  "video/x-matroska": ".mkv",
+  "video/3gpp": ".3gp",
+};
+
+/**
+ * A photo's name that opens as a photo, whatever it was called in the cloud.
+ *
+ * The name is chosen by whoever uploaded the file, which for a shared album is someone
+ * else, and the bytes behind it are whatever they uploaded. Saved or shown in a file
+ * manager as `holiday.exe` or `invoice.pdf.lnk`, a double-click would run it. So a name
+ * that does not end in a photo or video extension gets one: `holiday.exe.jpg`, which
+ * opens in a viewer and, if the bytes are not a picture, fails there harmlessly.
+ */
+export function withMediaExtension(name: string, mediaType?: string | null): string {
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot).toLowerCase() : "";
+  if (MEDIA_EXTENSIONS.has(ext)) return name;
+  const type = (mediaType ?? "").toLowerCase();
+  return name + (EXTENSION_FOR_TYPE[type] ?? (type.startsWith("video/") ? ".mp4" : ".jpg"));
+}
+
+/**
+ * Mark a saved file as having come from the internet, as a browser marks a download, so
+ * Windows' own checks (SmartScreen, Office's Protected View) treat it that way. Silent on
+ * a disk with no alternate streams (FAT32, exFAT) and everywhere but Windows.
+ */
+function markFromInternet(path: string): void {
+  if (process.platform !== "win32") return;
+  try {
+    writeFileSync(`${path}:Zone.Identifier`, "[ZoneTransfer]\r\nZoneId=3\r\n");
+  } catch {
+    /* no streams on this disk */
+  }
 }
 
 /** A destination filename in `dir` that does not overwrite an existing file. */
@@ -177,17 +274,18 @@ async function saveOne(photos: any, uid: string, destDir: string): Promise<boole
   let file: ReturnType<typeof createWriteStream> | null = null;
   try {
     const node = await photos.getNode(uid);
-    const name = uniqueFileName(destDir, nodeName(node) || uid);
+    const name = uniqueFileName(
+      destDir,
+      withMediaExtension(safeFileName(nodeName(node) || uid), (node as any).mediaType),
+    );
     dest = join(destDir, name);
     const downloader = await photos.getFileDownloader(uid);
-    file = createWriteStream(dest);
+    file = guarded(createWriteStream(dest));
     const handle = file;
     const stream = new WritableStream<Uint8Array>({
       write(chunk) {
         // Respect backpressure so a large file does not balloon the write buffer.
-        if (!handle.write(chunk)) {
-          return new Promise<void>((resolve) => handle.once("drain", resolve));
-        }
+        return writeChunk(handle, chunk);
       },
       abort() {
         handle.destroy();
@@ -200,6 +298,7 @@ async function saveOne(photos: any, uid: string, destDir: string): Promise<boole
     await new Promise<void>((resolve, reject) => {
       handle.end((err?: Error | null) => (err ? reject(err) : resolve()));
     });
+    markFromInternet(dest);
     // Stamp the file with the photo's original capture time so Explorer shows the
     // real date, not the moment it was downloaded.
     const whenMs = toMillis((node as any).photo?.captureTime) || toMillis((node as any).creationTime);
@@ -240,7 +339,13 @@ async function saveOne(photos: any, uid: string, destDir: string): Promise<boole
  * at a time keeps the single RPC channel free for the polls and the rest of the app,
  * where one blocking call for the whole batch would hold it until the last byte.
  */
-export function startSaveOriginals(photos: any, uids: string[], destDir: string): void {
+export function startSaveOriginals(photos: any, uids: string[], destDir: string): boolean {
+  // One save at a time. The status is a single shared record, so a second run started
+  // while one is going would reset its counters and interleave a second loop against
+  // them, ending both polls early with wrong counts (and, into the same folder, a
+  // filename-collision race that could clobber a file). Refuse instead; the caller
+  // learns nothing started and can retry once the first finishes.
+  if (saveState.running) return false;
   saveState.running = true;
   saveState.total = uids.length;
   saveState.done = 0;
@@ -259,6 +364,7 @@ export function startSaveOriginals(photos: any, uids: string[], destDir: string)
       process.stderr.write(`[download] save done: ${saveState.done}/${saveState.total} saved\n`);
     }
   })();
+  return true;
 }
 
 /**
@@ -282,13 +388,13 @@ export function startSaveOriginals(photos: any, uids: string[], destDir: string)
 export async function resolveMountMetaBatch(
   photos: any,
   uids: string[],
-): Promise<Map<string, { name: string; size: number }>> {
-  const out = new Map<string, { name: string; size: number }>();
+): Promise<Map<string, { name: string; size: number; mediaType: string | null }>> {
+  const out = new Map<string, { name: string; size: number; mediaType: string | null }>();
   const missing: string[] = [];
   for (const uid of uids) {
     const cached = metaGet(uid);
     if (cached && typeof cached.size === "number" && cached.size > 0) {
-      out.set(uid, { name: cached.name || uid, size: cached.size });
+      out.set(uid, { name: cached.name || uid, size: cached.size, mediaType: cached.mediaType ?? null });
     } else {
       missing.push(uid);
     }
@@ -296,7 +402,7 @@ export async function resolveMountMetaBatch(
   if (missing.length === 0) return out;
 
   try {
-    for await (const node of photos.iterateNodes(missing)) {
+    for await (const node of withStallGuard(photos.iterateNodes(missing), SDK_STALL_MS, "iterateNodes")) {
       const n: any = node;
       if (n.missingUid) continue; // vanished server-side
       const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
@@ -312,7 +418,7 @@ export async function resolveMountMetaBatch(
         size,
         durationMs: nodeDurationMs(n) ?? 0,
       });
-      out.set(n.uid, { name, size });
+      out.set(n.uid, { name, size, mediaType: n.mediaType ?? null });
     }
   } catch {
     // A lookup that fails partway still returns what it resolved; the rest carry no size
@@ -352,7 +458,7 @@ export async function resolveDurationsBatch(
   if (missing.length === 0) return out;
 
   try {
-    for await (const node of photos.iterateNodes(missing)) {
+    for await (const node of withStallGuard(photos.iterateNodes(missing), SDK_STALL_MS, "iterateNodes")) {
       const n: any = node;
       if (n.missingUid) continue; // vanished server-side
       const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
@@ -409,7 +515,7 @@ export async function resolveMediaTypesBatch(
   if (missing.length === 0) return out;
 
   try {
-    for await (const node of photos.iterateNodes(missing)) {
+    for await (const node of withStallGuard(photos.iterateNodes(missing), SDK_STALL_MS, "iterateNodes")) {
       const n: any = node;
       if (n.missingUid) continue; // vanished server-side
       const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
@@ -443,12 +549,21 @@ export async function resolveMediaTypesBatch(
  */
 export async function listForMount(photos: any, offset: number, limit: number): Promise<MountPage> {
   if (offset === 0 || !mountUids) {
-    const picks: { uid: string; captureTime: number }[] = [];
-    for await (const item of photos.iterateTimeline()) {
+    const picks: { uid: string; captureTime: number; favorite: boolean }[] = [];
+    for await (const item of withStallGuard(
+      photos.iterateTimeline(),
+      SDK_STALL_MS,
+      "iterateTimeline(listForMount)",
+    )) {
       const uid = (item as any).nodeUid ?? (item as any).uid;
       if (!uid) continue;
       const ct = (item as any).captureTime;
-      picks.push({ uid, captureTime: ct instanceof Date ? ct.getTime() : Number(ct) * 1000 });
+      const tags: number[] = (item as any).tags ?? [];
+      picks.push({
+        uid,
+        captureTime: ct instanceof Date ? ct.getTime() : Number(ct) * 1000,
+        favorite: tags.includes(PhotoTag.Favorites),
+      });
     }
     mountUids = picks;
   }
@@ -459,7 +574,15 @@ export async function listForMount(photos: any, offset: number, limit: number): 
   for (const p of slice) {
     const m = resolved.get(p.uid);
     if (m) {
-      items.push({ uid: p.uid, name: m.name, size: m.size, captureTime: p.captureTime });
+      // Both drives show this name as a file a double-click opens, so it always ends
+      // in what it is: see `withMediaExtension`.
+      items.push({
+        uid: p.uid,
+        name: withMediaExtension(m.name, m.mediaType),
+        size: m.size,
+        captureTime: p.captureTime,
+        favorite: p.favorite,
+      });
     }
   }
   return { items, total: mountUids.length };
@@ -472,19 +595,93 @@ export async function listForMount(photos: any, offset: number, limit: number): 
  * needed several times the file size at once, so a run of large videos starved the
  * single-threaded sidecar and stalled the whole app. Streaming keeps memory flat,
  * so there is also no size cap. The host deletes the temp file after the transfer.
+ *
+ * `dir` is the Linux drive's own staging folder: the sandbox's /tmp is a RAM-backed tmpfs
+ * too small for a long video, so the host names a folder on disk instead. Only a folder
+ * named for that purpose is taken, so this can never be pointed at anywhere else.
  */
-export async function hydrateFile(photos: any, uid: string): Promise<HydratedFile> {
-  const dest = join(tmpdir(), `pfp-hyd-${randomUUID()}.bin`);
+export function hydrateDir(dir?: string): string {
+  return dir && isAbsolute(dir) && basename(dir) === "pfp-hyd" ? dir : tmpdir();
+}
+
+/** A streamed download's state, by the file it is written to. */
+type Streaming = { done: boolean; error: string | null; started: number; cancelled: boolean };
+const streaming = new Map<string, Streaming>();
+
+/**
+ * Start downloading one file into `dir` and answer at once with where it is going: the
+ * Linux drive serves the bytes while they arrive, so a video starts playing rather than
+ * waiting for all of it. The file exists (empty) before this returns, and
+ * `hydrateProgress` says when it is complete or failed. A failed one is deleted.
+ */
+export function startHydrate(photos: any, uid: string, dir?: string): { path: string } {
+  const now = Date.now();
+  for (const [path, s] of streaming) {
+    if ((s.done || s.error) && now - s.started > 60 * 60_000) streaming.delete(path);
+  }
+  const base = hydrateDir(dir);
+  if (base !== tmpdir()) mkdirSync(base, { recursive: true, mode: 0o700 });
+  const dest = join(base, `pfp-hyd-${randomUUID()}.bin`);
+  const state: Streaming = { done: false, error: null, started: now, cancelled: false };
+  streaming.set(dest, state);
+  const file = guarded(createWriteStream(dest, { fd: openSync(dest, "w", 0o600) }));
+  void (async () => {
+    try {
+      const downloader = await photos.getFileDownloader(uid);
+      const stream = new WritableStream<Uint8Array>({
+        write(chunk) {
+          // Refusing the next chunk is what stops a download nobody wants any more.
+          if (state.cancelled) throw new Error("cancelled");
+          return writeChunk(file, chunk);
+        },
+        abort() {
+          file.destroy();
+        },
+      });
+      await downloader.downloadToStream(stream as any).completion();
+      await new Promise<void>((resolve, reject) => {
+        file.end((err?: Error | null) => (err ? reject(err) : resolve()));
+      });
+      state.done = true;
+    } catch (e) {
+      if (!file.destroyed) {
+        await new Promise<void>((resolve) => {
+          file.once("close", () => resolve());
+          file.destroy();
+        });
+      }
+      rmSync(dest, { force: true });
+      state.error = (e as Error).message || "download failed";
+    }
+  })();
+  return { path: dest };
+}
+
+/** Stop a download `startHydrate` began, when its file has been let go of. */
+export function cancelHydrate(path: string): void {
+  const s = streaming.get(path);
+  if (s && !s.done) s.cancelled = true;
+}
+
+/** Where a download `startHydrate` began stands. An unknown path reads as failed. */
+export function hydrateProgress(path: string): { done: boolean; error: string | null } {
+  const s = streaming.get(path);
+  if (!s) return { done: false, error: "unknown download" };
+  return { done: s.done, error: s.error };
+}
+
+export async function hydrateFile(photos: any, uid: string, dir?: string): Promise<HydratedFile> {
+  const base = hydrateDir(dir);
+  if (base !== tmpdir()) mkdirSync(base, { recursive: true, mode: 0o700 });
+  const dest = join(base, `pfp-hyd-${randomUUID()}.bin`);
   const downloader = await photos.getFileDownloader(uid);
-  const file = createWriteStream(dest);
+  const file = guarded(createWriteStream(dest));
   let total = 0;
   const stream = new WritableStream<Uint8Array>({
     write(chunk) {
       total += chunk.byteLength;
       // Respect backpressure so a large file cannot balloon the write buffer.
-      if (!file.write(chunk)) {
-        return new Promise<void>((resolve) => file.once("drain", resolve));
-      }
+      return writeChunk(file, chunk);
     },
     abort() {
       file.destroy();
@@ -498,7 +695,17 @@ export async function hydrateFile(photos: any, uid: string): Promise<HydratedFil
       file.end((err?: Error | null) => (err ? reject(err) : resolve()));
     });
   } catch (e) {
-    file.destroy();
+    // Close our own handle and WAIT for it before deleting: on Windows an open handle
+    // blocks the delete, so a bare destroy() then rmSync races the still-open fd, fails,
+    // and strands a partial decrypted file (swept only at next startup). Same
+    // close-before-delete the save path uses.
+    if (!file.destroyed) {
+      const handle = file;
+      await new Promise<void>((resolve) => {
+        handle.once("close", () => resolve());
+        handle.destroy();
+      });
+    }
     try {
       rmSync(dest, { force: true });
     } catch {
@@ -530,7 +737,10 @@ export async function hydrateFile(photos: any, uid: string): Promise<HydratedFil
  * files in the temp dir: it lets the asset protocol be scoped to that one folder instead
  * of anywhere the app can write, and it lets the startup sweep empty the lot outright.
  */
-export const VIEW_DIR = join(tmpdir(), "pfp-view");
+// One fixed folder in the app. The tests give each of their processes its own through
+// PFP_VIEW_DIR, since test files run side by side and one file's sweep would otherwise
+// delete what another is in the middle of writing.
+export const VIEW_DIR = process.env.PFP_VIEW_DIR || join(tmpdir(), "pfp-view");
 
 /**
  * What the webview can actually draw. HEIC, RAW and most TIFF are absent on purpose:
@@ -686,7 +896,7 @@ async function streamOriginal(
      */
     const spill = async (chunks: Buffer[]): Promise<void> => {
       mkdirSync(VIEW_DIR, { recursive: true });
-      file = createWriteStream(dest);
+      file = guarded(createWriteStream(dest));
       entry.path = dest; // recorded before the first byte, so an abort can clean up
       for (const chunk of chunks) file.write(chunk);
       buffered = null;
@@ -708,9 +918,7 @@ async function streamOriginal(
         }
         const handle = file as ReturnType<typeof createWriteStream>;
         // Respect backpressure so a large file cannot balloon the write buffer.
-        if (!handle.write(chunk)) {
-          return new Promise<void>((resolve) => handle.once("drain", resolve));
-        }
+        return writeChunk(handle, chunk);
       },
       abort() {
         file?.destroy();

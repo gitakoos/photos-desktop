@@ -1,7 +1,7 @@
 # Photos for Proton
 # Copyright (C) 2026 Akoos <https://akoos.eu>
 #
-# Source:  https://github.com/PhotosforProton/photos-desktop
+# Source:  https://github.com/gitakoos/photos-desktop
 # Website: https://www.photosforproton.eu
 #
 # This file is part of Photos for Proton.
@@ -37,7 +37,7 @@ function Check($w){ if ($LASTEXITCODE -ne 0){ Write-Host "FAILED: $w (exit $LAST
 #    plain cargo (which ships the dev-URL blank page).
 Step "1/4 build main app (tauri build --no-bundle)"
 Set-Location $app
-npm run tauri build -- --no-bundle
+npm run tauri build '--' --no-bundle
 Check "main app build"
 
 # 2. Assemble the payload: the app + sidecar.exe + sidecar/ + the licence texts.
@@ -81,7 +81,7 @@ Compress-Archive -Path "$stage\*" -DestinationPath $payloadZip -Force
 # 4. Build the installer (embeds payload.zip via include_bytes!).
 Step "4/4 build installer (tauri build --no-bundle)"
 Set-Location $setup
-npm run tauri build -- --no-bundle
+npm run tauri build '--' --no-bundle
 Check "installer build"
 
 $out   = "$setupTauri\target\release\setup.exe"

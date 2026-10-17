@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -44,6 +44,7 @@ body {
 
 /* The app draws its own window: rounded, dark, custom title bar (Android palette). */
 .app-shell {
+  position: relative;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -115,7 +116,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 16px;
   padding: 2rem 1.75rem;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--dialog-shadow);
 }
 
 .login-title {
@@ -278,4 +279,96 @@ body {
   height: 17px;
   border-radius: 5px;
   flex: 0 0 auto;
+}
+
+/* ---- Sidebar layout ----
+   The navigation widget rises the full height of the window and carries the brand
+   itself, so the title bar drops its own copy and shrinks to the three window
+   buttons, floated into the top-right corner where nothing else sits. The window is
+   then dragged by the sidebar head and the top bar's empty stretch instead. */
+:root[data-layout="sidebar"] .titlebar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: auto;
+  width: auto;
+  padding: 0;
+  z-index: 6;
+  background: transparent;
+}
+
+:root[data-layout="sidebar"] .titlebar-title {
+  display: none;
+}
+
+/* ---- Sign-in through the browser ---- */
+.login-hint {
+  margin: 0;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.login-or {
+  margin: 1.1rem 0;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.8rem;
+}
+
+.login-form button.login-secondary {
+  padding: 0.65rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg0);
+  color: var(--fg-primary);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.login-form button.login-secondary:hover {
+  border-color: var(--accent);
+}
+
+.login-form label.login-choice {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.login-form label.login-choice input {
+  width: auto;
+  margin: 0.15rem 0 0;
+  accent-color: var(--accent);
+}
+
+.login-choice span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.login-choice strong {
+  color: var(--fg-primary);
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.login-choice small {
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.login-note {
+  margin: 1.1rem 0 0;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 0.72rem;
+  line-height: 1.35;
 }

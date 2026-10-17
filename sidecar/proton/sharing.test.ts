@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -216,9 +216,8 @@ describe("the public link", () => {
     expect(named(photos, "shareNode")[0].args[1]).toEqual({ publicLink: { role: "viewer" } });
   });
 
-  // Photo links are viewer links. The boolean form the SDK used to be handed
-  // meant exactly that, and the object form has to say it, so this pins that
-  // spelling it out did not widen what a link grants.
+  // Photo links are viewer links. The object form the SDK takes has to say so,
+  // and this pins that spelling it out does not widen what a link grants.
   it("asks for a viewer link, never an editor one", async () => {
     const photos = makePhotos();
     await setPublicLink(photos, PHOTO_UID);

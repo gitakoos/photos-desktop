@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -44,5 +44,6 @@ export default defineConfig({
   },
   test: {
     server: { deps: { inline: [/@protontech/] } },
+    setupFiles: ["./vitest.setup.ts"],
   },
 });

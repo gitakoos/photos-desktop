@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -20,13 +20,14 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { setLightboxOpen } from "../lib/lightboxSignal";
 import { PhotoViewer } from "./PhotoViewer";
 import { ViewerContents, ViewerFilmstrip } from "./ViewerFilmstrip";
 import { VideoControls } from "./VideoControls";
 import { WindowButtons } from "./Titlebar";
-import { CloseIcon, InfoIcon, ListIcon } from "./icons";
+import { ContextMenu, type MenuAction } from "./ContextMenu";
+import { CloseIcon, InfoIcon, ListIcon, MoreHorizIcon } from "./icons";
 import { useT } from "../lib/i18n";
 import "../styles/Lightbox.css";
 
@@ -80,8 +81,10 @@ type Props = {
   /** Shown in the middle of the bar, and the thing the rename edits. */
   name: string;
   stage: ViewerStage;
-  /** The caller's own actions, to the right of the details button. */
+  /** The caller's own named actions along the bar. */
   toolbar?: ReactNode;
+  /** Extra entries for the bar's overflow menu, below the built-in Details and Contents. */
+  menuItems?: MenuAction[];
   /**
    * The rows of the details panel. Giving anything at all is what puts the
    * details button in the bar, so a caller still fetching them passes its own
@@ -120,6 +123,9 @@ type Props = {
   /** Keys this shell did not claim, for the caller's own shortcuts. */
   onKey?: (e: KeyboardEvent) => void;
   onVideoError?: () => void;
+  /** Right-click on the stage, so the caller can raise a context menu. Called with the
+   *  native menu already prevented and the shell's own dead menu suppressed. */
+  onContextMenu?: (e: MouseEvent) => void;
   /** Dialogs and notices that belong over the whole viewer. */
   children?: ReactNode;
 };
@@ -139,6 +145,7 @@ export function ViewerShell({
   name,
   stage,
   toolbar,
+  menuItems,
   details,
   error,
   busy = false,
@@ -153,6 +160,7 @@ export function ViewerShell({
   onRename,
   onKey,
   onVideoError,
+  onContextMenu,
   children,
 }: Props) {
   const t = useT();
@@ -163,6 +171,14 @@ export function ViewerShell({
   // State rather than a ref: the controls are a child, and this is what tells them
   // the element exists once it has mounted.
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
+  const [moreAt, setMoreAt] = useState<{ x: number; y: number } | null>(null);
+  // A click that dismisses the overflow menu lands on the backdrop the instant after, so
+  // this brief window swallows it: the menu closing must never also close the viewer.
+  const closeGuard = useRef(0);
+  const guardedClose = () => {
+    if (Date.now() < closeGuard.current) return;
+    onClose();
+  };
 
   // While a viewer is up it owns the single sidecar channel: the background grid
   // and eager loaders read this and hold off starting a new thumbnail batch, so
@@ -218,10 +234,28 @@ export function ViewerShell({
 
   const strip = list && list.count > 1;
 
+  // The bar's overflow menu: the contents list the shell owns, then whatever the caller
+  // adds. Details has its own button on the bar, as in Windows Photos.
+  const moreActions: MenuAction[] = [
+    ...(list && list.count > 1
+      ? [
+          {
+            key: "contents",
+            label: t("viewer.contents"),
+            icon: <ListIcon size={14} />,
+            onSelect: () => setShowContents((s) => !s),
+          },
+        ]
+      : []),
+    ...(menuItems ?? []),
+  ];
+
   return (
     <div
-      className={`lbx${ownsWindow ? " owns-window" : ""}${strip ? " with-strip" : ""}`}
-      onClick={onClose}
+      className={`lbx${ownsWindow ? " owns-window" : ""}${strip ? " with-strip" : ""}${
+        showDetails && details ? " with-aside" : ""
+      }`}
+      onClick={guardedClose}
     >
       {/* The attribute has to sit on whatever the pointer actually lands on, which
           is why the bar carries it and the controls on it do not: a button is its
@@ -231,52 +265,70 @@ export function ViewerShell({
         data-tauri-drag-region={ownsWindow || undefined}
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Three fixed zones, as in Windows Photos: the name on the left, the actions in
+            the middle, close on the right. The name never moves with how many actions a
+            photo has, because it no longer shares their column. */}
         <div className="lbx-left">
-          {details && (
+          {renaming ? (
+            <input
+              autoFocus
+              className="lbx-rename"
+              value={draftName}
+              onChange={(e) => setDraftName(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void commitRename();
+              }}
+              onBlur={() => setRenaming(false)}
+            />
+          ) : (
             <button
-              className={`lbx-ibtn ${showDetails ? "sel" : ""}`}
-              onClick={() => setShowDetails((s) => !s)}
-              title={t("viewer.detailsShortcut")}
+              className="lbx-title"
+              title={onRename && name ? t("viewer.rename") : name}
+              disabled={!onRename || !name || busy}
+              onClick={() => {
+                setDraftName(name);
+                setRenaming(true);
+              }}
             >
-              <InfoIcon />
+              {name || "…"}
             </button>
           )}
           {list && list.count > 1 && (
-            <button
-              className={`lbx-ibtn ${showContents ? "sel" : ""}`}
-              onClick={() => setShowContents((s) => !s)}
-              title={t("viewer.contentsShortcut")}
-            >
-              <ListIcon />
-            </button>
+            <span className="lbx-position">
+              {t("viewer.position", { n: list.index + 1, total: list.count })}
+            </span>
           )}
-          {toolbar}
         </div>
 
-        {renaming ? (
-          <input
-            autoFocus
-            className="lbx-rename"
-            value={draftName}
-            onChange={(e) => setDraftName(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void commitRename();
-            }}
-            onBlur={() => setRenaming(false)}
-          />
-        ) : (
-          <button
-            className="lbx-title"
-            title={t("viewer.rename")}
-            disabled={!onRename || !name || busy}
-            onClick={() => {
-              setDraftName(name);
-              setRenaming(true);
-            }}
-          >
-            {name || "…"}
-          </button>
-        )}
+        <div className="lbx-center">
+          {toolbar}
+          {details && (
+            <>
+              <span className="lbx-sep" />
+              <button
+                className={`lbx-ibtn ${showDetails ? "sel" : ""}`}
+                onClick={() => setShowDetails((s) => !s)}
+                title={t("viewer.detailsShortcut")}
+                aria-label={t("viewer.details")}
+              >
+                <InfoIcon size={17} />
+              </button>
+            </>
+          )}
+          {moreActions.length > 0 && (
+            <button
+              className={`lbx-ibtn ${showContents ? "sel" : ""}`}
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setMoreAt({ x: r.left, y: r.bottom + 4 });
+              }}
+              title={t("albums.more")}
+              aria-label={t("albums.more")}
+            >
+              <MoreHorizIcon size={17} />
+            </button>
+          )}
+        </div>
 
         <div className="lbx-right">
           {ownsWindow ? (
@@ -295,7 +347,20 @@ export function ViewerShell({
         </div>
       )}
 
-      <div className="lbx-stage" onClick={onClose}>
+      <div
+        className="lbx-stage"
+        onClick={guardedClose}
+        onContextMenu={
+          onContextMenu &&
+          ((e) => {
+            e.preventDefault();
+            // Stop it here so the shell's document listener does not also answer this
+            // right-click with its own (Reload / More soon) menu behind the viewer.
+            e.stopPropagation();
+            onContextMenu(e);
+          })
+        }
+      >
         {hasPrev && (
           <button
             className="lbx-nav prev"
@@ -370,29 +435,35 @@ export function ViewerShell({
       )}
 
       {showDetails && details && (
-        // Stopped here, not just handled: the whole viewer closes on a click, so a click
-        // meant to dismiss this panel would take the photo behind it with the panel.
-        <div
-          className="lbx-details-backdrop"
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowDetails(false);
-          }}
-        >
-          <div className="lbx-details-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="lbx-details-head">
-              <h3>{t("viewer.details")}</h3>
-              <button
-                className="lbx-ibtn"
-                onClick={() => setShowDetails(false)}
-                title={t("common.close")}
-              >
-                <CloseIcon size={14} />
-              </button>
-            </div>
-            {details}
+        // Docked beside the picture, which narrows to make room, as Windows Photos does.
+        // Stopped here: the whole viewer closes on a click, and a click in this panel is
+        // never meant to take the photo with it.
+        <aside className="lbx-aside" onClick={(e) => e.stopPropagation()}>
+          <div className="lbx-details-head">
+            <h3>{t("viewer.details")}</h3>
+            <button
+              className="lbx-ibtn"
+              onClick={() => setShowDetails(false)}
+              title={t("common.close")}
+              aria-label={t("common.close")}
+            >
+              <CloseIcon size={14} />
+            </button>
           </div>
-        </div>
+          {details}
+        </aside>
+      )}
+
+      {moreAt && (
+        <ContextMenu
+          x={moreAt.x}
+          y={moreAt.y}
+          actions={moreActions}
+          onClose={() => {
+            closeGuard.current = Date.now() + 350;
+            setMoreAt(null);
+          }}
+        />
       )}
 
       {children}

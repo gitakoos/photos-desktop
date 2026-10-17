@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -31,8 +31,8 @@ import type { TrashItem } from "../views/Trash";
  *
  * The timeline gets this for free: the shell holds its items, so they survive a
  * trip to another tab and back. Albums, Shared and the trash live only while they
- * are on screen, so every visit used to start from nothing and show a shimmer
- * while its one fetch went out. This reads them once the timeline has settled and
+ * are on screen, so without this every visit starts from nothing and shows a
+ * shimmer while its one fetch goes out. This reads them once the timeline has settled and
  * hands each view something to paint on arrival.
  *
  * What it hands over is a first paint and nothing more. Every view still re-reads

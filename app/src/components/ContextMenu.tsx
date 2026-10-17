@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -20,7 +20,15 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import "../styles/ContextMenu.css";
 
 /** How close to the window edge the menu may sit before it flips over the click. */
@@ -33,6 +41,8 @@ export type MenuAction = {
   icon?: ReactNode;
   /** Reads as destructive before it is clicked, the way the app marks the rest. */
   danger?: boolean;
+  /** Draws a divider above this row, to set a group (or the destructive action) apart. */
+  separator?: boolean;
   /** Named but not offered yet. Skipped by the keys, and `onSelect` never runs. */
   disabled?: boolean;
 };
@@ -154,19 +164,21 @@ export function ContextMenu({ x, y, actions, onClose }: Props) {
       }}
     >
       {actions.map((a) => (
-        <button
-          key={a.key}
-          role="menuitem"
-          className={`cm-item ${a.danger ? "danger" : ""}`}
-          disabled={a.disabled}
-          onClick={() => {
-            onClose();
-            a.onSelect();
-          }}
-        >
-          {a.icon && <span className="cm-icon">{a.icon}</span>}
-          {a.label}
-        </button>
+        <Fragment key={a.key}>
+          {a.separator && <div className="cm-sep" role="separator" />}
+          <button
+            role="menuitem"
+            className={`cm-item ${a.danger ? "danger" : ""}`}
+            disabled={a.disabled}
+            onClick={() => {
+              onClose();
+              a.onSelect();
+            }}
+          >
+            {a.icon && <span className="cm-icon">{a.icon}</span>}
+            {a.label}
+          </button>
+        </Fragment>
       ))}
     </div>
   );

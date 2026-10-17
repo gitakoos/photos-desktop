@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -21,7 +21,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,11 +36,17 @@ import {
   framesForFiles,
   getUploadStatus,
   deviceName,
+  isStagedDrop,
+  isStagedFrame,
   mediaAttributes,
   photoTagsFor,
+  startDropUpload,
   startUpload,
+  statusRows,
+  type UploadItem,
   type UploadStatus,
 } from "./upload.ts";
+import { hydrateDir } from "./download.ts";
 
 const work = mkdtempSync(join(tmpdir(), "pfp-upload-test-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
@@ -53,6 +60,36 @@ async function writeJpeg(name: string, colour: number): Promise<string> {
     .jpeg()
     .toBuffer();
   writeFileSync(path, bytes);
+  return path;
+}
+
+/**
+ * A photo with detail all the way down, the kind a fixed JPEG quality leaves heavier than
+ * Drive takes: random pixels in blocks, so the detail survives the scale to 512 and 1920.
+ */
+async function writeDetailedPhoto(name: string): Promise<string> {
+  const path = join(work, name);
+  const width = 600;
+  const height = 450;
+  const bytes = await sharp(randomBytes(width * height * 3), { raw: { width, height, channels: 3 } })
+    .resize(2400, 1800, { kernel: "nearest" })
+    .png({ compressionLevel: 1 })
+    .toBuffer();
+  writeFileSync(path, bytes);
+  return path;
+}
+
+/** A path shaped like one the host stages a frame at: `<temp>/pfp-frame/frame-<hex>.jpg`. */
+function frameName(): string {
+  const dir = join(work, "pfp-frame");
+  mkdirSync(dir, { recursive: true });
+  return join(dir, `frame-${randomBytes(16).toString("hex")}.jpg`);
+}
+
+/** A real JPEG where the host would have staged a video's frame. */
+async function writeFrame(colour: number): Promise<string> {
+  const path = frameName();
+  writeFileSync(path, readFileSync(await writeJpeg(`frame-src-${colour}.jpg`, colour)));
   return path;
 }
 
@@ -82,18 +119,20 @@ function recordingPhotos() {
     thumbnails,
     metadata,
     photos: {
-      findPhotoDuplicates: async (): Promise<string[]> => [],
+      findPhotoDuplicates: async (_name: string): Promise<string[]> => [],
       getFileUploader: async (_name: string, meta: UploadMetadata) => {
         metadata.push(meta);
         return {
           uploadFromStream: async (stream: ReadableStream, thumbs: unknown[]) => {
             thumbnails.push(thumbs);
+            // Numbered as the upload starts, so two running side by side never share one.
+            const nodeUid = `uid-${thumbnails.length}`;
             // Drained the way a real upload drains it, so the file handle closes.
             const reader = stream.getReader();
             while (!(await reader.read()).done) {
               /* discarded */
             }
-            return { completion: async () => ({ nodeUid: `uid-${thumbnails.length}` }) };
+            return { completion: async () => ({ nodeUid }) };
           },
         };
       },
@@ -146,7 +185,7 @@ describe("a path is matched to its frame however it was spelled", () => {
 describe("thumbnails for an upload", () => {
   it("makes a video's two thumbnails out of the frame the host staged", async () => {
     const video = writeFakeVideo("holiday.mp4");
-    const frame = await writeJpeg("holiday-frame.jpg", 20);
+    const frame = await writeFrame(20);
     const { photos, thumbnails } = recordingPhotos();
 
     startUpload(photos, [video], { [video]: frame });
@@ -165,7 +204,7 @@ describe("thumbnails for an upload", () => {
 
   it("spends the frame, so nothing is left in the temp folder", async () => {
     const video = writeFakeVideo("spent.mp4");
-    const frame = await writeJpeg("spent-frame.jpg", 40);
+    const frame = await writeFrame(40);
     const { photos } = recordingPhotos();
 
     startUpload(photos, [video], { [video]: frame });
@@ -200,10 +239,29 @@ describe("thumbnails for an upload", () => {
     expect(thumbnails[0]).toHaveLength(2);
   });
 
+  it("keeps each thumbnail within what Drive takes, however detailed the photo", async () => {
+    // At a fixed quality this photo's grid thumbnail came out near 110 KiB and its preview
+    // over 1.4 MiB, and Drive refused the file with "The block content is too large".
+    const photo = await writeDetailedPhoto("gravel.png");
+    const { photos, thumbnails } = recordingPhotos();
+
+    startUpload(photos, [photo]);
+    const status = await settle();
+
+    expect(status.done).toBe(1);
+    const [small, preview] = thumbnails[0] as { type: unknown; thumbnail: Uint8Array }[];
+    expect(small.thumbnail.byteLength).toBeGreaterThan(0);
+    expect(small.thumbnail.byteLength).toBeLessThanOrEqual(64 * 1024);
+    expect(preview.thumbnail.byteLength).toBeLessThanOrEqual(1024 * 1024);
+    // Fitted by quality, not by shrinking: the grid thumbnail keeps its full size.
+    expect((await sharp(small.thumbnail).metadata()).width).toBe(512);
+    expect((await sharp(preview.thumbnail).metadata()).width).toBe(1920);
+  });
+
   it("handles a mixed drop, each file by its own route", async () => {
     const photo = await writeJpeg("mixed.jpg", 120);
     const video = writeFakeVideo("mixed.mp4");
-    const frame = await writeJpeg("mixed-frame.jpg", 60);
+    const frame = await writeFrame(60);
     const { photos, thumbnails } = recordingPhotos();
 
     startUpload(photos, [photo, video], { [video]: frame });
@@ -217,7 +275,7 @@ describe("thumbnails for an upload", () => {
 
   it("discards a frame for a file that turned out to be a duplicate", async () => {
     const video = writeFakeVideo("dup.mp4");
-    const frame = await writeJpeg("dup-frame.jpg", 80);
+    const frame = await writeFrame(80);
     const { photos } = recordingPhotos();
     // A duplicate returns before the thumbnailer that would otherwise spend the frame.
     photos.findPhotoDuplicates = async () => ["already-there"];
@@ -233,7 +291,7 @@ describe("thumbnails for an upload", () => {
     const video = writeFakeVideo("broken.mp4");
     // A truncated JPEG: the host writes one only if the encode failed halfway, but the
     // upload is still what was asked for.
-    const frame = join(work, "broken-frame.jpg");
+    const frame = frameName();
     writeFileSync(frame, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]));
     const { photos, thumbnails } = recordingPhotos();
 
@@ -244,6 +302,262 @@ describe("thumbnails for an upload", () => {
     expect(status.failed).toBe(0);
     expect(thumbnails[0]).toHaveLength(0);
     expect(existsSync(frame)).toBe(false);
+  });
+});
+
+describe("only the host's own frames are read or deleted", () => {
+  it("knows a staged frame by its shape", () => {
+    expect(isStagedFrame(frameName())).toBe(true);
+    expect(isStagedFrame(join(work, "Pictures", "frame-" + "a".repeat(32) + ".jpg"))).toBe(false);
+    expect(isStagedFrame(join(work, "pfp-frame", "holiday.jpg"))).toBe(false);
+    expect(isStagedFrame(join("pfp-frame", "frame-" + "a".repeat(32) + ".jpg"))).toBe(false);
+  });
+
+  it("leaves a user's file alone when a drop names it as a frame", async () => {
+    const video = writeFakeVideo("victim.mp4");
+    const precious = await writeJpeg("precious.jpg", 70);
+    const { photos, thumbnails } = recordingPhotos();
+
+    startUpload(photos, [video], { [video]: precious });
+    const status = await settle();
+
+    // Uploaded as a video with no frame, and the named file is exactly where it was.
+    expect(status.done).toBe(1);
+    expect(thumbnails[0]).toHaveLength(0);
+    expect(existsSync(precious)).toBe(true);
+  });
+
+  it("does not delete a named file even when nothing in the drop uploads", async () => {
+    const precious = await writeJpeg("precious-2.jpg", 71);
+    const { photos } = recordingPhotos();
+
+    startUpload(photos, [join(work, "nothing-here.txt")], { x: precious });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(existsSync(precious)).toBe(true);
+  });
+});
+
+describe("a drop onto the file-manager drive", () => {
+  /** A photo staged the way the host stages one: `<...>/pfp-drop/<one folder>/<name>`. */
+  async function stage(name: string, colour: number): Promise<string> {
+    const folder = join(work, "pfp-drop", `f${colour}`);
+    mkdirSync(folder, { recursive: true });
+    const source = await writeJpeg(`src-${name}`, colour);
+    const path = join(folder, name);
+    writeFileSync(path, readFileSync(source));
+    return path;
+  }
+
+  /** The album calls a drop makes, on top of the recording uploader. */
+  function albumPhotos() {
+    const recorded = recordingPhotos();
+    const added: { album: string; uids: string[] }[] = [];
+    const created: string[] = [];
+    const deleted: string[] = [];
+    const photos = {
+      ...recorded.photos,
+      /** The albums the account already has, for the lookup by name. */
+      albums: [] as { uid: string; name: string; photoCount: number; members?: string[] }[],
+      experimental: {
+        iterateAlbumUids: async function* () {
+          for (const album of photos.albums) yield album.uid;
+        },
+      },
+      iterateNodes: async function* (uids: string[]) {
+        for (const uid of uids) {
+          const album = photos.albums.find((a) => a.uid === uid)!;
+          yield { uid, name: { ok: true, value: album.name }, album: { photoCount: album.photoCount } };
+        }
+      },
+      iterateAlbum: async function* (uid: string) {
+        for (const nodeUid of photos.albums.find((a) => a.uid === uid)?.members ?? []) {
+          yield { nodeUid };
+        }
+      },
+      createAlbum: async (name: string) => {
+        created.push(name);
+        return { uid: "made-album", name };
+      },
+      addPhotosToAlbum: async function* (album: string, uids: string[]) {
+        added.push({ album, uids });
+        for (const uid of uids) yield { uid, ok: true };
+      },
+      deleteAlbum: async (uid: string) => {
+        deleted.push(uid);
+      },
+    };
+    return { photos, added, created, deleted, thumbnails: recorded.thumbnails };
+  }
+
+  it("knows its own staged copies from anyone else's files", () => {
+    expect(isStagedDrop(join(work, "pfp-drop", "ab12", "IMG.jpg"))).toBe(true);
+    expect(isStagedDrop(join(work, "Pictures", "IMG.jpg"))).toBe(false);
+    expect(isStagedDrop(join(work, "pfp-drop", "IMG.jpg"))).toBe(false);
+    expect(isStagedDrop(join("pfp-drop", "ab12", "IMG.jpg"))).toBe(false);
+  });
+
+  it("downloads into the drive's folder only when it is named for it", () => {
+    const own = join(work, "cache", "pfp-hyd");
+    expect(hydrateDir(own)).toBe(own);
+    expect(hydrateDir(join(work, "Documents"))).toBe(tmpdir());
+    expect(hydrateDir("pfp-hyd")).toBe(tmpdir());
+    expect(hydrateDir(undefined)).toBe(tmpdir());
+  });
+
+  it("uploads a staged copy to the timeline and deletes it", async () => {
+    const path = await stage("drive.jpg", 30);
+    const { photos, added, created } = albumPhotos();
+
+    startDropUpload(photos, [path]);
+    const status = await settle();
+
+    expect(status.done).toBe(1);
+    expect(status.items[0].album).toBeNull();
+    expect(created).toEqual([]);
+    expect(added).toEqual([]);
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(join(path, ".."))).toBe(false);
+  });
+
+  it("puts a drop into the album it was given, and makes none", async () => {
+    const path = await stage("album.jpg", 31);
+    const { photos, added, created } = albumPhotos();
+
+    startDropUpload(photos, [path], {}, {}, "trip-uid", "Trip");
+    const status = await settle();
+
+    expect(status.done).toBe(1);
+    expect(status.items[0].album).toBe("Trip");
+    expect(created).toEqual([]);
+    expect(added).toEqual([{ album: "trip-uid", uids: ["uid-1"] }]);
+  });
+
+  it("adds a photo the library already has to the album it was copied into", async () => {
+    const path = await stage("again.jpg", 32);
+    const { photos, added } = albumPhotos();
+    photos.findPhotoDuplicates = async () => ["existing-photo"];
+
+    startDropUpload(photos, [path], {}, {}, "trip-uid", "Trip");
+    const status = await settle();
+
+    expect(status.skipped).toBe(1);
+    expect(added).toEqual([{ album: "trip-uid", uids: ["existing-photo"] }]);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it("keeps a staged copy whose upload failed, for the host to retry", async () => {
+    // A move into the drive has already deleted the original, so this copy is the
+    // photo: losing it to a network error would lose the photo.
+    const path = await stage("failed.jpg", 36);
+    const { photos } = albumPhotos();
+    photos.getFileUploader = async () => {
+      throw new Error("network down");
+    };
+
+    startDropUpload(photos, [path]);
+    const status = await settle();
+
+    expect(status.failed).toBe(1);
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it("leaves a duplicate dropped on the timeline where it already is", async () => {
+    const path = await stage("dup-timeline.jpg", 33);
+    const { photos, added } = albumPhotos();
+    photos.findPhotoDuplicates = async () => ["existing-photo"];
+
+    startDropUpload(photos, [path]);
+    await settle();
+
+    expect(added).toEqual([]);
+  });
+
+  it("neither uploads nor deletes a file from outside the staging folder", async () => {
+    const outside = await writeJpeg("mine.jpg", 34);
+    const { photos, thumbnails } = albumPhotos();
+
+    startDropUpload(photos, [outside]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(getUploadStatus().total).toBe(0);
+    expect(thumbnails).toHaveLength(0);
+    expect(existsSync(outside)).toBe(true);
+  });
+
+  it("adds a photo the library already has to the album its folder makes", async () => {
+    // The folder is the album, so a photo already on the timeline belongs in it too.
+    const folder = join(work, "InApp");
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, "a.jpg"), readFileSync(await writeJpeg("inapp-src.jpg", 35)));
+    const { photos, added, created } = albumPhotos();
+    photos.findPhotoDuplicates = async () => ["existing-photo"];
+
+    startUpload(photos, [folder]);
+    await settle();
+
+    expect(created).toEqual(["InApp"]);
+    expect(added).toEqual([{ album: "made-album", uids: ["existing-photo"] }]);
+    expect(existsSync(join(folder, "a.jpg"))).toBe(true);
+  });
+
+  it("uploads a folder again into its album instead of making another", async () => {
+    const folder = join(work, "Holiday");
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, "old.jpg"), readFileSync(await writeJpeg("hol-old.jpg", 37)));
+    writeFileSync(join(folder, "new.jpg"), readFileSync(await writeJpeg("hol-new.jpg", 38)));
+    const { photos, added, created } = albumPhotos();
+    // The first run left an empty leftover and the real album, named with other case.
+    photos.albums = [
+      { uid: "leftover", name: "Holiday", photoCount: 0 },
+      { uid: "holiday-uid", name: " holiday ", photoCount: 1, members: ["old-photo"] },
+    ];
+    photos.findPhotoDuplicates = async (name: string) => (name === "old.jpg" ? ["old-photo"] : []);
+
+    startUpload(photos, [folder]);
+    const status = await settle();
+
+    expect(status.done).toBe(1);
+    expect(status.skipped).toBe(1);
+    expect(created).toEqual([]);
+    // Only the new photo goes in: the old one is in the album already.
+    expect(added).toEqual([{ album: "holiday-uid", uids: ["uid-1"] }]);
+  });
+
+  it("puts files picked inside an album into that album, folders and all", async () => {
+    const folder = join(work, "Picked");
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, "f.jpg"), readFileSync(await writeJpeg("picked-f.jpg", 40)));
+    const loose = await writeJpeg("picked-loose.jpg", 41);
+    const { photos, added, created } = albumPhotos();
+
+    startUpload(photos, [folder, loose], {}, {}, { uid: "trip-uid", name: "Trip" });
+    const status = await settle();
+
+    expect(status.done).toBe(2);
+    expect(status.items.every((i) => i.album === "Trip")).toBe(true);
+    expect(created).toEqual([]);
+    expect(added).toHaveLength(1);
+    expect(added[0].album).toBe("trip-uid");
+    expect([...added[0].uids].sort()).toEqual(["uid-1", "uid-2"]);
+  });
+
+  it("removes an album it made when nothing could go into it", async () => {
+    const folder = join(work, "Broken");
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, "x.jpg"), readFileSync(await writeJpeg("broken-src.jpg", 39)));
+    const { photos, added, created, deleted } = albumPhotos();
+    photos.getFileUploader = async () => {
+      throw new Error("The block content is too large");
+    };
+
+    startUpload(photos, [folder]);
+    const status = await settle();
+
+    expect(status.failed).toBe(1);
+    expect(created).toEqual(["Broken"]);
+    expect(added).toEqual([]);
+    expect(deleted).toEqual(["made-album"]);
   });
 });
 
@@ -405,7 +719,7 @@ describe("the dimensions and length a file is uploaded with", () => {
     // The frame is a thumbnail, so its size is the thumbnail's. Reading it here would
     // record a 4K video as whatever Explorer happened to hand back.
     const video = writeFakeVideo("framed.mp4");
-    const frame = await writeJpeg("framed-frame.jpg", 90);
+    const frame = await writeFrame(90);
     const { photos, metadata, thumbnails } = recordingPhotos();
 
     startUpload(photos, [video], { [video]: frame });
@@ -483,5 +797,34 @@ describe("where and on what a photo was taken", () => {
 
   it("still says nothing about a file it learned nothing from", () => {
     expect(mediaAttributes({})).toBeUndefined();
+  });
+});
+
+describe("the rows a status reading carries", () => {
+  const row = (name: string, status: UploadItem["status"]): UploadItem => ({ name, album: null, status });
+
+  it("carries everything while the record is small", () => {
+    const all = [row("a", "done"), row("b", "uploading")];
+    expect(statusRows(all, 200)).toBe(all);
+  });
+
+  it("keeps every failure, what is moving and the latest finished, in order, within the limit", () => {
+    const all = [
+      ...Array.from({ length: 1000 }, (_, i) => row(`done-${i}`, "done")),
+      row("broken", "failed"),
+      row("now", "uploading"),
+      ...Array.from({ length: 1000 }, (_, i) => row(`next-${i}`, "pending")),
+    ];
+
+    const rows = statusRows(all, 50);
+
+    expect(rows).toHaveLength(50);
+    expect(rows.some((r) => r.name === "broken")).toBe(true);
+    expect(rows.some((r) => r.name === "now")).toBe(true);
+    expect(rows.some((r) => r.name === "next-0")).toBe(true);
+    expect(rows.some((r) => r.name === "done-999")).toBe(true);
+    expect(rows.some((r) => r.name === "done-0")).toBe(false);
+    // In the record's own order.
+    expect(rows.map((r) => all.indexOf(r))).toEqual([...rows.map((r) => all.indexOf(r))].sort((a, b) => a - b));
   });
 });

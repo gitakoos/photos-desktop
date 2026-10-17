@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -45,6 +45,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, join } from "node:path";
+
+import { guarded, writeChunk } from "./fileWrites.ts";
 
 const NONCE_LEN = 12;
 const TAG_LEN = 16;
@@ -407,7 +409,7 @@ export async function decryptOriginalTo(
   const d = createDecipheriv("aes-256-gcm", dataKey, nonce);
   d.setAuthTag(tag);
   const input = createReadStream(src, { start: NONCE_LEN, end: total - TAG_LEN - 1 });
-  const out = createWriteStream(dest);
+  const out = guarded(createWriteStream(dest));
   let plainBytes = 0;
   try {
     for await (const chunk of input) {
@@ -415,9 +417,7 @@ export async function decryptOriginalTo(
       const plain = d.update(chunk as Buffer);
       plainBytes += plain.length;
       // Respect backpressure so a large original cannot balloon the write buffer.
-      if (!out.write(plain)) {
-        await new Promise<void>((resolve) => out.once("drain", resolve));
-      }
+      await writeChunk(out, plain);
     }
     const tail = d.final(); // throws unless the whole blob authenticates
     plainBytes += tail.length;
@@ -524,16 +524,14 @@ export class OriginalSealer {
     this.part = `${this.dest}.part`;
     const nonce = randomBytes(NONCE_LEN);
     this.cipher = gcmCipher(dataKey as Buffer, nonce);
-    this.file = createWriteStream(this.part);
+    this.file = guarded(createWriteStream(this.part));
     this.file.write(nonce);
   }
 
   /** Seal and append one chunk, honouring backpressure so the buffer stays flat. */
   write(chunk: Uint8Array): Promise<void> | void {
     this.plainBytes += chunk.byteLength;
-    if (!this.file.write(this.cipher.update(chunk))) {
-      return new Promise<void>((resolve) => this.file.once("drain", resolve));
-    }
+    return writeChunk(this.file, this.cipher.update(chunk));
   }
 
   /** Close the blob and publish it. Returns the plaintext byte count. */

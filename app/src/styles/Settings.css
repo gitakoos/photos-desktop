@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -26,8 +26,7 @@
   z-index: 1000;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(2px);
+  background: var(--scrim);
 }
 
 /*
@@ -44,7 +43,7 @@
   border-radius: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--dialog-shadow);
 }
 
 .st-head {
@@ -137,21 +136,40 @@
   color: var(--fg-primary);
 }
 
+/* Each pane's settings sit in one grouped card, split by hairlines, rather than a
+   stack of separate bordered tiles: it reads as a settings list, not a row of widgets. */
 .st-rows {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--page-bg);
 }
 
 .st-row {
   display: flex;
   align-items: flex-start;
   gap: 18px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--page-bg);
+  padding: 14px 16px;
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--border);
   cursor: pointer;
+}
+.st-rows > .st-row:first-child {
+  border-top: none;
+}
+
+/* Storage keeps its two measured blocks spaced apart rather than grouped: each is a
+   card with its own frame and a button, not a one-line setting. */
+.st-storage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.st-storage .st-row {
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
 /* A row whose setting cannot apply right now. The label stays legible — the row has
    to be readable to explain itself — so only the switch and the pointer go. */
@@ -181,6 +199,13 @@
   color: var(--fg-mute);
 }
 
+/* The drive's address: selectable, and broken anywhere rather than overflowing. */
+.st-address {
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono", monospace;
+  user-select: text;
+  overflow-wrap: anywhere;
+}
+
 /* A row whose control is a way out rather than a setting: it leads to a Windows page
    this app cannot stand in for, so it reads as secondary to the switches around it. */
 .st-row-btn {
@@ -199,6 +224,38 @@
 }
 .st-row-btn:hover {
   border-color: var(--fg-mute);
+}
+
+/* The drive's address: a host field, a port field and the button that applies them. */
+.st-server {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.st-field {
+  height: 32px;
+  min-width: 0;
+  width: 150px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--fg-primary);
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono", monospace;
+  font-size: 12.5px;
+}
+.st-field.st-port {
+  width: 90px;
+}
+.st-field:focus {
+  outline: none;
+  border-color: var(--fg-mute);
+}
+.st-row-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* A standalone explanation under a card, not attached to a control. */
@@ -394,12 +451,23 @@
   font-weight: 600;
 }
 
-/* ---- Dropdown (language picker) ---- */
-.st-select {
+/* ---- Dropdown (language picker) ----
+ *
+ * The app's own listbox rather than a native <select>: the OS control cannot be
+ * themed to match the panel and reads as foreign in dark mode. A fixed scrim under
+ * the menu catches the outside click that closes it. */
+.st-dropdown {
   flex: 0 0 auto;
-  max-width: 210px;
+  position: relative;
   margin-top: 1px;
-  padding: 7px 12px;
+}
+.st-dropdown-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
+  height: 34px;
+  padding: 0 12px;
   border-radius: 10px;
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -409,17 +477,61 @@
   cursor: pointer;
   transition: border-color 0.12s ease;
 }
-.st-select:hover {
+.st-dropdown-btn > span {
+  flex: 1 1 auto;
+  text-align: left;
+}
+.st-dropdown-btn > svg {
+  flex: 0 0 auto;
+  color: var(--fg-mute);
+}
+.st-dropdown-btn:hover {
   border-color: var(--fg-mute);
 }
-.st-select:focus-visible {
-  outline: none;
-  border-color: var(--accent);
+.st-dropdown-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
 }
-/* The popup list is OS-rendered; pin its colours so options stay legible in dark mode. */
-.st-select option {
+.st-dropdown-menu {
+  position: absolute;
+  z-index: 11;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 100%;
+  max-height: 240px;
+  margin: 0;
+  padding: 5px;
+  list-style: none;
+  overflow-y: auto;
+  border-radius: 12px;
   background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+.st-dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.st-dropdown-item:hover:not(.on) {
+  background: var(--line-06);
   color: var(--fg-primary);
+}
+.st-dropdown-item.on {
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 /* ---- Palette swatches ---- */
@@ -451,4 +563,72 @@
 
 .st-swatch.on {
   box-shadow: 0 0 0 2px var(--page-bg), 0 0 0 4px var(--fg-primary);
+}
+
+/* ---- About ---- */
+/* The app's identity, a header sitting above the grouped card: name and running version. */
+.st-about {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 2px 14px;
+}
+.st-about-name {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--fg-primary);
+}
+.st-about-ver {
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+
+/* A whole row that is itself a link out (author, support, website, source). Resets the
+   button so it reads as one of the list rows, then tints on hover to say it is clickable. */
+.st-row-link {
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  transition: background 0.12s ease;
+}
+.st-row-link:hover {
+  background: var(--line-06);
+}
+/* The "opens in the browser" mark, centred against the row's two lines. */
+.st-row-link > svg {
+  flex: 0 0 auto;
+  align-self: center;
+  color: var(--fg-mute);
+}
+
+/* The pane's one action button (check for updates / update now). A quiet bordered
+   button, matching the File-types "open" one, rather than a filled gradient that
+   fought the calm of the pane and left its white label hard to read. */
+.st-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  margin-top: 1px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.st-btn:hover:not(:disabled) {
+  border-color: var(--fg-mute);
+}
+.st-btn:disabled {
+  color: var(--fg-mute);
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* A value shown verbatim (a URL), so it takes a mono face. */
+.st-mono {
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 11.5px;
 }

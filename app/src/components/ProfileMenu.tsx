@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -21,8 +21,10 @@
  */
 
 import { useEffect, useRef } from "react";
-import { GearIcon, SignOutIcon } from "./icons";
+import { invoke } from "@tauri-apps/api/core";
+import { GearIcon, PowerIcon, SignOutIcon } from "./icons";
 import { useT } from "../lib/i18n";
+import { isWindows } from "../lib/platform";
 import "../styles/ProfileMenu.css";
 
 export type Account = {
@@ -57,11 +59,14 @@ export function ProfileMenu({
   onClose,
   onSettings,
   onSignOut,
+  placement = "topright",
 }: {
   account: Account | null;
   onClose: () => void;
   onSettings: () => void;
   onSignOut: () => void;
+  /** Where the popover anchors: under the top-bar avatar, or above the sidebar's foot. */
+  placement?: "topright" | "sidebar";
 }) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
@@ -87,7 +92,7 @@ export function ProfileMenu({
   const percent = Math.round(fraction * 100);
 
   return (
-    <div className="pm" ref={ref}>
+    <div className={`pm${placement === "sidebar" ? " pm-sidebar" : ""}`} ref={ref}>
       <div className="pm-head">
         <div className="pm-circle">{account?.initial ?? "?"}</div>
         <div className="pm-id">
@@ -121,6 +126,14 @@ export function ProfileMenu({
         <GearIcon size={15} />
         {t("settings.title")}
       </button>
+      {/* Linux has no tray, and closing the window can leave the app running for the
+          file-manager drive, so quitting for real lives here. */}
+      {!isWindows && (
+        <button className="pm-item" onClick={() => void invoke("quit_app")}>
+          <PowerIcon size={15} />
+          {t("menu.quit")}
+        </button>
+      )}
       <button className="pm-item danger" onClick={onSignOut}>
         <SignOutIcon size={15} />
         {t("profile.signOut")}

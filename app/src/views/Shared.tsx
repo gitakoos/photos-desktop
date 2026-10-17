@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -22,13 +22,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { rpc } from "../lib/rpc";
+import { downloadMessage, downloadPhotos } from "../lib/download";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
+import { VirtualSections } from "../components/VirtualSections";
 import { Lightbox } from "../components/Lightbox";
 import { ShareDialog } from "../components/ShareDialog";
 import { Confirm } from "../components/Confirm";
 import { ContextMenu, type MenuAction, type MenuAt } from "../components/ContextMenu";
-import { ShareIcon } from "../components/icons";
+import { DownloadIcon, ShareIcon } from "../components/icons";
 import { useT } from "../lib/i18n";
 import { prefetchAfter } from "../lib/previewStore";
 import type { AlbumPhoto } from "./Albums";
@@ -66,6 +68,7 @@ export function Shared({
   tab,
   open,
   onOpenChange,
+  onPhotoUids,
   initial,
   onCount,
   onData,
@@ -75,6 +78,8 @@ export function Shared({
   /** The shared album being looked into, or null for the list. */
   open: SharedItem | null;
   onOpenChange: (album: SharedItem | null) => void;
+  /** The open album's photo uids, lifted for the masthead's Download; [] on the list. */
+  onPhotoUids?: (uids: string[]) => void;
   /** What the shell warmed for this tab, for the first paint only. */
   initial?: SharedItem[] | null;
   onCount?: (n: number | null) => void;
@@ -91,6 +96,11 @@ export function Shared({
   // changed from here, so the with-me tab opens no menu at all.
   const [menu, setMenu] = useState<MenuAt<SharedItem> | null>(null);
   const [stopping, setStopping] = useState<SharedItem | null>(null);
+  // A shared photo's own right-click menu (getting a copy out), plus its transient
+  // result line. The album cards keep the manage/stop menu above; this is for photos.
+  const [photoMenu, setPhotoMenu] = useState<MenuAt<string> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
   // Revoking the last share drops the node off this list, so it is re-read rather
   // than patched: only the server knows what is still shared.
   const [reloadKey, setReloadKey] = useState(0);
@@ -128,6 +138,13 @@ export function Shared({
   }, [tab, reloadKey]);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  // A brief result line (download outcome) that clears itself.
+  useEffect(() => {
+    if (!toast) return;
+    const id = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   // The list splits in two, because it holds two different things: albums are drawn
   // as cards with a cover, photos as tiles. Feeding both to one photo grid is what
@@ -173,6 +190,10 @@ export function Shared({
       cancelled = true;
     };
   }, [openUid, reloadKey]);
+
+  useEffect(() => {
+    onPhotoUids?.(openUid ? albumPhotos.map((p) => p.uid) : []);
+  }, [openUid, albumPhotos, onPhotoUids]);
 
   // Report the count up to the top bar (null while loading), so the header can show
   // it next to the tab toggle it owns. An open album reports its own, which is what
@@ -246,6 +267,37 @@ export function Shared({
     }
   }
 
+  // Get a copy of one shared photo out, in whichever download mode is active: the one
+  // thing a with-me recipient most needs from an open album.
+  async function downloadOne(uid: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      // Say it has started, so a large original saving to a folder is not a frozen
+      // right-click. The result line below takes its place, or clears it on a cancel.
+      const result = await downloadPhotos([uid], {
+        onStart: () => setToast(t("download.running")),
+      });
+      const message = downloadMessage(result);
+      setToast(message ? t(message.key, message.vars) : "");
+    } catch (e) {
+      setToast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const photoActions: MenuAction[] = photoMenu
+    ? [
+        {
+          key: "download",
+          label: t("selection.download"),
+          icon: <DownloadIcon size={14} />,
+          onSelect: () => void downloadOne(photoMenu.target),
+        },
+      ]
+    : [];
+
   // The dialog is where sharing is changed in detail; the menu is the short way
   // to it, plus the one action worth reaching without opening it at all.
   const actions: MenuAction[] = menu
@@ -259,6 +311,7 @@ export function Shared({
         {
           key: "stop",
           label: t("share.stopSharing"),
+          separator: true,
           danger: true,
           onSelect: () => setStopping(menu.target),
         },
@@ -284,11 +337,18 @@ export function Shared({
           )}
 
           {!albumLoading && albumPhotos.length > 0 && (
-            <PhotoGrid
-              items={albumPhotos}
-              thumbs={thumbs}
+            <VirtualSections
+              sections={[{ key: "shared-album", items: albumPhotos }]}
               cellSize={cellSize}
-              onOpen={onOpen}
+              grid={(_, items) => (
+                <PhotoGrid
+                  items={items}
+                  thumbs={thumbs}
+                  cellSize={cellSize}
+                  onOpen={onOpen}
+                  onContext={(uid, e) => setPhotoMenu({ x: e.clientX, y: e.clientY, target: uid })}
+                />
+              )}
             />
           )}
         </>
@@ -364,42 +424,53 @@ export function Shared({
           )}
 
           {!loading && topPhotos.length > 0 && (
-            <PhotoGrid
-              items={topPhotos}
-              thumbs={thumbs}
+            <VirtualSections
+              className="g-grid-after-albums"
+              sections={[{ key: "shared-photos", items: topPhotos }]}
               cellSize={cellSize}
-              onOpen={onOpen}
-              onContext={onCellContext}
-              showBadges={false}
-              showName
-              renderOverlay={(item) => {
-                const it = topPhotos.find((i) => i.uid === item.uid);
-                if (!it) return null;
-                return (
-                  <>
-                    {it.isSharedPublicly && (
-                      <div className="g-shared-badges">
-                        <span className="g-badge" title={t("shared.publicLink")}>
-                          🔗
-                        </span>
-                      </div>
-                    )}
-                    {/* Only what the user shares out is theirs to change. */}
-                    {tab === "by" && (
-                      <button
-                        className="g-shared-manage"
-                        title={t("shared.manage")}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setManaging(it);
-                        }}
-                      >
-                        <ShareIcon size={13} />
-                      </button>
-                    )}
-                  </>
-                );
-              }}
+              grid={(_, items) => (
+                <PhotoGrid
+                  items={items}
+                  thumbs={thumbs}
+                  cellSize={cellSize}
+                  onOpen={onOpen}
+                  onContext={(uid, e) =>
+                    tab === "with"
+                      ? setPhotoMenu({ x: e.clientX, y: e.clientY, target: uid })
+                      : onCellContext(uid, e)
+                  }
+                  showBadges={false}
+                  showName
+                  renderOverlay={(item) => {
+                    const it = topPhotos.find((i) => i.uid === item.uid);
+                    if (!it) return null;
+                    return (
+                      <>
+                        {it.isSharedPublicly && (
+                          <div className="g-shared-badges">
+                            <span className="g-badge" title={t("shared.publicLink")}>
+                              🔗
+                            </span>
+                          </div>
+                        )}
+                        {/* Only what the user shares out is theirs to change. */}
+                        {tab === "by" && (
+                          <button
+                            className="g-shared-manage"
+                            title={t("shared.manage")}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setManaging(it);
+                            }}
+                          >
+                            <ShareIcon size={13} />
+                          </button>
+                        )}
+                      </>
+                    );
+                  }}
+                />
+              )}
             />
           )}
         </>
@@ -408,6 +479,17 @@ export function Shared({
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} actions={actions} onClose={() => setMenu(null)} />
       )}
+
+      {photoMenu && (
+        <ContextMenu
+          x={photoMenu.x}
+          y={photoMenu.y}
+          actions={photoActions}
+          onClose={() => setPhotoMenu(null)}
+        />
+      )}
+
+      {toast && <div className="g-toast">{toast}</div>}
 
       {managing && (
         <ShareDialog
@@ -459,6 +541,9 @@ export function Shared({
             if (openUid) return; // an album listing carries no name to patch
             setItems((prev) => prev.map((i) => (i.uid === uid ? { ...i, name } : i)));
           }}
+          // A shared photo is read through a share-scoped path the editor's source does
+          // not take, so editing (which saves a copy to this account) is left off here.
+          editable={false}
         />
       )}
     </>

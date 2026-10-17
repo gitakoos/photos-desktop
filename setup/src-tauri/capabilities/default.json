@@ -12,8 +12,8 @@
       "allow": [
         { "url": "https://akoos.eu" },
         { "url": "https://www.photosforproton.eu" },
-        { "url": "https://github.com/PhotosforProton/photos-desktop" },
-        { "url": "https://github.com/PhotosforProton/photos-desktop/issues" },
+        { "url": "https://github.com/gitakoos/photos-desktop" },
+        { "url": "https://github.com/gitakoos/photos-desktop/issues" },
         { "url": "mailto:github@akoos.eu" }
       ]
     }

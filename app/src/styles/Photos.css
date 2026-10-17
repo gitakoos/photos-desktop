@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -32,12 +32,38 @@
   color: var(--fg-primary);
 }
 
+/* Sidebar layout (opt-in): the gallery lays a navigation widget beside the content
+   column instead of stacking the floating dock beneath it. The content column keeps
+   its own structure, so everything below is shared by both layouts. */
+.gallery.has-sidebar {
+  flex-direction: row;
+}
+
+.g-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* No floating dock to clear in this layout, so the scroll needs far less tail. */
+.has-sidebar .g-scroll {
+  padding-bottom: 40px;
+}
+
 /* ---- Top bar ---- */
 .g-topbar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 20px 14px;
+}
+
+/* In the sidebar layout the window buttons tuck into the top-right corner, so the
+   bar keeps that much clear of its own controls (and of the album header's actions). */
+:root[data-layout="sidebar"] .g-topbar {
+  padding-right: 140px;
 }
 
 .g-filterpill {
@@ -47,7 +73,7 @@
   height: 38px;
   padding: 0 14px;
   border: none;
-  border-radius: 999px;
+  border-radius: 18px;
   background: var(--surface-2);
   color: var(--fg-primary);
   font-size: 13px;
@@ -128,11 +154,27 @@
   display: none;
 }
 
+/* View cross-fade: the tab content fades in on a view switch instead of snapping.
+   Opacity only, so the album masthead's sticky positioning is never disturbed. */
+.g-viewfade {
+  animation: g-viewfade 0.16s ease;
+}
+@keyframes g-viewfade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .g-chip {
   flex: 0 0 auto;
   height: 34px;
   padding: 0 12px;
-  border-radius: 999px;
+  /* On a 34px-tall chip the radius is clamped to 17px, so anything at or above that reads
+     as a full pill; 12px is what actually shows as the Android rounded-rectangle here. */
+  border-radius: 12px;
   background: var(--pill-bg);
   border: 0.5px solid var(--border);
   color: var(--fg-dim);
@@ -216,10 +258,16 @@
 /* Browser-native virtualization: skip layout + paint for off-screen month
  * sections. `contain-intrinsic-size: auto <fallback>` keeps the scrollbar
  * roughly right and remembers each section's real height once it has rendered,
- * so a 3k+ item grid no longer lays out and paints everything at once. */
+ * so a 3k+ item grid does not lay out and paint everything at once. */
 .g-section {
   content-visibility: auto;
   contain-intrinsic-size: auto 600px;
+}
+/* A section the timeline builds only near the screen: drawn in full, so the height it
+   reports is its own and not the placeholder size above. */
+.g-section.live {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
 }
 
 .g-grid {
@@ -387,6 +435,9 @@
 }
 
 .g-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   padding: 8px 16px;
   border-radius: 999px;
   border: none;
@@ -459,7 +510,7 @@
   left: 50%;
   transform: translateX(-50%);
   background: rgba(0, 0, 0, 0.66);
-  color: var(--fg-dim);
+  color: rgba(255, 255, 255, 0.82);
   font-size: 12px;
   padding: 6px 14px;
   border-radius: 999px;
@@ -539,38 +590,65 @@
   font-size: 13px;
 }
 
-/* ---- Search bar (slides in under the top bar, never covers the grid) ---- */
-.g-searchbar {
+/* ---- Search: always on the bar, an input the user can click straight into ---- */
+.g-search {
+  flex: 0 1 340px;
+  min-width: 120px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 8px 0 13px;
+  border-radius: 999px;
+  background: var(--pill-bg);
+  border: 0.5px solid var(--border);
+  color: var(--fg-mute);
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.g-search:focus-within {
+  border-color: var(--accent);
+  color: var(--fg-dim);
+}
+.g-searchfield {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  font-size: 13px;
+  outline: none;
+}
+.g-searchfield::placeholder {
+  color: var(--fg-mute);
+}
+.g-searchx {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+.g-searchx:hover {
+  background: var(--line-06);
+  color: var(--fg-primary);
+}
+/* The type filters and the index progress, shown only while the search is engaged. */
+.g-searchextra {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 0 20px 10px;
 }
-.g-searchinput {
-  flex: 1 1 auto;
-  height: 34px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 0.5px solid var(--border);
-  background: var(--pill-bg);
-  color: var(--fg-primary);
-  font-size: 13px;
-  outline: none;
-}
-.g-searchinput:focus {
-  border-color: var(--accent);
-}
-.g-searchinput::placeholder {
-  color: var(--fg-mute);
-}
 .g-indexing {
   font-size: 11px;
   color: var(--fg-mute);
   white-space: nowrap;
-}
-.g-iconbtn.sel {
-  color: var(--accent);
-  background: var(--accent-wash);
 }
 
 /* ---- Breadcrumbs: album detail header, shared tabs ---- */
@@ -600,15 +678,18 @@
 }
 
 /* ---- Albums ---- */
+/* The top inset clears a hovered card in the first row: it lifts 2px and draws its
+   outline 4px out, which a smaller inset let the scroll area cut off. */
 .g-albums {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 18px;
-  padding-top: 4px;
+  padding-top: 8px;
 }
 /* Shared is the one screen that holds albums and loose photos at once, and the
    tiles need air under the cards or the two runs read as one. */
-.g-albums + .g-grid {
+.g-albums + .g-grid,
+.g-albums + .g-grid-after-albums {
   margin-top: 22px;
 }
 .g-album {
@@ -628,6 +709,7 @@
   border-radius: 12px;
   overflow: hidden;
   background: var(--bg2);
+  transition: transform 0.16s ease;
 }
 
 /* The first tile in the grid makes a new album, so the shape matches a cover
@@ -680,7 +762,7 @@
 }
 .g-album-sync.on {
   opacity: 1;
-  color: #57d38c;
+  color: var(--status-synced);
   background: rgba(0, 0, 0, 0.55);
 }
 .g-album-cover img {
@@ -688,10 +770,16 @@
   height: 100%;
   object-fit: cover;
   display: block;
+  transition: transform 0.3s ease;
 }
 .g-album:hover .g-album-cover {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+  transform: translateY(-2px);
+}
+/* A slow, slight push-in on the cover art, so an album card feels alive under the pointer. */
+.g-album:hover .g-album-cover img {
+  transform: scale(1.04);
 }
 .g-album-name {
   font-size: 13px;
@@ -700,6 +788,20 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* The inline name editor for a freshly created album: sits where the name label does, in
+   the same type, with an accent frame so it reads as editable. */
+.g-album-nameedit {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 2px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--fg-primary);
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
 }
 .g-album-count {
   font-size: 11px;
@@ -801,8 +903,10 @@
 /* ---- Upload button in the top bar ---- */
 .g-uploadbtn {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
   height: 34px;
-  padding: 0 14px;
+  padding: 0 15px;
   border-radius: 999px;
   border: none;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
@@ -864,12 +968,14 @@
   margin: 6px 0 0;
   font-size: 18px;
   font-weight: 700;
-  color: var(--fg-primary);
+  /* The veil is always dark, so its text is fixed light rather than a theme token
+     that would flip to near-black (and vanish) in the light theme. */
+  color: #fff;
 }
 .g-dropveil-sub {
   margin: 0;
   font-size: 12px;
-  color: var(--fg-dim);
+  color: rgba(255, 255, 255, 0.72);
 }
 
 /* ---- Selection: hover dot, marquee, action bar ---- */
@@ -889,13 +995,16 @@
   line-height: 1;
   opacity: 0;
   cursor: pointer;
-  transition: opacity 0.1s ease;
+  transition: opacity 0.1s ease, transform 0.14s cubic-bezier(0.2, 0.9, 0.3, 1),
+    background 0.12s ease, border-color 0.12s ease;
 }
 .g-cell:hover .g-seldot {
   opacity: 1;
 }
 .g-cell.sel .g-seldot {
   opacity: 1;
+  /* A small grow as the accent fills in, so ticking a photo has a beat to it. */
+  transform: scale(1.08);
   background: var(--accent);
   border-color: var(--accent);
 }
@@ -1093,15 +1202,17 @@
 }
 
 /* The album back control is a real pill, matching the chips. */
+/* A quiet ghost crumb, not a hard pill: transparent until hovered, so the back control
+   reads as chrome rather than a chip fighting the window buttons. */
 .g-back {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 3px;
   height: 34px;
-  padding: 0 14px 0 10px;
-  border-radius: 999px;
-  border: 0.5px solid var(--border);
-  background: var(--pill-bg);
+  padding: 0 12px 0 7px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
   color: var(--fg-dim);
   font-size: 13px;
   font-weight: 500;
@@ -1110,7 +1221,7 @@
 }
 .g-back:hover {
   color: var(--fg-primary);
-  border-color: var(--surface-2);
+  background: var(--line-06);
 }
 
 /* When an album is open its header lives in the top bar, on one row. */
@@ -1170,4 +1281,167 @@
 .g-albumdel:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+/* ---- Album masthead ----
+   A large scrolling header at the top of an open album, like the web client: a big
+   cover on the left, the title and "date . N items" at the top of the column beside it,
+   and the album's actions at that column's bottom-right. Its left edge lines up with
+   the grid below (both sit inside the scroll's 20px inset).
+
+   It is sticky: it pins to the top of the scroll so the cover, title and actions stay in
+   view while the photos scroll under it. The grid follows it in flow, so the masthead
+   paints a solid ground and lifts on its own layer to pass cleanly over the grid. */
+/* The masthead is ordinary flow: it scrolls away with the grid, which is perfectly
+   smooth. Its summary reappears in the fixed top bar once it is gone (see g-topalbum),
+   so nothing here resizes on scroll and there is no sticky-resize judder. */
+/* A sticky masthead that compresses as the grid scrolls: `--c` (0 at the top, 1 fully
+   collapsed) is driven from the scroll position in Photos.tsx, and every size below
+   interpolates on it, so it thins to a slim bar instead of vanishing, with no threshold
+   to flicker at. */
+.g-albumhero {
+  box-sizing: border-box;
+  display: flex;
+  align-items: stretch;
+  gap: calc(28px - var(--c, 0) * 14px);
+  padding: calc(12px - var(--c, 0) * 6px) 0 calc(24px - var(--c, 0) * 16px);
+  background: var(--bg0);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  overflow: hidden;
+}
+/* Gives back the height the masthead loses while it compresses, so the grid stays put. */
+.g-albumhero-spacer {
+  height: 0;
+}
+.g-albumhero-cover {
+  flex: 0 0 auto;
+  width: calc(480px - var(--c, 0) * 400px);
+  height: calc(272px - var(--c, 0) * 200px);
+  border-radius: 18px;
+  overflow: hidden;
+  background: var(--bg2);
+}
+.g-albumhero-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.g-albumhero-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(10px - var(--c, 0) * 10px);
+  padding: calc(6px - var(--c, 0) * 6px) 0;
+}
+/* The title shrinks by scale rather than by font size: a font size that changes every
+   frame re-lays and re-draws the text each time, which is what made it shimmer. The
+   width grows as the scale falls, so the scaled title still uses the whole column. */
+.g-albumhero-title {
+  margin: 0;
+  color: var(--fg-primary);
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: calc(100% / (1 - var(--c, 0) * 0.40625));
+  transform: scale(calc(1 - var(--c, 0) * 0.40625));
+  transform-origin: left top;
+  will-change: transform;
+  flex: 0 0 auto;
+  margin-bottom: calc(var(--c, 0) * -16px);
+}
+.g-albumhero-sub {
+  font-size: 14px;
+  color: var(--fg-mute);
+  opacity: calc(1 - var(--c, 0) * 1.8);
+  max-height: calc(20px - var(--c, 0) * 20px);
+  overflow: hidden;
+}
+/* Pushed to the bottom of the column and aligned right, so the actions sit at the
+   masthead's bottom-right corner beside the cover. */
+.g-albumhero-actions {
+  margin-top: auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* Flat text + icon actions, no pill: a plain toolbar button that only shows a soft
+   ground on hover, so the masthead reads as a header rather than a row of chips. */
+.g-heroact {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.08s ease;
+}
+.g-heroact:hover:not(:disabled) {
+  background: var(--line-06);
+  color: var(--fg-primary);
+}
+.g-heroact:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.g-heroact:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* A press-down beat shared by the app's pill and dock buttons, so a click has a little
+   weight to it. Kept off disabled controls, which should not answer a press. */
+.g-filterpill:active,
+.g-chip:active,
+.g-tab:active,
+.g-uploadbtn:active:not(:disabled),
+.g-back:active {
+  transform: scale(0.95);
+}
+
+/* Once the masthead has scrolled away, its summary rides in the fixed top bar: a small
+   cover and the title on the left, the same actions on the right. The top bar does not
+   scroll, so showing and hiding this never nudges the grid, which is what keeps the
+   collapse smooth instead of juddering. */
+.g-topalbum-cover {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg2);
+}
+.g-topalbum-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.g-topalbum-title {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40ch;
+}
+.g-topalbum-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }

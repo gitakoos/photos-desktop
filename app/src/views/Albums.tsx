@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -28,16 +28,21 @@ import { pinOffline, unpinOffline } from "../lib/offline";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
+import { VirtualSections } from "../components/VirtualSections";
 import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
 import { Lightbox } from "../components/Lightbox";
 import { Confirm } from "../components/Confirm";
 import { ContextMenu, type MenuAction, type MenuAt } from "../components/ContextMenu";
-import { AlbumFreeUpDialog, NameDialog } from "../components/AlbumDialogs";
+import { AlbumFreeUpDialog, AlbumPicker, NameDialog } from "../components/AlbumDialogs";
 import { ShareDialog } from "../components/ShareDialog";
 import {
   CloudIcon,
   DownloadIcon,
+  FolderOpenIcon,
+  HeartIcon,
+  LibraryAddIcon,
   LibraryRemoveIcon,
+  OfflinePinIcon,
   ShareIcon,
   TrashIcon,
 } from "../components/icons";
@@ -53,6 +58,8 @@ export type Album = {
   coverUid: string | null;
   lastActivityTime: number;
 };
+/** How the album grid is ordered: the server's last-activity order, by name, or by size. */
+export type AlbumSort = "activity" | "name" | "count";
 export type AlbumPhoto = { uid: string; captureTime: number };
 
 /**
@@ -62,6 +69,7 @@ export type AlbumPhoto = { uid: string; captureTime: number };
  */
 export function Albums({
   cellSize,
+  albumCellSize = 190,
   open,
   onOpenChange,
   localUids,
@@ -72,8 +80,15 @@ export function Albums({
   onChanged,
   onAlbumContext,
   onData,
+  onPhotoUids,
+  query = "",
+  sort = "activity",
+  favoriteUids,
+  onFavoriteChanged,
 }: {
   cellSize: number;
+  /** The album LIST card min-width in px, from the shell's album zoom (Ctrl+wheel). */
+  albumCellSize?: number;
   open: Album | null;
   onOpenChange: (album: Album | null) => void;
   /** Photos currently downloaded, for the per-photo cloud badge. */
@@ -92,6 +107,20 @@ export function Albums({
   /** Right-click on an album in the list. The shell owns the menu, because it
    *  owns the rename and delete the menu offers. */
   onAlbumContext?: (album: Album, e: MouseEvent) => void;
+  /** The open album's photo uids, lifted so the shell's top-bar Download can act on
+   *  the whole album. Reported as the album loads, and cleared to [] on the list. */
+  onPhotoUids?: (uids: string[]) => void;
+  /** The album-list search query (filters by name) and the sort order, owned by the shell. */
+  query?: string;
+  sort?: AlbumSort;
+  /**
+   * The favourites the shell knows from the timeline. An album lists uids alone, so
+   * this is how its menu and viewer tell which way the heart points; a photo found
+   * only in albums reads as not a favourite, and favouriting it again is harmless.
+   */
+  favoriteUids?: Set<string>;
+  /** A heart flipped here, so the shell's timeline keeps the same state. */
+  onFavoriteChanged?: (uid: string, favorite: boolean) => void;
 }) {
   const t = useT();
   const [albums, setAlbums] = useState<Album[]>(initial ?? []);
@@ -174,6 +203,7 @@ export function Albums({
   // `busy` drives the "Downloading…" toast, so the album actions keep their own
   // flag: they are one request each and only need to bar a second click.
   const [albumBusy, setAlbumBusy] = useState(false);
+  const [pickAlbum, setPickAlbum] = useState(false);
   const [busy, setBusy] = useState(false);
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -263,9 +293,31 @@ export function Albums({
     onCount?.(!openUid || loading ? null : photos.length);
   }, [openUid, loading, photos.length, onCount]);
 
+  // Report the open album's photo uids up, so the top bar's Download can act on the
+  // whole album. Cleared to [] on the list (no album open).
+  useEffect(() => {
+    onPhotoUids?.(!openUid || loading ? [] : photos.map((p) => p.uid));
+  }, [openUid, loading, photos, onPhotoUids]);
+
+  // Covers for the list cards; the open album's own cover is resolved by the shell for
+  // the masthead, so an open album needs none here.
+  // The album list after the shell's search and sort: filter by name, then order by the
+  // chosen mode ("activity" keeps the server's own most-recent-first order).
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const base = q ? albums.filter((a) => (a.name || "").toLowerCase().includes(q)) : albums;
+    if (sort === "name") {
+      return [...base].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    }
+    if (sort === "count") {
+      return [...base].sort((a, b) => b.photoCount - a.photoCount);
+    }
+    return base;
+  }, [albums, query, sort]);
+
   const coverUids = useMemo(
-    () => (open ? [] : albums.map((a) => a.coverUid).filter((u): u is string => !!u)),
-    [albums, open],
+    () => (open ? [] : shown.map((a) => a.coverUid).filter((u): u is string => !!u)),
+    [shown, open],
   );
   const covers = useThumbnails(coverUids);
 
@@ -296,9 +348,11 @@ export function Albums({
     return prefetchAfter(current.uid, uids);
   }, [lightboxIdx, photos]);
 
-  function onCellClick(uid: string) {
+  sel.order.current = open ? photos.map((p) => p.uid) : [];
+
+  function onCellClick(uid: string, e?: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) {
     if (sel.wasDragging()) return;
-    if (sel.selected.size > 0) sel.toggle(uid);
+    if (sel.selected.size > 0 || e?.shiftKey || e?.ctrlKey || e?.metaKey) sel.toggle(uid, e);
     else setLightboxIdx(photos.findIndex((p) => p.uid === uid));
   }
 
@@ -508,6 +562,57 @@ export function Albums({
   }
 
   /**
+   * Favourites the selection. The hearts flip now and the ones the server refuses
+   * flip back, the way the timeline does it.
+   */
+  async function favoriteSelected(favorite: boolean) {
+    const uids = [...sel.selected];
+    if (uids.length === 0) return;
+    uids.forEach((u) => onFavoriteChanged?.(u, favorite));
+    try {
+      const results = await rpc<{ uid: string; ok: boolean }[]>("setFavorite", { uids, favorite });
+      const failed = results.filter((r) => !r.ok);
+      failed.forEach((r) => onFavoriteChanged?.(r.uid, !favorite));
+      if (failed.length > 0) setToast(t("viewer.favoriteFailed"));
+    } catch (e) {
+      uids.forEach((u) => onFavoriteChanged?.(u, !favorite));
+      setToast(String(e));
+    }
+  }
+
+  /** Puts the selection in another album as well; this one keeps them. */
+  async function addSelectedToAlbum(albumUid: string) {
+    const uids = [...sel.selected];
+    if (uids.length === 0) return;
+    setAlbumBusy(true);
+    try {
+      const results = await rpc<{ uid: string; ok: boolean }[]>("addPhotosToAlbum", {
+        albumUid,
+        uids,
+      });
+      const added = results.filter((r) => r.ok).length;
+      const failed = results.length - added;
+      setToast(
+        failed > 0
+          ? t("albums.addPartial", { ok: added, failed })
+          : t("albums.added", { count: added }),
+      );
+      sel.clear();
+      if (added > 0) onChanged?.();
+    } catch (e) {
+      setToast(String(e));
+    } finally {
+      setPickAlbum(false);
+      setAlbumBusy(false);
+    }
+  }
+
+  /** Shows the photo's copy in the Proton Photos folder, selected, in File Explorer. */
+  async function revealPhoto(uid: string) {
+    await invoke("reveal_photo", { uid }).catch((e) => setToast(String(e)));
+  }
+
+  /**
    * Opens the share dialog for one photo. An album carries capture times and
    * uids only, so the name is fetched for the subtitle; without one the dialog
    * still opens, because the name is not what is being shared.
@@ -525,8 +630,21 @@ export function Albums({
   // name a single photo, so they stand down while a selection does; the rest act
   // on everything highlighted. Removing from the album sits above trashing, both
   // last, as they do in the selection bar.
+  const photoFavorite = !!photoMenu && !!favoriteUids?.has(photoMenu.target);
   const photoActions: MenuAction[] = photoMenu
     ? [
+        {
+          key: "album",
+          label: t("selection.addToAlbum"),
+          icon: <LibraryAddIcon size={14} />,
+          onSelect: () => setPickAlbum(true),
+        },
+        {
+          key: "favorite",
+          label: photoFavorite ? t("selection.unfavorite") : t("selection.favorite"),
+          icon: <HeartIcon size={14} filled={photoFavorite} />,
+          onSelect: () => void favoriteSelected(!photoFavorite),
+        },
         ...(sel.selected.size === 1
           ? [
               {
@@ -548,6 +666,27 @@ export function Albums({
           icon: <DownloadIcon size={14} />,
           onSelect: () => void runSelection(downloadSelected),
         },
+        ...(sel.selected.size === 1 && localUids.has(photoMenu.target)
+          ? [
+              {
+                key: "reveal",
+                label: t("selection.showInFolder"),
+                icon: <FolderOpenIcon size={14} />,
+                onSelect: () => void revealPhoto(photoMenu.target),
+              },
+            ]
+          : []),
+        {
+          key: "offline",
+          label: t(
+            offlineUids.has(photoMenu.target) ? "selection.offlineRemove" : "selection.offlineAdd",
+          ),
+          icon: <OfflinePinIcon size={14} />,
+          onSelect: () =>
+            void runSelection(
+              offlineUids.has(photoMenu.target) ? offlineRemoveSelected : offlineAddSelected,
+            ),
+        },
         {
           key: "remove",
           label: t("selection.removeFromAlbum"),
@@ -558,6 +697,7 @@ export function Albums({
           key: "trash",
           label: t("selection.trash"),
           icon: <TrashIcon size={14} />,
+          separator: true,
           danger: true,
           onSelect: () => setConfirmTrash(true),
         },
@@ -577,16 +717,22 @@ export function Albums({
           </div>
         )}
 
-        <PhotoGrid
-          items={photos}
-          thumbs={photoThumbs}
+        <VirtualSections
+          sections={[{ key: "album", items: photos }]}
           cellSize={cellSize}
-          selected={sel.selected}
-          onToggle={sel.toggle}
-          onOpen={onCellClick}
-          onContext={onCellContext}
-          offlineUids={offlineUids}
-          localUids={localUids}
+          grid={(_, items) => (
+            <PhotoGrid
+              items={items}
+              thumbs={photoThumbs}
+              cellSize={cellSize}
+              selected={sel.selected}
+              onToggle={sel.toggle}
+              onOpen={onCellClick}
+              onContext={onCellContext}
+              offlineUids={offlineUids}
+              localUids={localUids}
+            />
+          )}
         />
 
         {photoMenu && (
@@ -622,9 +768,20 @@ export function Albums({
           onOfflineRemove={
             allSelectedOffline ? () => void runSelection(offlineRemoveSelected) : undefined
           }
+          onAddToAlbum={() => setPickAlbum(true)}
           onRemoveFromAlbum={() => setConfirmRemove(true)}
           onTrash={() => setConfirmTrash(true)}
         />
+
+        {pickAlbum && (
+          <AlbumPicker
+            count={sel.selected.size}
+            busy={albumBusy}
+            exclude={open.uid}
+            onPick={(albumUid) => void addSelectedToAlbum(albumUid)}
+            onCancel={() => setPickAlbum(false)}
+          />
+        )}
 
         {confirmRemove && (
           <Confirm
@@ -677,6 +834,10 @@ export function Albums({
             onClose={() => setLightboxIdx(null)}
             onTrashed={handleTrashed}
             onRenamed={() => {}}
+            onEdited={onChanged}
+            // Only a known favourite is passed on; otherwise the viewer's own lookup decides.
+            isFavorite={favoriteUids?.has(current.uid) ? true : undefined}
+            onFavoriteChanged={onFavoriteChanged}
           />
         )}
 
@@ -706,16 +867,6 @@ export function Albums({
   }
 
   // ---- Album list ----
-  if (loading && albums.length === 0) {
-    return (
-      <div className="g-albums">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <div className="g-album g-skel" key={i} />
-        ))}
-      </div>
-    );
-  }
-
   const nameDialog = creating && (
     <NameDialog
       title={t("albums.newTitle")}
@@ -725,6 +876,19 @@ export function Albums({
       onCancel={() => setCreating(false)}
     />
   );
+
+  if (loading && albums.length === 0) {
+    return (
+      <div
+      className="g-albums"
+      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${albumCellSize}px, 1fr))` }}
+    >
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div className="g-album g-skel" key={i} />
+        ))}
+      </div>
+    );
+  }
 
   if (albums.length === 0) {
     return (
@@ -742,8 +906,25 @@ export function Albums({
     );
   }
 
+  // A search that matched no album name: say so, rather than leaving just the
+  // "new album" card floating in an otherwise empty grid.
+  if (query.trim() && shown.length === 0) {
+    return (
+      <>
+        <div className="g-empty">
+          <p className="g-empty-title">{t("albums.searchEmpty")}</p>
+        </div>
+        {nameDialog}
+        {toast && <div className="g-toast">{toast}</div>}
+      </>
+    );
+  }
+
   return (
-    <div className="g-albums">
+    <div
+      className="g-albums"
+      style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${albumCellSize}px, 1fr))` }}
+    >
       <button className="g-album g-album-new" onClick={() => setCreating(true)}>
         <div className="g-album-newbox">
           <span className="g-album-newplus">+</span>
@@ -751,7 +932,7 @@ export function Albums({
         <div className="g-album-name">{t("albums.newAlbum")}</div>
       </button>
 
-      {albums.map((a) => (
+      {shown.map((a) => (
         <button
           className="g-album"
           key={a.uid}

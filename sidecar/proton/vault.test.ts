@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -26,7 +26,16 @@ import { createHash, randomBytes, scryptSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initStore, isReady, storeDir } from "./store";
-import { createVault, unlockVault, vaultExists, lockVault, setVaultMetaKey } from "./vault";
+import {
+  createDeviceVault,
+  createVault,
+  unlockDeviceVault,
+  unlockVault,
+  vaultExists,
+  vaultMode,
+  lockVault,
+  setVaultMetaKey,
+} from "./vault";
 
 // Point the store (and therefore vault.json) at a throwaway temp directory, and
 // stand in for the key the Rust host supplies from behind DPAPI.
@@ -98,5 +107,45 @@ describe("vault metadata at rest", () => {
     lockVault();
     expect(unlockVault(pw)).toBe(false);
     expect(isReady()).toBe(false);
+  });
+});
+
+describe("a vault that needs no password", () => {
+  it("opens by this Windows account alone, and with no password", () => {
+    createDeviceVault();
+    expect(vaultMode()).toBe("device");
+    lockVault();
+    expect(unlockVault("")).toBe(false);
+    expect(unlockVault("anything")).toBe(false);
+    expect(isReady()).toBe(false);
+    expect(unlockDeviceVault()).toBe(true);
+    expect(isReady()).toBe(true);
+  });
+
+  it("keeps its key sealed on disk", () => {
+    createDeviceVault();
+    const raw = readFileSync(metaFile());
+    expect(() => JSON.parse(raw.toString("utf8"))).toThrow();
+    expect(raw.toString("utf8")).not.toContain("device");
+  });
+
+  it("does not open under another Windows account's key", () => {
+    createDeviceVault();
+    lockVault();
+    setVaultMetaKey("22".repeat(32));
+    try {
+      expect(unlockDeviceVault()).toBe(false);
+      expect(vaultMode()).toBeNull();
+    } finally {
+      setVaultMetaKey("11".repeat(32));
+    }
+  });
+
+  it("is never opened as a password vault, nor a password vault as one", () => {
+    createVault("a password of mine");
+    expect(vaultMode()).toBe("password");
+    lockVault();
+    expect(unlockDeviceVault()).toBe(false);
+    expect(unlockVault("a password of mine")).toBe(true);
   });
 });

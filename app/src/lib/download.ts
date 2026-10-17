@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -38,7 +38,6 @@
 // photo, and still reported the full count as downloaded.
 
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 
 import { rpc } from "./rpc";
 
@@ -58,6 +57,12 @@ type SaveStatus = SaveProgress & { running: boolean };
 // How often a running save is polled. A read is cheap, so this stays snappy without
 // pinning the host's single, one-in-flight RPC channel.
 const SAVE_POLL_MS = 300;
+
+/**
+ * The folder to save into, picked through the host: a save is refused for any folder the
+ * host did not see picked, so the picker has to be its own. Null when dismissed.
+ */
+const pickSaveFolder = () => invoke<string | null>("pick_save_folder").catch(() => null);
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -108,15 +113,41 @@ export async function downloadPhotos(
 ): Promise<DownloadResult> {
   if (await explorerMode()) {
     handlers?.onStart?.();
-    const kept = await invoke<number>("pin_selected", { uids });
-    return { mode: "explorer", kept, total: uids.length };
+    const { kept, missing } = await invoke<{ kept: number; missing: string[] }>("pin_selected", {
+      uids,
+    });
+    // Everything had a placeholder to fill in place: the ordinary mount download.
+    if (missing.length === 0) return { mode: "explorer", kept, total: uids.length };
+    // Some of the selection has no placeholder under the mount (a photo shared with
+    // me, or one that lives only inside an album), so it cannot be pinned in place.
+    // Save those as ordinary files in a folder instead.
+    const dir = await pickSaveFolder();
+    if (typeof dir !== "string") {
+      // Folder picker dismissed: report the copies that did pin in place, rather than
+      // hiding them behind a cancel. If none pinned, that reads as "nothing downloaded".
+      return kept > 0 ? { mode: "explorer", kept, total: uids.length } : { mode: "cancelled" };
+    }
+    const { started } = await rpc<{ started: boolean }>("startSaveOriginals", {
+      uids: missing,
+      destDir: dir,
+    });
+    // Another save already holds the single status record. Don't poll it as if it were
+    // ours; report the copies that pinned in place, or nothing, rather than a stranger's
+    // count. (In practice the per-view button guards make this rare.)
+    if (!started) {
+      return kept > 0 ? { mode: "explorer", kept, total: uids.length } : { mode: "cancelled" };
+    }
+    const { done, failed } = await pollSave(handlers?.onProgress);
+    // The copies pinned in place are downloaded too, so they count toward the total.
+    return { mode: "saved", ok: kept + done, failed };
   }
-  const dir = await open({ directory: true, multiple: false });
+  const dir = await pickSaveFolder();
   if (typeof dir !== "string") return { mode: "cancelled" };
   handlers?.onStart?.();
   // Start the save and let it run in the background; the counts come from polling,
   // not from one long call that would pin the channel for the whole batch.
-  await rpc("startSaveOriginals", { uids, destDir: dir });
+  const { started } = await rpc<{ started: boolean }>("startSaveOriginals", { uids, destDir: dir });
+  if (!started) return { mode: "cancelled" }; // a save is already running; leave it be
   const { done, failed } = await pollSave(handlers?.onProgress);
   return { mode: "saved", ok: done, failed };
 }

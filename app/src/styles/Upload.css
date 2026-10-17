@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -26,8 +26,7 @@
   z-index: 900;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(2px);
+  background: var(--scrim);
 }
 
 /* Sized to the screen, never taller than it. */
@@ -41,7 +40,7 @@
   border-radius: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--dialog-shadow);
 }
 
 .up-head {
@@ -144,6 +143,47 @@
   filter: none;
 }
 
+/* ---- Import from another service ---- */
+.up-import {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--page-bg);
+}
+.up-importtext {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.up-importtitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+.up-importsub {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+.up-importstate {
+  flex: 1 0 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.up-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  filter: none;
+}
+
 /* ---- Progress ---- */
 .up-bar {
   height: 5px;
@@ -165,6 +205,10 @@
 .up-dim {
   color: var(--fg-mute);
 }
+.up-rows {
+  margin: 0;
+  font-size: 11px;
+}
 .up-bad {
   color: var(--error);
 }
@@ -182,6 +226,7 @@
 }
 .up-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
@@ -223,6 +268,16 @@
 }
 .up-item.done .up-state {
   color: var(--status-synced);
+}
+/* Why a file failed, in full on its own line and selectable, so it can be read and copied. */
+.up-reason {
+  flex: 1 0 100%;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
 }
 
 .up-error {

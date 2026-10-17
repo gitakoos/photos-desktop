@@ -1,0 +1,74 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The review is the album picker's frame and the timeline's tiles; this only adds what
+   is its own. Every item starts kept, so a kept tile shows its tick without the ring and
+   dimming a picked one gets in the grid: here the picture is the point, and a whole
+   screen of rings would hide it. */
+.ir-cell {
+  cursor: pointer;
+}
+.ir-cell.kept .g-seldot {
+  opacity: 1;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.ir-cell.out .g-seldot {
+  opacity: 1;
+}
+.ir-cell.out img,
+.ir-cell.out .g-cell-ph {
+  opacity: 0.3;
+  filter: grayscale(1);
+}
+.ir-day {
+  padding: 0 5px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.ir-day.none {
+  font-style: italic;
+  opacity: 0.8;
+}
+.ir-already {
+  padding: 0 5px;
+  font-size: 10px;
+  color: var(--status-synced);
+}
+
+/* The album switch and the hint share the picker's footer with its two buttons. */
+.ir-foot {
+  align-items: center;
+}
+.ir-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+.ir-hint {
+  font-size: 12px;
+  color: var(--fg-mute);
+  margin-right: 6px;
+}

@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -28,11 +28,39 @@
   position: fixed;
   z-index: 1000;
   min-width: 210px;
-  padding: 7px;
+  padding: 6px;
   border-radius: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--menu-shadow);
+  transform-origin: top left;
+  animation: cm-in 0.13s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* A small lift and fade as it opens, from the corner the click landed on. Skipped
+   for anyone who has asked the system to still motion. */
+@keyframes cm-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cm {
+    animation: none;
+  }
+}
+
+/* Sets one group of actions apart from the next, most often the destructive row at
+   the foot. Bleeds to the panel edges under the rows' own inset padding. */
+.cm-sep {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--border);
 }
 
 .cm-item {
@@ -49,6 +77,7 @@
   cursor: pointer;
   text-align: left;
   white-space: nowrap;
+  transition: background 0.1s ease, color 0.1s ease;
 }
 
 .cm-item:enabled:hover,
@@ -78,6 +107,7 @@
   display: inline-flex;
   flex: 0 0 auto;
   color: var(--fg-dim);
+  transition: color 0.1s ease;
 }
 
 .cm-item:enabled:hover .cm-icon,

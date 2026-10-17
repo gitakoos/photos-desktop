@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -121,11 +121,14 @@ export function NameDialog({
 export function AlbumPicker({
   count,
   busy,
+  exclude,
   onPick,
   onCancel,
 }: {
   count: number;
   busy?: boolean;
+  /** The album the photos are being added from, which is left off the list. */
+  exclude?: string;
   onPick: (albumUid: string) => void;
   onCancel: () => void;
 }) {
@@ -140,7 +143,7 @@ export function AlbumPicker({
     (async () => {
       try {
         const list = await rpc<Album[]>("getAlbums");
-        if (!cancelled) setAlbums(list);
+        if (!cancelled) setAlbums(exclude ? list.filter((a) => a.uid !== exclude) : list);
       } catch (e) {
         if (!cancelled) {
           setError(String(e));
@@ -151,7 +154,7 @@ export function AlbumPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [exclude]);
 
   useEffect(() => {
     if (naming) return; // the name dialog owns the keys while it is up

@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -32,18 +32,21 @@ import {
   decodePreview,
   deleteLocalFile,
   isMissingCodec,
+  localEditorSource,
   localFileInfo,
   localFileUrl,
   looksLikeVideo,
   needsDecode,
   renameLocalFile,
+  saveLocalEdit,
   toMillis,
   type LocalFileInfo,
   type OpenFailure,
 } from "../lib/localFile";
 import { Confirm } from "./Confirm";
+import { PhotoEditor } from "./PhotoEditor";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
-import { TrashIcon, UploadArrowIcon } from "./icons";
+import { PencilIcon, TrashIcon, UploadArrowIcon } from "./icons";
 import { useT } from "../lib/i18n";
 
 const APP_TITLE = "Photos for Proton";
@@ -98,6 +101,7 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState("");
   // Whether an upload has been asked for at all, so a record left over from
   // earlier in the session is not reported as this file's own result.
@@ -318,6 +322,10 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         ? { kind: "message", text: problemText }
         : { kind: "image", src, loading };
 
+  // Editing is offered only for a still image that has actually drawn: never a video, a
+  // file that would not open, or one still resolving.
+  const canEdit = !failure && !isVideo && stage.kind === "image" && !!src;
+
   const notice =
     !sent || needsSignIn
       ? null
@@ -366,6 +374,17 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         // tooltip on a disabled control, so the title sits on a wrapper that is
         // never disabled and the button keeps its own accessible name.
         <>
+          {canEdit && (
+            <button
+              className="lbx-ibtn"
+              disabled={busy}
+              onClick={() => setEditing(true)}
+              title={t("editor.edit")}
+              aria-label={t("editor.edit")}
+            >
+              <PencilIcon size={16} />
+            </button>
+          )}
           <span className="lbx-ibtn-wrap" title={uploadLabel}>
             <button
               className="lbx-ibtn"
@@ -455,6 +474,24 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
           danger
           onCancel={() => setConfirmDelete(false)}
           onConfirm={() => void remove()}
+        />
+      )}
+
+      {/* Over the whole viewer while it is up. Saving writes a new copy beside the
+          original, so the viewer is retargeted onto it, exactly as a rename does. */}
+      {editing && (
+        <PhotoEditor
+          sourceKey={current}
+          loadSource={() => localEditorSource(current)}
+          saveEdit={(jpegBase64) => saveLocalEdit(current, jpegBase64)}
+          onClose={() => setEditing(false)}
+          onSaved={(p) => {
+            setEditing(false);
+            if (p) {
+              setCurrent(p);
+              onRetarget(p);
+            }
+          }}
         />
       )}
     </ViewerShell>

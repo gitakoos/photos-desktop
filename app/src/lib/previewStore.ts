@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -109,7 +109,7 @@ export function loadPreview(uid: string): Promise<string | null> {
  * Let go of every request in flight for a photo outside `keep`.
  *
  * The viewer's cost per photo is one preview, and the sidecar answers one call at a
- * time, so a quick run through fifty photos used to leave fifty of them queued and the
+ * time, so a quick run through fifty photos would leave fifty of them queued and the
  * photo the reader stopped on waiting behind the lot. Nothing wants those answers any
  * more by then, and this is where that is said out loud: the host drops a call it has
  * not started, so a superseded preview stops costing the channel anything at all.

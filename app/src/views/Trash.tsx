@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -24,6 +24,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { rpc } from "../lib/rpc";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
+import { VirtualSections } from "../components/VirtualSections";
 import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
 import { Confirm } from "../components/Confirm";
 import { ContextMenu, type MenuAction, type MenuAt } from "../components/ContextMenu";
@@ -185,10 +186,12 @@ export function Trash({
     }
   }
 
+  sel.order.current = items.map((i) => i.uid);
+
   /** Nothing opens from the trash: a click selects, so the actions stay honest. */
-  function onCellClick(uid: string) {
+  function onCellClick(uid: string, e?: { shiftKey: boolean }) {
     if (sel.wasDragging()) return;
-    sel.toggle(uid);
+    sel.toggle(uid, e);
   }
 
   /** Right-clicking outside the selection makes that node the selection first. */
@@ -212,6 +215,7 @@ export function Trash({
           key: "delete",
           label: t("selection.deleteForever"),
           icon: <TrashIcon size={14} />,
+          separator: true,
           danger: true,
           onSelect: () => setConfirmDelete(true),
         },
@@ -232,24 +236,30 @@ export function Trash({
       )}
 
       {items.length > 0 && (
-        <PhotoGrid
-          items={items}
-          thumbs={thumbs}
+        <VirtualSections
+          sections={[{ key: "trash", items: items }]}
           cellSize={cellSize}
-          selected={sel.selected}
-          onToggle={sel.toggle}
-          onOpen={onCellClick}
-          onContext={onCellContext}
-          showName
-          renderOverlay={(item) =>
-            albumUids.has(item.uid) ? (
-              <div className="g-shared-badges">
-                <span className="g-badge" title={t("shared.album")}>
-                  ▤
-                </span>
-              </div>
-            ) : null
-          }
+          grid={(_, items) => (
+            <PhotoGrid
+              items={items}
+              thumbs={thumbs}
+              cellSize={cellSize}
+              selected={sel.selected}
+              onToggle={sel.toggle}
+              onOpen={onCellClick}
+              onContext={onCellContext}
+              showName
+              renderOverlay={(item) =>
+                albumUids.has(item.uid) ? (
+                  <div className="g-shared-badges">
+                    <span className="g-badge" title={t("shared.album")}>
+                      ▤
+                    </span>
+                  </div>
+                ) : null
+              }
+            />
+          )}
         />
       )}
 

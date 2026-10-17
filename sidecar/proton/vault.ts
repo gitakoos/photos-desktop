@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -32,6 +32,12 @@
 // different key; the old cache/session become unreadable and are recreated on
 // the next sign-in. The meta file stores only the salt and a hash of the key as
 // a verifier, which reveals nothing about the key itself.
+//
+// A sign-in through the browser never shows this app the Proton password. The user
+// then picks either a password of their own for the vault, which works exactly as
+// above, or none: the key is then random and kept in the meta file, sealed under the
+// host's DPAPI key, so the Windows account is what guards it, as it does for
+// Proton's own desktop apps.
 
 import {
   createCipheriv,
@@ -57,7 +63,12 @@ const KEY_LEN = 32;
 const SALT_LEN = 16;
 const META_FILE = "vault.json";
 
-type VaultMeta = { v: 1; salt: string; verifier: string };
+type PasswordMeta = { v: 1; salt: string; verifier: string };
+type DeviceMeta = { v: 1; mode: "device"; key: string };
+type VaultMeta = PasswordMeta | DeviceMeta;
+
+/** How the vault is opened: with a password, or by this Windows account alone. */
+export type VaultMode = "password" | "device";
 
 const META_NONCE_LEN = 12;
 
@@ -109,7 +120,7 @@ function readMeta(): { meta: VaultMeta; sealed: boolean } | null {
     return null;
   }
   try {
-    const meta = JSON.parse(blob.toString("utf8")) as VaultMeta;
+    const meta = JSON.parse(blob.toString("utf8")) as PasswordMeta;
     if (meta?.salt && meta?.verifier) return { meta, sealed: false };
   } catch {
     // Not the legacy form, so it is sealed. Fall through.
@@ -153,10 +164,38 @@ export function createVault(password: string): void {
   setDataKey(key);
 }
 
+/**
+ * Start a fresh vault that needs no password: a random key, kept in the meta file,
+ * which only this Windows account can unseal.
+ */
+export function createDeviceVault(): void {
+  const key = randomBytes(KEY_LEN);
+  const meta: DeviceMeta = { v: 1, mode: "device", key: key.toString("base64") };
+  writeFileSync(metaPath(), sealMeta(meta));
+  setDataKey(key);
+}
+
+/** Which kind of vault this is, or null when there is none that opens here. */
+export function vaultMode(): VaultMode | null {
+  const stored = readMeta();
+  if (!stored) return null;
+  return "mode" in stored.meta && stored.meta.mode === "device" ? "device" : "password";
+}
+
+/** Open a vault that needs no password. False when this one does, or there is none. */
+export function unlockDeviceVault(): boolean {
+  const stored = readMeta();
+  if (!stored || !("mode" in stored.meta) || stored.meta.mode !== "device") return false;
+  const key = Buffer.from(stored.meta.key, "base64");
+  if (key.length !== KEY_LEN) return false;
+  setDataKey(key);
+  return true;
+}
+
 /** Unlock an existing vault. Returns false (without touching the key) on a wrong password. */
 export function unlockVault(password: string): boolean {
   const stored = readMeta();
-  if (!stored) return false;
+  if (!stored || !("salt" in stored.meta)) return false;
   const key = derive(password, Buffer.from(stored.meta.salt, "base64"));
   const got = verifierFor(key);
   const want = Buffer.from(stored.meta.verifier, "base64");

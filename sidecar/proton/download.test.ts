@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -46,10 +46,68 @@ import {
   resetDownloadState,
   resolveDurationsBatch,
   resolveMountMetaBatch,
+  safeFileName,
   startSaveOriginals,
+  withMediaExtension,
   type OriginalStatus,
 } from "./download.ts";
 import { nodeDurationMs } from "./nodes.ts";
+
+describe("safeFileName", () => {
+  // The security property: whatever a (possibly hostile) cloud name is, the result can
+  // never carry a path separator, so join(dir, result) can never escape dir.
+  it("neutralizes path traversal from a hostile shared-photo name", () => {
+    for (const evil of ["..\\..\\..\\evil.jpg", "../../../evil.jpg", "sub\\dir\\p.jpg", "a/b/c.png"]) {
+      const out = safeFileName(evil);
+      expect(out).not.toMatch(/[\\/]/);
+      expect(out).not.toBe("..");
+    }
+  });
+
+  it("replaces the Windows-illegal characters and control chars", () => {
+    expect(safeFileName('a:b*c?d"e<f>g|h.jpg')).toBe("a_b_c_d_e_f_g_h.jpg");
+    expect(safeFileName("tab\tname.jpg")).toBe("tab_name.jpg");
+  });
+
+  it("strips leading/trailing dots and whitespace, falling back when nothing is left", () => {
+    expect(safeFileName("  spaced.jpg  ")).toBe("spaced.jpg");
+    expect(safeFileName("..")).toBe("photo");
+    expect(safeFileName("   ")).toBe("photo");
+    expect(safeFileName("...")).toBe("photo");
+  });
+
+  it("leaves an ordinary name untouched", () => {
+    expect(safeFileName("IMG_1234.jpg")).toBe("IMG_1234.jpg");
+    expect(safeFileName("Anna's birthday (2).heic")).toBe("Anna's birthday (2).heic");
+  });
+
+  it("never names a Windows device", () => {
+    expect(safeFileName("NUL.jpg")).toBe("_NUL.jpg");
+    expect(safeFileName("com1")).toBe("_com1");
+    expect(safeFileName("CONCERT.jpg")).toBe("CONCERT.jpg");
+    expect(safeFileName("COM10.jpg")).toBe("COM10.jpg");
+  });
+});
+
+describe("withMediaExtension", () => {
+  it("keeps a name that already says it is a photo or a video", () => {
+    expect(withMediaExtension("IMG_1.JPG", "image/jpeg")).toBe("IMG_1.JPG");
+    expect(withMediaExtension("clip.mov", "video/quicktime")).toBe("clip.mov");
+    expect(withMediaExtension("raw.CR3", null)).toBe("raw.CR3");
+  });
+
+  it("gives a name that could run something an extension that cannot", () => {
+    expect(withMediaExtension("holiday.exe", "image/jpeg")).toBe("holiday.exe.jpg");
+    expect(withMediaExtension("invoice.pdf.lnk", "video/mp4")).toBe("invoice.pdf.lnk.mp4");
+    expect(withMediaExtension("start.desktop", null)).toBe("start.desktop.jpg");
+    expect(withMediaExtension("run.bat", "video/x-something")).toBe("run.bat.mp4");
+  });
+
+  it("names a photo that came with no extension by its type", () => {
+    expect(withMediaExtension("IMG_0001", "image/heic")).toBe("IMG_0001.heic");
+    expect(withMediaExtension(".hidden", "image/png")).toBe(".hidden.png");
+  });
+});
 
 // A node shaped like the SDK's iterateNodes result: name is a Result, the claimed size
 // lives on the active revision. This is the same shape getNode yields, because getNode is
@@ -94,8 +152,8 @@ describe("resolveMountMetaBatch cache-first", () => {
     const r = await resolveMountMetaBatch(photos, ["uid-A", "uid-B"]);
 
     expect(photos.batches).toEqual([]); // zero decrypts on a warm run
-    expect(r.get("uid-A")).toEqual({ name: "beach.jpg", size: 12345 });
-    expect(r.get("uid-B")).toEqual({ name: "hill.jpg", size: 67890 });
+    expect(r.get("uid-A")).toEqual({ name: "beach.jpg", size: 12345, mediaType: "image/jpeg" });
+    expect(r.get("uid-B")).toEqual({ name: "hill.jpg", size: 67890, mediaType: "image/jpeg" });
   });
 
   it("fetches a page's misses in ONE batch and writes the claimedSize back", async () => {
@@ -107,8 +165,8 @@ describe("resolveMountMetaBatch cache-first", () => {
 
     // Both misses went out in a single call, not one round-trip per uid.
     expect(photos.batches).toEqual([["uid-B", "uid-C"]]);
-    expect(r.get("uid-B")).toEqual({ name: "uid-B.mp4", size: 98765 });
-    expect(r.get("uid-C")).toEqual({ name: "uid-C.mp4", size: 4444 });
+    expect(r.get("uid-B")).toEqual({ name: "uid-B.mp4", size: 98765, mediaType: "video/mp4" });
+    expect(r.get("uid-C")).toEqual({ name: "uid-C.mp4", size: 4444, mediaType: "video/mp4" });
     // Written back with the real claimedSize AND media type, so a later mount pass and the
     // search index both reuse it. These nodes carry no Media block, so the length is
     // recorded as a zero: asked once, never asked again.
@@ -122,7 +180,7 @@ describe("resolveMountMetaBatch cache-first", () => {
     // A second resolve is now a pure cache hit: no further lookup.
     const again = await resolveMountMetaBatch(photos, ["uid-B", "uid-C"]);
     expect(photos.batches).toEqual([["uid-B", "uid-C"]]); // unchanged
-    expect(again.get("uid-B")).toEqual({ name: "uid-B.mp4", size: 98765 });
+    expect(again.get("uid-B")).toEqual({ name: "uid-B.mp4", size: 98765, mediaType: "video/mp4" });
   });
 
   it("mixes cache hits and misses, fetching only the misses", async () => {
@@ -132,8 +190,8 @@ describe("resolveMountMetaBatch cache-first", () => {
     const r = await resolveMountMetaBatch(photos, ["uid-A", "uid-NEW"]);
 
     expect(photos.batches).toEqual([["uid-NEW"]]); // only the miss was fetched
-    expect(r.get("uid-A")).toEqual({ name: "beach.jpg", size: 12345 });
-    expect(r.get("uid-NEW")).toEqual({ name: "new.heic", size: 555 });
+    expect(r.get("uid-A")).toEqual({ name: "beach.jpg", size: 12345, mediaType: "image/jpeg" });
+    expect(r.get("uid-NEW")).toEqual({ name: "new.heic", size: 555, mediaType: "image/heic" });
   });
 
   it("does NOT trust a search-index entry (name only, no size); re-fetches for the size", async () => {
@@ -146,7 +204,7 @@ describe("resolveMountMetaBatch cache-first", () => {
     const r = await resolveMountMetaBatch(photos, ["uid-C"]);
 
     expect(photos.batches).toEqual([["uid-C"]]); // size was missing, so it fetched
-    expect(r.get("uid-C")).toEqual({ name: "photo.heic", size: 555 });
+    expect(r.get("uid-C")).toEqual({ name: "photo.heic", size: 555, mediaType: "image/heic" });
     expect(metaGet("uid-C")?.size).toBe(555); // upgraded with the real cloud size
   });
 
@@ -183,7 +241,7 @@ describe("resolveMountMetaBatch cache-first", () => {
 
     const r = await resolveMountMetaBatch(photos, ["uid-OK", "uid-LOST"]);
 
-    expect(r.get("uid-OK")).toEqual({ name: "kept.jpg", size: 321 });
+    expect(r.get("uid-OK")).toEqual({ name: "kept.jpg", size: 321, mediaType: "image/jpeg" });
     expect(r.has("uid-LOST")).toBe(false);
     expect(metaGet("uid-OK")?.size).toBe(321); // the resolved one was still persisted
   });

@@ -5,7 +5,7 @@ Third-party notices
 Photos for Proton for Windows is free software licensed under the GNU General
 Public License version 3. That licence is the file LICENSE beside this one, and
 the complete corresponding source is published at
-https://github.com/PhotosforProton/photos-desktop.
+https://github.com/gitakoos/photos-desktop.
 
 The installed application also redistributes third-party software. This file
 names that software, records the licence each component is distributed under,
@@ -70,7 +70,7 @@ from the tag matching the version shipped:
 These packages are compiled into resources\sidecar\server.mjs. The list is
 every package esbuild reported as an input to that bundle.
 
-10 packages:
+12 packages:
 
   @noble/hashes 2.2.0                         MIT
   @openpgp/web-stream-tools 0.3.1             MIT
@@ -81,7 +81,9 @@ every package esbuild reported as an input to that bundle.
   exifr 7.1.3                                 MIT
   jsmimeparser 3.0.2                          MIT
   openpgp 6.3.1-0                             LGPL-3.0+
+  pend 1.2.0                                  MIT
   ttag 1.8.12                                 MIT
+  yauzl 3.4.0                                 MIT
 
 ------------------------------------------------------------------------------
 
@@ -154,6 +156,33 @@ every package esbuild reported as an input to that bundle.
 
     This package ships no licence file. The licence recorded above is the
     one declared in its own package.json.
+
+  The sign-in through the browser (sidecar/proton/browserLogin.ts) follows
+  the account module of the same SDK's repository, incubating/account/js, at
+  https://github.com/ProtonDriveApps/sdk. Its licence, quoted from LICENSE.md
+  at the root of that repository:
+
+    The MIT License
+
+    Copyright (c) 2025-2026 Proton AG
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
@@ -444,6 +473,36 @@ openpgp 6.3.1-0
 
 ------------------------------------------------------------------------------
 
+pend 1.2.0
+  Licence: MIT
+  Project: https://github.com/andrewrk/node-pend
+
+    The MIT License (Expat)
+
+    Copyright (c) 2014 Andrew Kelley
+
+    Permission is hereby granted, free of charge, to any person
+    obtaining a copy of this software and associated documentation files
+    (the "Software"), to deal in the Software without restriction,
+    including without limitation the rights to use, copy, modify, merge,
+    publish, distribute, sublicense, and/or sell copies of the Software,
+    and to permit persons to whom the Software is furnished to do so,
+    subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+    BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+    ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+    CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+------------------------------------------------------------------------------
+
 ttag 1.8.12
   Licence: MIT
   Project: https://github.com/ttag-org/ttag.git#readme
@@ -451,6 +510,34 @@ ttag 1.8.12
     MIT License
 
     Copyright (c) 2017 AlexMost
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+------------------------------------------------------------------------------
+
+yauzl 3.4.0
+  Licence: MIT
+  Project: https://github.com/thejoshwolfe/yauzl
+
+    The MIT License (MIT)
+
+    Copyright (c) 2014 Josh Wolfe
 
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -485,18 +572,18 @@ file reproduced with each of them enumerates the components involved.
 
 8 packages:
 
-  @emnapi/runtime 1.11.2                      MIT
+  @emnapi/runtime 1.11.3                      MIT
   @img/colour 1.1.0                           MIT
-  @img/sharp-wasm32 0.35.3                    Apache-2.0 AND LGPL-3.0-or-later AND MIT
-  @img/sharp-win32-x64 0.35.3                 Apache-2.0 AND LGPL-3.0-or-later
+  @img/sharp-wasm32 0.35.5                    Apache-2.0 AND LGPL-3.0-or-later AND MIT
+  @img/sharp-win32-x64 0.35.5                 Apache-2.0 AND LGPL-3.0-or-later
   detect-libc 2.1.2                           Apache-2.0
   semver 7.8.5                                ISC
-  sharp 0.35.3                                Apache-2.0
+  sharp 0.35.5                                Apache-2.0
   tslib 2.8.1                                 0BSD
 
 ------------------------------------------------------------------------------
 
-@emnapi/runtime 1.11.2
+@emnapi/runtime 1.11.3
   Licence: MIT
   Project: https://github.com/toyobayashi/emnapi#readme
 
@@ -613,7 +700,7 @@ file reproduced with each of them enumerates the components involved.
 
 ------------------------------------------------------------------------------
 
-@img/sharp-wasm32 0.35.3
+@img/sharp-wasm32 0.35.5
   Licence: Apache-2.0 AND LGPL-3.0-or-later AND MIT
   Project: https://sharp.pixelplumbing.com
 
@@ -811,7 +898,7 @@ file reproduced with each of them enumerates the components involved.
 
 ------------------------------------------------------------------------------
 
-@img/sharp-win32-x64 0.35.3
+@img/sharp-win32-x64 0.35.5
   Licence: Apache-2.0 AND LGPL-3.0-or-later
   Project: https://sharp.pixelplumbing.com
 
@@ -1239,7 +1326,7 @@ semver 7.8.5
 
 ------------------------------------------------------------------------------
 
-sharp 0.35.3
+sharp 0.35.5
   Licence: Apache-2.0
   Project: https://sharp.pixelplumbing.com
 

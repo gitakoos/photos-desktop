@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.2.0-beta.1"
+version = "1.0.0"
 description = "Photos for Proton, desktop"
 authors = ["Akoos"]
 edition = "2021"
@@ -39,10 +39,42 @@ tauri-plugin-opener = "2"
 # Single-instance: a second launch focuses the running window instead of starting
 # a duplicate copy.
 tauri-plugin-single-instance = "2"
+# Native file / folder picker for the upload dialog and for the save-to-folder
+# download. On Linux under Flatpak this is the file-chooser portal.
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
-# Windows-only: force the tray popup to the foreground on show. Tauri's set_focus
-# is blocked by Windows' foreground lock when the app is not already active, so we
-# use SetForegroundWindow with the AttachThreadInput trick.
+# A local photo's own details, read here rather than in the sidecar: opening a file
+# from Explorer must work with no vault and no sign-in, so nothing on that path may
+# depend on the SDK process being up.
+#
+# Both are header-only readers, which is the point: neither ever decodes an image, so
+# a 100 MP file costs the same as a small one and the memory ceiling stays flat.
+# `imagesize` reads the dimensions straight out of the container header and has no
+# dependencies of its own; `kamadak-exif` is the de-facto EXIF reader for Rust, is
+# pure safe Rust, and parses the EXIF block for every container that matters here
+# (JPEG, PNG, WebP, TIFF, HEIF). The `image` crate would do both, but it pulls a large
+# decoder tree to answer a question that lives in the first few kilobytes. Pure Rust,
+# so they cross to every platform even though the local-file paths are Windows-only.
+imagesize = "0.13"
+kamadak-exif = "0.6"
+# The write side of the same philosophy, for the photo editor's save. `little_exif` is
+# pure, safe Rust that manipulates the EXIF/APP1 segment without ever decoding a pixel.
+little_exif = "=0.6.23"
+# In-app encrypted store: an AES-256-GCM data key, itself sealed at rest with a
+# per-platform keystore (user-scope DPAPI on Windows, the Secret Service on Linux).
+aes-gcm = "0.10"
+base64 = "0.22"
+
+# Windows-only integration: the Cloud Filter mount, WIC image decoding, the shell,
+# WebView2 suspend, the registry, and DPAPI sealing. None of it exists on Linux, where
+# the File Explorer, local-file and shell-thumbnail features are simply absent and the
+# app is a browse-and-download-to-folder client.
+#
+# The tray popup foreground trick lives here too: Tauri's set_focus is blocked by
+# Windows' foreground lock when the app is not already active, so we use
+# SetForegroundWindow with the AttachThreadInput trick.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
   "Win32_Foundation",
@@ -60,6 +92,9 @@ windows = { version = "0.61", features = [
   # EXIF records a capture time as a bare wall clock with no zone, so turning one into
   # an instant needs the OS's own rules for that date (DST included).
   "Win32_System_Time",
+  # GetLocalTime, so an edited photo's saved copy is named with the local wall clock the
+  # person reading their own folder expects, not UTC.
+  "Win32_System_SystemInformation",
   # Convert a plain file back to a placeholder (CfConvertToPlaceholder) on a Win32
   # handle. The cloud-filter crate only offers this through its oplock handle, which
   # CfConvertToPlaceholder rejects with ERROR_INVALID_HANDLE, so we call it directly.
@@ -114,28 +149,34 @@ webview2-com = "0.38"
 windows-core = "0.61"
 # The "show in File Explorer" preference (HKCU), shared with the installer checkbox.
 winreg = "0.52"
-# Native file / folder picker for the upload dialog.
-tauri-plugin-dialog = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# A local photo's own details, read here rather than in the sidecar: opening a file
-# from Explorer must work with no vault and no sign-in, so nothing on that path may
-# depend on the SDK process being up.
-#
-# Both are header-only readers, which is the point: neither ever decodes an image, so
-# a 100 MP file costs the same as a small one and the memory ceiling stays flat.
-# `imagesize` reads the dimensions straight out of the container header and has no
-# dependencies of its own; `kamadak-exif` is the de-facto EXIF reader for Rust, is
-# pure safe Rust, and parses the EXIF block for every container that matters here
-# (JPEG, PNG, WebP, TIFF, HEIF). The `image` crate would do both, but it pulls a large
-# decoder tree to answer a question that lives in the first few kilobytes.
-imagesize = "0.13"
-kamadak-exif = "0.6"
-
-# In-app encrypted store. Everything lives inside the app directory: an
-# AES-256-GCM data key, itself sealed at rest with user-scope DPAPI. No entry is
+# Seals the store's AES-256-GCM data key at rest with user-scope DPAPI. No entry is
 # created anywhere the system can enumerate (no credential store, no registry).
 windows-dpapi = "0.2"
-aes-gcm = "0.10"
-base64 = "0.22"
+
+# Non-Windows (Linux): seal the same store key through the OS keyring, which on a Linux
+# desktop is the Secret Service (gnome-keyring / kwallet) over D-Bus. Under Flatpak this
+# needs the org.freedesktop.secrets talk permission. Pure-Rust crypto so no system
+# crypto library is linked into the sandbox.
+[target.'cfg(not(windows))'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+# A video's frame and length for its upload, asked of GStreamer: the media framework a
+# Linux desktop already plays these files with (upload_frame.rs). 0.21 is the line built
+# on the same glib 0.18 as the GTK stack above, so no second glib is pulled in.
+gstreamer = "0.21"
+gstreamer-app = "0.21"
+gstreamer-pbutils = "0.21"
+# A HEIC or HEIF still's picture, from the runtime's own libheif, whose HEVC decoder (the
+# libde265 plugin in the runtime's codecs extension) reads what an iPhone writes. v1_18 is
+# the oldest API this needs; newer libheif (1.20 in GNOME 50) serves it unchanged. The
+# decoded picture is written with jpeg-encoder, which has no deps.
+libheif-rs = { version = "3", default-features = false, features = ["v1_18"] }
+jpeg-encoder = "0.6"
+# The "Proton Photos" place in the file manager: a WebDAV server on the loopback
+# interface, which GVfs (Files, Nemo, Thunar, Caja) and KIO (Dolphin) mount natively. A
+# FUSE mount made inside the sandbox would be invisible to the file manager outside it.
+# tiny_http is small, synchronous and dependency-light; httpdate formats the dates.
+tiny_http = "0.12"
+httpdate = "1"
+# Starting at sign-in through the XDG Background portal (autostart.rs). The crate the
+# keyring's Secret Service support already builds, so it adds nothing new.
+dbus = "0.9"

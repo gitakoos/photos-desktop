@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -20,8 +20,54 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { useSyncExternalStore } from "react";
 import { rpc } from "./rpc";
 import { isLightboxOpen } from "./lightboxSignal";
+
+// ---- The sidecar's loopback thumbnail server ----
+//
+// Where the window fetches grid thumbnails as plain image URLs, the way a web page does:
+// several at once, decoded off the main thread, never queued on the host channel. The
+// base carries a token minted at unlock; until it is known, or if it cannot be had, the
+// grid takes the older route below through the channel.
+
+let serverBase: string | null = null;
+const serverListeners = new Set<() => void>();
+
+function setServerBase(base: string | null): void {
+  serverBase = base;
+  for (const listener of serverListeners) listener();
+}
+
+/** Asks the sidecar for the server; called once the account is unlocked. */
+export async function connectThumbServer(): Promise<void> {
+  try {
+    setServerBase((await rpc<{ base: string }>("thumbServer")).base);
+  } catch {
+    setServerBase(null);
+  }
+}
+
+/** Forgets the server's address, as the sidecar forgets its token at lock. */
+export function disconnectThumbServer(): void {
+  setServerBase(null);
+}
+
+/** A grid thumbnail's URL on the server, or null while there is no server to ask. */
+export function thumbUrl(uid: string): string | null {
+  return serverBase ? serverBase + encodeURIComponent(uid) : null;
+}
+
+/** The server's base for a component, which redraws when it arrives or goes. */
+export function useThumbServerBase(): string | null {
+  return useSyncExternalStore(
+    (listener) => {
+      serverListeners.add(listener);
+      return () => serverListeners.delete(listener);
+    },
+    () => serverBase,
+  );
+}
 
 /**
  * Lazy, bounded thumbnail loader for the grid. Cells subscribe when they scroll
@@ -31,18 +77,27 @@ import { isLightboxOpen } from "./lightboxSignal";
  * re-entering a view is cheap.
  */
 const cache = new Map<string, string | null>();
-const MAX = 500; // the visible grid plus a generous scroll buffer
+// Bounded by size, not by count: thumbnails run from a couple of KB to some 85 KB as a
+// data URL, so a count either wastes room on small ones or overspends on large ones.
+// The old 500-entry cap held too few to scroll back through a large library, and every
+// tile came back one round trip late. Characters, which are bytes for a data URL.
+const MAX_CHARS = 48 * 1024 * 1024;
+let cachedChars = 0;
 const subs = new Map<string, Set<(url: string | null) => void>>();
 const pending = new Set<string>();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let flushing = false;
 
 function touch(uid: string, url: string | null): void {
+  const previous = cache.get(uid);
+  if (previous !== undefined) cachedChars -= previous?.length ?? 0;
   cache.delete(uid);
   cache.set(uid, url);
-  while (cache.size > MAX) {
+  cachedChars += url?.length ?? 0;
+  while (cachedChars > MAX_CHARS && cache.size > 1) {
     const oldest = cache.keys().next().value;
     if (oldest === undefined) break;
+    cachedChars -= cache.get(oldest)?.length ?? 0;
     cache.delete(oldest);
   }
 }
@@ -51,6 +106,16 @@ export function cachedThumbnail(uid: string): string | null | undefined {
   const hit = cache.get(uid);
   if (hit !== undefined) touch(uid, hit);
   return hit;
+}
+
+/**
+ * Store a thumbnail resolved by an eager batch loader (`useThumbnails`) in the shared
+ * cache, so the covers, the lazy grid and the lightbox fallback all draw from one warm
+ * store. Without this, an eager view re-fetched every thumbnail on each revisit and they
+ * popped in late even though they had just been on screen.
+ */
+export function putThumbnail(uid: string, url: string | null): void {
+  touch(uid, url);
 }
 
 /** How many decrypted thumbnails are currently retained (for the debug HUD). */
@@ -62,9 +127,10 @@ async function flush(): Promise<void> {
   timer = undefined;
   if (flushing) return; // one drain loop at a time; it re-reads `pending` each batch
   flushing = true;
-  // Small, so an interactive request (a photo-open) waits at most one short batch
-  // on the single channel; the API itself caps at 30 ids.
-  const BATCH = 8;
+  // A screen's worth: the sidecar answers every cached one at once and fetches only a
+  // few uncached ones per call, so a photo-open still waits at most one short fetch.
+  // The API itself caps at 30 ids.
+  const BATCH = 30;
   while (pending.size > 0) {
     // Stand aside while the viewer is open: a photo-open needs the channel now, and
     // these thumbnails are for cells hidden behind it. Resumes the drain on close.
@@ -86,10 +152,18 @@ async function flush(): Promise<void> {
       const res = await rpc<{ uid: string; dataUrl: string | null }[]>("getThumbnails", {
         uids: chunk,
       });
+      const answered = new Set<string>();
       for (const r of res) {
+        answered.add(r.uid);
         touch(r.uid, r.dataUrl);
         const set = subs.get(r.uid);
         if (set) for (const cb of set) cb(r.dataUrl);
+      }
+      // Left for a later call by the sidecar's per-call fetch limit: still wanted, so
+      // still queued. A call that answered nothing at all is a stall, not a limit, and
+      // asking again at once would only spin.
+      if (answered.size > 0) {
+        for (const uid of chunk) if (!answered.has(uid) && subs.has(uid)) pending.add(uid);
       }
     } catch {
       /* one bad batch must not stop the rest */

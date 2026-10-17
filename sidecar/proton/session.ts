@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -59,26 +59,50 @@ import {
   wipeCache,
   writeSealedAtomic,
 } from "./store.ts";
-import { lockVault, openOrResetVault, unlockVault, vaultExists } from "./vault.ts";
-import { nodeDurationMs, nodeName, toMillis } from "./nodes.ts";
 import {
+  createDeviceVault,
+  createVault,
+  lockVault,
+  openOrResetVault,
+  unlockDeviceVault,
+  unlockVault,
+  vaultExists,
+  vaultMode,
+  type VaultMode,
+} from "./vault.ts";
+import { BrowserSignIn, type ForkApi, type ForkedSession } from "./browserLogin.ts";
+import { nodeDurationMs, nodeName, toMillis } from "./nodes.ts";
+import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
+import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import {
+  cancelHydrate as stopHydrate,
   getOriginal as readOriginal,
   getSaveStatus as readSaveStatus,
   getVideo as readVideo,
   hydrateFile as runHydrateFile,
+  hydrateProgress as readHydrateProgress,
   listForMount as readMountPage,
   readOriginalBytes as takeOriginalBytes,
   releaseOriginal as dropOriginal,
   resetDownloadState,
   resolveDurationsBatch,
   resolveMediaTypesBatch,
+  resolveMountMetaBatch,
+  startHydrate as beginHydrate,
   startSaveOriginals as runSaveOriginals,
+  withMediaExtension,
   type HydratedFile,
   type MountPage,
   type OriginalStatus,
   type SaveStatus,
   type VideoBytes,
 } from "./download.ts";
+import {
+  cloudEditorSource as runCloudEditorSource,
+  saveCloudEdit as runSaveCloudEdit,
+  type CloudEditMeta,
+  type CloudEditorSource,
+} from "./editor.ts";
 import {
   offlineStatus as readOfflineStatus,
   pinOffline as runPinOffline,
@@ -90,8 +114,15 @@ import {
 import {
   cancelUpload as abortUpload,
   clearFinishedUploads as clearUploads,
-  getUploadStatus as readUploadStatus,
+  getUploadStatusView as readUploadStatus,
   startUpload as runUpload,
+  startImport as runImport,
+  prepareImport as runPrepareImport,
+  getImportReview as readImportReview,
+  getImportChecks as readImportChecks,
+  confirmImport as runConfirmImport,
+  discardImport as runDiscardImport,
+  startDropUpload as runDropUpload,
   type ShellMediaInfo,
   type UploadStatus,
 } from "./upload.ts";
@@ -131,6 +162,16 @@ import {
   type DeleteAlbumOutcome,
 } from "./albums.ts";
 
+/** One photo in the Linux drive's extra folders, named and sized as its main listing is. */
+type MountPhoto = { uid: string; name: string; size: number; captureTime: number };
+
+/** The drive's folders beside the library: the trash, and what others shared. */
+export type MountExtras = {
+  trash: MountPhoto[];
+  shared: MountPhoto[];
+  sharedAlbums: { uid: string; name: string; photos: MountPhoto[] }[];
+};
+
 // The signed-in Proton session is sealed with the vault key, so it is named by the
 // store: `wipeCache` has to take it along when that key changes.
 //
@@ -146,6 +187,59 @@ const HOST_STATE_FILES = ["mount_seen.txt", "synced_albums.txt"];
 const NO_SUCH_PROTON_ADDRESS = 33102;
 
 const toDataUrl = (bytes: Buffer): string => `data:image/jpeg;base64,${bytes.toString("base64")}`;
+
+/**
+ * How long a thumbnail walk may produce NOTHING before it is given up on.
+ *
+ * Generous against the work it guards and tight against the failure: a healthy
+ * batch of eight is milliseconds (the slowest in a full production trace was 216ms),
+ * while the hang this exists for ran until the host killed the sidecar at 300s.
+ * Anything in between is comfortably covered.
+ *
+ * It stays well under the frontend's own 3-minute ceiling for this call
+ * (app/src/lib/rpc.ts) and the host's 5-minute one (deadline_for in lib.rs), so the
+ * graceful inner bound is always what fires -- the outer two recover by abandoning
+ * the call and killing the sidecar respectively, which costs the user their whole
+ * session state to fix a handful of missing thumbnails.
+ */
+const THUMBNAIL_STALL_MS = 30_000;
+/** How many uncached grid thumbnails one call fetches; the rest are asked for again. */
+const THUMBNAIL_FETCH_PER_CALL = 8;
+
+/** How long a sign-in may wait on its 2FA code or captcha before the password goes. */
+const PENDING_SIGN_IN_MS = 10 * 60_000;
+
+/** The shortest password of the user's own that a browser sign-in may be sealed with. */
+const MIN_APP_PASSWORD = 8;
+
+/** Proton's session-fork endpoints, as the browser sign-in sees them. */
+const forkApi: ForkApi = {
+  async init() {
+    const r: any = await ProtonApi.forkInit();
+    if (!r.Selector || !r.UserCode) throw new Error("Proton returned no sign-in code");
+    return { selector: String(r.Selector), userCode: String(r.UserCode) };
+  },
+  async status(selector) {
+    let r: any;
+    try {
+      r = await ProtonApi.forkStatus(selector);
+    } catch (e: any) {
+      // 422 is the fork's "not signed in yet".
+      if (e?.status === 422) return null;
+      throw e;
+    }
+    if (!r.UID || !r.AccessToken || !r.Payload) throw new Error("Proton's sign-in answer is incomplete");
+    return {
+      payload: String(r.Payload),
+      uid: String(r.UID),
+      accessToken: String(r.AccessToken),
+      refreshToken: String(r.RefreshToken ?? ""),
+    };
+  },
+  async discard(selector) {
+    await ProtonApi.forkDiscard(selector);
+  },
+};
 
 type SharedSummary = {
   uid: string;
@@ -175,7 +269,13 @@ type LoginResult =
   | { status: "2fa" }
   /** The API demands human verification; `url` is the captcha page to embed. */
   | { status: "hv"; url: string }
+  /** Signed in through the browser; the user still picks how this machine keeps it. */
+  | { status: "protect"; email: string }
+  /** The vault opened, but its session is gone: a new sign-in, into the same vault. */
+  | { status: "relogin" }
   | { status: "error"; error: string };
+
+type BrowserLoginStatus = LoginResult | { status: "waiting" } | { status: "cancelled" };
 
 type AccountAddress = {
   email: string;
@@ -195,10 +295,21 @@ type PersistableSession = {
   refreshToken: string;
   username: string;
   userKeyPassphrases: Record<string, string>;
+  /** How it was signed in; absent from a session saved before the browser sign-in. */
+  method?: "password" | "browser";
 };
 
-/** Whether the app has a saved account, and (only while unlocked) whose. */
-type LockStatus = { hasVault: boolean; unlocked: boolean; email: string | null };
+/**
+ * Whether the app has a saved account, and (only while unlocked) whose. `mode` is how
+ * the vault opens; `protect` that a browser sign-in waits for the user to pick one.
+ */
+type LockStatus = {
+  hasVault: boolean;
+  unlocked: boolean;
+  email: string | null;
+  mode: VaultMode | null;
+  protect: boolean;
+};
 
 export class ProtonSession {
   private session: Session | null = null;
@@ -207,14 +318,119 @@ export class ProtonSession {
   private password = "";
   /** Derived key passphrases by user key id. Persisted in place of the password. */
   private userKeyPassphrases: Record<string, string> = {};
+  /** The key password a browser sign-in delivers, in place of the account password. */
+  private keyPassword = "";
+  private method: "password" | "browser" = "password";
+  private browser: BrowserSignIn | null = null;
+  private browserFinish: Promise<LoginResult> | null = null;
+  /** A browser sign-in is open but not yet saved: the user has not picked a protection. */
+  private awaitingProtection = false;
   private photos: any = null;
+  /** Which sign-in a pending-step timer belongs to; a newer attempt disarms older ones. */
+  private attempt = 0;
 
   async login(username: string, password: string): Promise<LoginResult> {
     initCrypto();
+    this.attempt++;
+    this.browser?.cancel();
+    this.browser = null;
     this.username = username;
     this.password = password;
+    this.keyPassword = "";
+    this.method = "password";
     this.userKeyPassphrases = {};
     return this.authenticate();
+  }
+
+  /** Opens a sign-in on Proton's own page; the link for the browser comes back. */
+  async startBrowserLogin(): Promise<{ url: string }> {
+    initCrypto();
+    this.attempt++;
+    this.browser?.cancel();
+    this.browserFinish = null;
+    const signIn = new BrowserSignIn(forkApi);
+    this.browser = signIn;
+    return { url: await signIn.start() };
+  }
+
+  /**
+   * Where the browser sign-in stands. Once Proton answers, the account opens here, the
+   * same way a password sign-in finishes; asked again meanwhile, the same answer comes.
+   */
+  async browserLoginStatus(): Promise<BrowserLoginStatus> {
+    const signIn = this.browser;
+    if (!signIn) return this.browserFinish ?? { status: "cancelled" };
+    const s = signIn.state();
+    if (s.state === "waiting") return { status: "waiting" };
+    if (s.state === "cancelled") return { status: "cancelled" };
+    if (s.state === "failed") {
+      this.browser = null;
+      return { status: "error", error: s.error };
+    }
+    this.browserFinish ??= this.openForked(s.session);
+    return this.browserFinish;
+  }
+
+  cancelBrowserLogin(): { ok: boolean } {
+    this.browser?.cancel();
+    this.browser = null;
+    this.browserFinish = null;
+    return { ok: true };
+  }
+
+  private async openForked(forked: ForkedSession): Promise<LoginResult> {
+    this.session = { uid: forked.uid, accessToken: forked.accessToken, refreshToken: forked.refreshToken };
+    this.username = "";
+    this.password = "";
+    this.keyPassword = forked.keyPassword;
+    this.method = "browser";
+    this.userKeyPassphrases = {};
+    const result = await this.finishLogin();
+    this.browser = null;
+    if (result.status !== "ok") {
+      this.session = null;
+      return result;
+    }
+    // A vault already open (a sign-in again after the session lapsed) keeps it; a
+    // first one waits for the user to choose how it is sealed.
+    if (isReady()) return result;
+    this.awaitingProtection = true;
+    return { status: "protect", email: result.email };
+  }
+
+  /**
+   * Seals a browser sign-in on this machine: under a password of the user's own,
+   * asked at every start, or under none, so this Windows account alone opens it.
+   */
+  protectSession(password: string | null): LoginResult {
+    if (!this.awaitingProtection || !this.photos) return { status: "error", error: "No sign-in is waiting" };
+    if (password !== null && password.length < MIN_APP_PASSWORD) {
+      return { status: "error", error: "too short" };
+    }
+    // Whatever an earlier vault sealed cannot be opened by the new key.
+    if (vaultExists()) wipeCache();
+    if (password !== null) createVault(password);
+    else createDeviceVault();
+    this.awaitingProtection = false;
+    this.browserFinish = null;
+    this.persistSession();
+    return { status: "ok", email: this.email };
+  }
+
+  /**
+   * A sign-in waiting on a second step (a 2FA code, a captcha) holds the account
+   * password in memory until that step completes. One the user walks away from would
+   * hold it for the life of the process, so it is dropped after a while, along with the
+   * half-made session: coming back later means signing in again, which costs a retype.
+   */
+  private expirePendingSignIn(): void {
+    const attempt = this.attempt;
+    const timer = setTimeout(() => {
+      if (attempt !== this.attempt || this.photos) return;
+      this.password = "";
+      this.session = null;
+    }, PENDING_SIGN_IN_MS);
+    timer.unref?.();
   }
 
   /**
@@ -258,6 +474,7 @@ export class ProtonSession {
           const list = methods.join(" or ");
           return { status: "error", error: `This sign-in needs ${list} verification, which this app cannot show yet.` };
         }
+        this.expirePendingSignIn();
         return { status: "hv", url: captchaUrl(e.hv.token) };
       }
       return { status: "error", error: (e as Error).message };
@@ -271,6 +488,7 @@ export class ProtonSession {
 
     const twoFa = auth["2FA"]?.Enabled ?? 0;
     if (twoFa & 1) {
+      this.expirePendingSignIn();
       return { status: "2fa" };
     }
     return this.finishLogin();
@@ -294,7 +512,7 @@ export class ProtonSession {
    * spending the stored refresh token.
    */
   whoami(): { email: string } | null {
-    return this.photos && this.email ? { email: this.email } : null;
+    return this.photos && this.email && !this.awaitingProtection ? { email: this.email } : null;
   }
 
   /**
@@ -337,6 +555,8 @@ export class ProtonSession {
       hasVault: vaultExists(),
       unlocked,
       email: unlocked && this.email ? this.email : null,
+      mode: vaultMode(),
+      protect: this.awaitingProtection,
     };
   }
 
@@ -348,7 +568,22 @@ export class ProtonSession {
   async unlock(password: string): Promise<LoginResult> {
     if (!vaultExists()) return { status: "error", error: "No saved account" };
     if (!unlockVault(password)) return { status: "error", error: "wrong password" };
+    return this.resumeSaved(password);
+  }
 
+  /** Cold start of a vault that needs no password: this Windows account opens it. */
+  async unlockDevice(): Promise<LoginResult> {
+    if (vaultMode() !== "device" || !unlockDeviceVault()) {
+      return { status: "error", error: "No saved account" };
+    }
+    return this.resumeSaved("");
+  }
+
+  /**
+   * The saved session, resumed in a vault that has just opened. `password` is the one
+   * that opened it, which is the account password only for a password sign-in.
+   */
+  private async resumeSaved(password: string): Promise<LoginResult> {
     try {
       // A blob that will not open is no more recoverable than one that is not there, so
       // it is answered the same way: the password has just been proved correct, and this
@@ -371,10 +606,17 @@ export class ProtonSession {
         return { status: "error", error: "No saved session" };
       }
       let result = await this.resumeSession(blob, password);
+      if (result.status !== "ok" && (blob.method === "browser" || !password)) {
+        // No account password to sign in again with: Proton's page has to do it, and
+        // the vault stays open so the new session lands in it with the cache intact.
+        this.session = null;
+        return { status: "relogin" };
+      }
       if (result.status !== "ok") {
         // The stored tokens are dead (e.g. the refresh token expired), but the
         // vault opened, so the password is correct. Fall back to a fresh SRP
         // login for new tokens, keeping the vault key and the cache intact.
+        this.attempt++;
         this.username = blob.username;
         this.password = password;
         this.userKeyPassphrases = {};
@@ -394,11 +636,19 @@ export class ProtonSession {
 
   /** Drop the in-memory session and forget the vault key; the next use needs an unlock. */
   lock(): { ok: boolean } {
+    // First, so no thumbnail is served from a session that is going away.
+    void stopThumbServer();
+    this.thumbWaiting.clear();
     lockVault();
+    this.browser?.cancel();
+    this.browser = null;
+    this.browserFinish = null;
+    this.awaitingProtection = false;
     this.session = null;
     this.photos = null;
     this.email = "";
     this.password = "";
+    this.keyPassword = "";
     this.userKeyPassphrases = {};
     // The mount listing is this account's photo uids and capture times. Drop it
     // with everything else: leaving it would let a listing for the NEXT account
@@ -413,6 +663,12 @@ export class ProtonSession {
 
   /** Forget the account entirely: relock, then delete the saved session, the vault, and the cache. */
   signOut(): { ok: boolean } {
+    // The tokens go on the server too, so a copy of them taken from this machine, or
+    // from its memory, is worth nothing afterwards; and the session disappears from the
+    // account's security log. Best effort and not waited on: signing out never depends
+    // on the network, and a locked app holds no tokens to revoke.
+    const live = this.session;
+    if (live) void ProtonApi.revoke(live).catch(() => {});
     this.lock();
     try {
       rmSync(join(storeDir(), SESSION_FILE), { force: true });
@@ -467,8 +723,16 @@ export class ProtonSession {
       const fresh = await refreshSession(blob.uid, blob.refreshToken);
       this.session = fresh;
       this.username = blob.username;
-      this.password = password;
+      this.method = blob.method ?? "password";
       this.userKeyPassphrases = blob.userKeyPassphrases ?? {};
+      // A browser sign-in's vault password is not the account's; its key password is
+      // what every remembered passphrase holds.
+      if (this.method === "browser") {
+        this.password = "";
+        this.keyPassword = Object.values(this.userKeyPassphrases)[0] ?? "";
+      } else {
+        this.password = password;
+      }
       return this.finishLogin();
     } catch (e) {
       return { status: "error", error: `resume failed: ${(e as Error).message}` };
@@ -490,6 +754,7 @@ export class ProtonSession {
       refreshToken: this.session.refreshToken ?? "",
       username: this.username,
       userKeyPassphrases: this.userKeyPassphrases,
+      method: this.method,
     };
   }
 
@@ -537,10 +802,13 @@ export class ProtonSession {
     const s = this.session!;
     const password = this.password;
 
+    // The salts turn the account password into the key password. A browser sign-in
+    // is handed the key password itself, and its session may not read them: Proton
+    // grants that only for a while after a password sign-in.
     const [userRes, addrRes, saltRes] = await Promise.all([
       ProtonApi.getUser(s),
       ProtonApi.getAddresses(s),
-      ProtonApi.getKeySalts(s),
+      this.method === "browser" ? Promise.resolve({ KeySalts: [] }) : ProtonApi.getKeySalts(s),
     ]);
 
     const user: any = (userRes as any).User ?? {};
@@ -552,7 +820,7 @@ export class ProtonSession {
     // or by deriving it from the mailbox password (fresh sign-in).
     const userKeys: any[] = [];
     for (const uk of user.Keys ?? []) {
-      let passphrase = this.userKeyPassphrases[uk.ID];
+      let passphrase = this.userKeyPassphrases[uk.ID] || this.keyPassword;
       if (!passphrase) {
         const salt = saltById.get(uk.ID);
         if (!salt || !password) continue;
@@ -570,6 +838,8 @@ export class ProtonSession {
     }
     // The password has served its purpose; only the derived passphrases are kept.
     this.password = "";
+    const keyPassword = this.keyPassword;
+    this.keyPassword = "";
 
     // Unlock each address key: its Token is a message encrypted to the user key.
     const accountAddresses: AccountAddress[] = [];
@@ -589,7 +859,7 @@ export class ProtonSession {
             passphrase = dec.data;
           } else {
             const salt = saltById.get(ak.ID);
-            passphrase = salt ? await computeKeyPassword(password, salt) : password;
+            passphrase = keyPassword || (salt ? await computeKeyPassword(password, salt) : password);
           }
           const key = await CryptoProxy.importPrivateKey({ armoredKey: ak.PrivateKey, passphrase } as any);
           keys.push({ id: ak.ID, key });
@@ -689,7 +959,11 @@ export class ProtonSession {
       const root = await this.photos.getMyPhotosRootFolder();
       log(`photos root ok: ${(root as any)?.uid ?? "?"}`);
       log("starting timeline iteration ...");
-      for await (const item of this.photos.iterateTimeline()) {
+      for await (const item of withStallGuard(
+        this.photos.iterateTimeline(),
+        SDK_STALL_MS,
+        "iterateTimeline(getTimeline)",
+      )) {
         if (out.length === 0) log("first timeline item received");
         const uid = (item as any).uid ?? (item as any).nodeUid;
         const ct = (item as any).captureTime;
@@ -711,7 +985,93 @@ export class ProtonSession {
     return out;
   }
 
-  /** Grid thumbnails, served from the encrypted on-disk cache when present. */
+  /** Uncached thumbnails asked for over the thumbnail server, gathered into one fetch. */
+  private thumbWaiting = new Map<string, ((bytes: Buffer | null) => void)[]>();
+  private thumbFlush: ReturnType<typeof setTimeout> | null = null;
+  private thumbFetching = 0;
+
+  /**
+   * Starts the loopback thumbnail server for the window and returns the URL base it
+   * appends a uid to. A fresh token each time, so a base from before a lock is dead.
+   */
+  async thumbServer(): Promise<{ base: string }> {
+    if (!this.photos) throw new Error("Not signed in");
+    return { base: await startThumbServer((uid) => this.thumbnailFor(uid)) };
+  }
+
+  /**
+   * One grid thumbnail for the server: from the sealed cache when it is there, which is
+   * a file read and a decrypt, and otherwise fetched with whichever others are missing
+   * at the same moment, so a screen of new photos is one request rather than one each.
+   */
+  private thumbnailFor(uid: string): Promise<Buffer | null> {
+    if (!this.photos) return Promise.resolve(null);
+    const cached = thumbGet(uid, ThumbnailType.Type1);
+    if (cached) return Promise.resolve(cached);
+    return new Promise((resolve) => {
+      const waiting = this.thumbWaiting.get(uid);
+      if (waiting) waiting.push(resolve);
+      else this.thumbWaiting.set(uid, [resolve]);
+      if (!this.thumbFlush) this.thumbFlush = setTimeout(() => this.fetchWaitingThumbs(), 15);
+    });
+  }
+
+  /** Fetches up to 30 waiting thumbnails, two batches at most in flight. */
+  private async fetchWaitingThumbs(): Promise<void> {
+    this.thumbFlush = null;
+    if (this.thumbFetching >= 2 || this.thumbWaiting.size === 0) return;
+    const photos = this.photos;
+    const batch = [...this.thumbWaiting.keys()].slice(0, 30);
+    const answers = new Map<string, ((bytes: Buffer | null) => void)[]>();
+    for (const uid of batch) {
+      answers.set(uid, this.thumbWaiting.get(uid)!);
+      this.thumbWaiting.delete(uid);
+    }
+    const answer = (uid: string, bytes: Buffer | null) => {
+      for (const resolve of answers.get(uid) ?? []) resolve(bytes);
+      answers.delete(uid);
+    };
+    this.thumbFetching++;
+    // A second batch may run beside this one when more are already waiting.
+    if (this.thumbWaiting.size > 0 && this.thumbFetching < 2 && !this.thumbFlush) {
+      this.thumbFlush = setTimeout(() => this.fetchWaitingThumbs(), 0);
+    }
+    try {
+      if (!photos) throw new Error("locked");
+      for await (const r of withStallGuard(
+        photos.iterateThumbnails(batch, ThumbnailType.Type1),
+        THUMBNAIL_STALL_MS,
+        "iterateThumbnails",
+      )) {
+        const uid = (r as any).nodeUid;
+        if ((r as any).ok) {
+          const bytes = Buffer.from((r as any).thumbnail);
+          thumbPut(uid, ThumbnailType.Type1, bytes);
+          answer(uid, bytes);
+        } else {
+          answer(uid, null);
+        }
+      }
+    } catch {
+      /* a failed or stalled batch answers nothing for what is left; the cell keeps its placeholder */
+    } finally {
+      for (const uid of [...answers.keys()]) answer(uid, null);
+      this.thumbFetching--;
+      if (this.thumbWaiting.size > 0 && !this.thumbFlush) {
+        this.thumbFlush = setTimeout(() => this.fetchWaitingThumbs(), 0);
+      }
+    }
+  }
+
+  /**
+   * Grid thumbnails, served from the encrypted on-disk cache when present.
+   *
+   * Every cached one in the request is answered, however many: each is a file read and
+   * a decrypt, well under a millisecond. Only the first few missing ones are fetched,
+   * because a fetch is a network round trip that holds the channel, and a viewer opening
+   * must never wait behind a long one. The rest come back with no entry, which the grid
+   * reads as "ask again", so a screen of cached tiles costs one call instead of several.
+   */
   async getThumbnails(uids: string[]): Promise<{ uid: string; dataUrl: string | null }[]> {
     if (!this.photos) throw new Error("Not signed in");
     const out: { uid: string; dataUrl: string | null }[] = [];
@@ -720,19 +1080,35 @@ export class ProtonSession {
     for (const uid of uids) {
       const cached = thumbGet(uid, ThumbnailType.Type1);
       if (cached) out.push({ uid, dataUrl: toDataUrl(cached) });
-      else missing.push(uid);
+      else if (missing.length < THUMBNAIL_FETCH_PER_CALL) missing.push(uid);
     }
     if (missing.length === 0) return out;
 
-    for await (const r of this.photos.iterateThumbnails(missing, ThumbnailType.Type1)) {
-      const uid = (r as any).nodeUid;
-      if ((r as any).ok) {
-        const bytes = Buffer.from((r as any).thumbnail);
-        thumbPut(uid, ThumbnailType.Type1, bytes);
-        out.push({ uid, dataUrl: toDataUrl(bytes) });
-      } else {
-        out.push({ uid, dataUrl: null });
+    // Guarded: a batch of eight was once seen entering this loop and never leaving,
+    // holding the host's single RPC channel until its 300s deadline killed the
+    // sidecar. See stallGuard.ts. A stall keeps whatever resolved and drops the rest
+    // -- the uids left out carry no entry, which is exactly what the caller already
+    // sees when a whole batch fails (useThumbnails.ts swallows that and moves on), so
+    // this needs no new handling there and the next pass asks for them again.
+    try {
+      for await (const r of withStallGuard(
+        this.photos.iterateThumbnails(missing, ThumbnailType.Type1),
+        THUMBNAIL_STALL_MS,
+        "iterateThumbnails",
+      )) {
+        const uid = (r as any).nodeUid;
+        if ((r as any).ok) {
+          const bytes = Buffer.from((r as any).thumbnail);
+          thumbPut(uid, ThumbnailType.Type1, bytes);
+          out.push({ uid, dataUrl: toDataUrl(bytes) });
+        } else {
+          out.push({ uid, dataUrl: null });
+        }
       }
+    } catch (e) {
+      // A real SDK failure is still the caller's to see; only a stall is absorbed.
+      if (!isStall(e)) throw e;
+      process.stderr.write(`[sidecar] getThumbnails stalled after ${out.length}/${uids.length}\n`);
     }
     return out;
   }
@@ -743,13 +1119,24 @@ export class ProtonSession {
     const cached = thumbGet(uid, ThumbnailType.Type2);
     if (cached) return toDataUrl(cached);
 
-    for await (const r of this.photos.iterateThumbnails([uid], ThumbnailType.Type2)) {
-      if ((r as any).ok) {
-        const bytes = Buffer.from((r as any).thumbnail);
-        thumbPut(uid, ThumbnailType.Type2, bytes);
-        return toDataUrl(bytes);
+    // The same guard as the grid's thumbnails above, for the same reason: this is the
+    // identical SDK call, and the viewer holds the channel while it runs.
+    try {
+      for await (const r of withStallGuard(
+        this.photos.iterateThumbnails([uid], ThumbnailType.Type2),
+        THUMBNAIL_STALL_MS,
+        "iterateThumbnails",
+      )) {
+        if ((r as any).ok) {
+          const bytes = Buffer.from((r as any).thumbnail);
+          thumbPut(uid, ThumbnailType.Type2, bytes);
+          return toDataUrl(bytes);
+        }
+        return null;
       }
-      return null;
+    } catch (e) {
+      if (!isStall(e)) throw e;
+      process.stderr.write(`[sidecar] getPreview stalled\n`);
     }
     return null;
   }
@@ -761,11 +1148,24 @@ export class ProtonSession {
     return readVideo(this.photos, uid);
   }
 
+  /** The editor's source for a cloud photo: same-origin pixels plus the metadata a saved
+   *  copy keeps. */
+  async cloudEditorSource(uid: string): Promise<CloudEditorSource> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runCloudEditorSource(this.photos, uid);
+  }
+
+  /** Save an edited cloud photo as a new timeline node carrying the source's date, place
+   *  and camera. Returns the new node's uid. */
+  async saveCloudEdit(jpegBase64: string, meta: CloudEditMeta): Promise<{ uid: string }> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runSaveCloudEdit(this.photos, jpegBase64, meta);
+  }
+
   /** Kicks the save off and returns at once; the UI polls `saveStatus`. */
   startSaveOriginals(uids: string[], destDir: string): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runSaveOriginals(this.photos, uids, destDir);
-    return { started: true };
+    return { started: runSaveOriginals(this.photos, uids, destDir) };
   }
 
   saveStatus(): SaveStatus {
@@ -777,9 +1177,75 @@ export class ProtonSession {
     return readMountPage(this.photos, offset, limit);
   }
 
-  async hydrateFile(uid: string): Promise<HydratedFile> {
+  async hydrateFile(uid: string, dir?: string): Promise<HydratedFile> {
     if (!this.photos) throw new Error("Not signed in");
-    return runHydrateFile(this.photos, uid);
+    return runHydrateFile(this.photos, uid, dir);
+  }
+
+  /** The Linux drive's streamed download: see `startHydrate`. Host-only. */
+  startHydrate(uid: string, dir?: string): { path: string } {
+    if (!this.photos) throw new Error("Not signed in");
+    return beginHydrate(this.photos, uid, dir);
+  }
+
+  hydrateProgress(path: string): { done: boolean; error: string | null } {
+    return readHydrateProgress(path);
+  }
+
+  cancelHydrate(path: string): { cancelled: true } {
+    stopHydrate(path);
+    return { cancelled: true };
+  }
+
+  /**
+   * The Linux drive's folders beside the library: the trash (photos only; an album
+   * restores from the app) and what others shared with this account, photos loose and
+   * in albums. Names and sizes come the way the main listing's do, so a photo reads
+   * the same in every folder it appears in. Host-only.
+   */
+  async listExtrasForMount(): Promise<MountExtras> {
+    if (!this.photos) throw new Error("Not signed in");
+    const isMedia = (t: string | null) => !!t && (t.startsWith("image/") || t.startsWith("video/"));
+
+    const trashed = (await readTrash(this.photos)).filter((t) => t.type !== "album");
+    const shared = await this.getShared(true);
+    const sharedFiles = shared.filter((s) => s.type !== "album" && isMedia(s.mediaType));
+    const albums: { uid: string; name: string; items: { uid: string; captureTime: number }[] }[] = [];
+    for (const album of shared.filter((s) => s.type === "album")) {
+      const items: { uid: string; captureTime: number }[] = [];
+      try {
+        for await (const item of withStallGuard(
+          this.photos.iterateAlbum(album.uid),
+          SDK_STALL_MS,
+          "iterateAlbum",
+        )) {
+          const uid = (item as any).nodeUid;
+          if (uid) items.push({ uid, captureTime: toMillis((item as any).captureTime) });
+        }
+      } catch (e) {
+        process.stderr.write(`[mount] shared album skipped: ${(e as Error).message}\n`);
+      }
+      albums.push({ uid: album.uid, name: album.name || "Album", items });
+    }
+
+    const meta = await resolveMountMetaBatch(this.photos, [
+      ...trashed.map((t) => t.uid),
+      ...sharedFiles.map((s) => s.uid),
+      ...albums.flatMap((a) => a.items.map((i) => i.uid)),
+    ]);
+    const photo = (uid: string, captureTime: number): MountPhoto[] => {
+      const m = meta.get(uid);
+      return m ? [{ uid, name: withMediaExtension(m.name, m.mediaType), size: m.size, captureTime }] : [];
+    };
+    return {
+      trash: trashed.flatMap((t) => photo(t.uid, t.captureTime)),
+      shared: sharedFiles.flatMap((s) => photo(s.uid, s.captureTime ?? 0)),
+      sharedAlbums: albums.map((a) => ({
+        uid: a.uid,
+        name: a.name,
+        photos: a.items.flatMap((i) => photo(i.uid, i.captureTime)),
+      })),
+    };
   }
 
   /**
@@ -893,7 +1359,7 @@ export class ProtonSession {
       : this.photos.iterateSharedNodes();
 
     const out: SharedSummary[] = [];
-    for await (const node of nodes) {
+    for await (const node of withStallGuard(nodes, SDK_STALL_MS, "iterateSharedNodes")) {
       const n = node as any;
       out.push({
         uid: n.uid,
@@ -964,7 +1430,11 @@ export class ProtonSession {
     }
     if (missing.length === 0) return out;
 
-    for await (const node of this.photos.iterateNodes(missing)) {
+    for await (const node of withStallGuard(
+      this.photos.iterateNodes(missing),
+      SDK_STALL_MS,
+      "iterateNodes",
+    )) {
       const n = node as any;
       if (n.missingUid) continue; // node vanished server-side
       const meta = { name: nodeName(n), mediaType: n.mediaType ?? null };
@@ -1019,18 +1489,75 @@ export class ProtonSession {
    * `frames` is the host's staged picture of each file sharp cannot open, keyed by path,
    * and is how a video reaches Proton with a thumbnail. `media` is what the host asked
    * Windows about those same files, and is how a video reaches Proton with a length.
+   * `album` puts every file into that existing album.
    */
   startUpload(
     paths: string[],
     frames: Record<string, string> = {},
     media: Record<string, ShellMediaInfo> = {},
+    album?: { uid: string; name: string },
   ): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runUpload(this.photos, paths, frames, media);
+    runUpload(this.photos, paths, frames, media, album);
     return { started: true };
   }
 
-  uploadStatus(): UploadStatus {
+  /**
+   * Starts importing a Google Takeout or Ente export from zips or folders. Returns at
+   * once; `uploadStatus` reports the unpacking, then `ready` with the folders the host
+   * makes frames from before calling `queueImport`.
+   */
+  startImport(paths: string[]): { started: boolean } {
+    if (!this.photos) throw new Error("Not signed in");
+    runImport(paths);
+    return { started: true };
+  }
+
+  /** Reads the export `startImport` made ready into a review, with the host's frames. */
+  prepareImport(
+    frames: Record<string, string> = {},
+    media: Record<string, ShellMediaInfo> = {},
+  ): { started: boolean } {
+    if (!this.photos) throw new Error("Not signed in");
+    runPrepareImport(this.photos, frames, media);
+    return { started: true };
+  }
+
+  getImportReview() {
+    return readImportReview();
+  }
+
+  getImportChecks() {
+    return readImportChecks();
+  }
+
+  /** Uploads the reviewed export, less the items left out. */
+  confirmImport(exclude: number[], albums: boolean, live: boolean): { started: boolean } {
+    if (!this.photos) throw new Error("Not signed in");
+    runConfirmImport(this.photos, exclude, albums, live);
+    return { started: true };
+  }
+
+  discardImport(): { ok: boolean } {
+    runDiscardImport();
+    return { ok: true };
+  }
+
+  /** A drop onto the Linux file-manager drive. Host-only; see `startDropUpload`. */
+  startDropUpload(
+    paths: string[],
+    frames: Record<string, string> = {},
+    media: Record<string, ShellMediaInfo> = {},
+    albumUid?: string,
+    albumName?: string,
+    favorite = false,
+  ): { started: boolean } {
+    if (!this.photos) throw new Error("Not signed in");
+    runDropUpload(this.photos, paths, frames, media, albumUid, albumName, favorite);
+    return { started: true };
+  }
+
+  uploadStatus(): UploadStatus & { itemsTotal: number } {
     return readUploadStatus();
   }
 
@@ -1085,7 +1612,7 @@ export class ProtonSession {
   async trashPhotos(uids: string[]): Promise<{ uid: string; ok: boolean; error?: string }[]> {
     if (!this.photos) throw new Error("Not signed in");
     const out: { uid: string; ok: boolean; error?: string }[] = [];
-    for await (const r of this.photos.trashNodes(uids)) {
+    for await (const r of withStallGuard(this.photos.trashNodes(uids), SDK_STALL_MS, "trashNodes")) {
       const result = r as any;
       out.push(
         result.ok
@@ -1134,7 +1661,11 @@ export class ProtonSession {
       tagsToRemove: favorite ? [] : [PhotoTag.Favorites],
     }));
     const out: { uid: string; ok: boolean; error?: string }[] = [];
-    for await (const r of this.photos.updatePhotos(updates)) {
+    for await (const r of withStallGuard(
+      this.photos.updatePhotos(updates),
+      SDK_STALL_MS,
+      "updatePhotos",
+    )) {
       const result = r as any;
       out.push(
         result.ok

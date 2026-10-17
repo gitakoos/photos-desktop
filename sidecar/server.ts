@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -82,15 +82,21 @@ process.on("uncaughtException", (err) => {
 
 type Request = { id: number; method: string; params?: any };
 
+let initialised = false;
+
 const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   // Sent by the Rust host before anything else: the app directory, and the key
   // that seals the vault's own metadata. The store's data key is NOT passed here;
   // it is derived from the user's password by the vault on unlock, so the cache
   // and session stay sealed until then. The key below opens neither, and exists
   // only so the salt behind that derivation is not readable on disk.
+  // Once per process: the host sends it first, and nothing may move the store to another
+  // directory or swap the key under a running session afterwards.
   __init: (p) => {
+    if (initialised) throw new Error("already initialised");
     initStore(p.dataDir);
     setVaultMetaKey(p.vaultKey);
+    initialised = true;
     return { store: "ready" };
   },
   ping: () => ({ sdkVersion: VERSION, node: process.version }),
@@ -99,6 +105,11 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   submit2fa: (p) => session.submit2fa(p.code),
   lockStatus: () => session.lockStatus(),
   unlock: (p) => session.unlock(p.password),
+  unlockDevice: () => session.unlockDevice(),
+  startBrowserLogin: () => session.startBrowserLogin(),
+  browserLoginStatus: () => session.browserLoginStatus(),
+  cancelBrowserLogin: () => session.cancelBrowserLogin(),
+  protectSession: (p) => session.protectSession(typeof p?.password === "string" ? p.password : null),
   lock: () => session.lock(),
   getTimeline: () => session.getTimeline(),
   getThumbnails: (p) => session.getThumbnails(p.uids),
@@ -114,7 +125,11 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   startSaveOriginals: (p) => session.startSaveOriginals(p.uids, p.destDir),
   saveStatus: () => session.saveStatus(),
   listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50),
-  hydrateFile: (p) => session.hydrateFile(p.uid),
+  hydrateFile: (p) => session.hydrateFile(p.uid, typeof p.dir === "string" ? p.dir : undefined),
+  startHydrate: (p) => session.startHydrate(p.uid, typeof p.dir === "string" ? p.dir : undefined),
+  hydrateProgress: (p) => session.hydrateProgress(String(p.path ?? "")),
+  cancelHydrate: (p) => session.cancelHydrate(String(p.path ?? "")),
+  listExtrasForMount: () => session.listExtrasForMount(),
   heapStats: () => process.memoryUsage(),
   getAlbums: () => session.getAlbums(),
   getAlbumPhotos: (p) => session.getAlbumPhotos(p.uid),
@@ -138,11 +153,45 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getMetadata: (p) => session.getMetadata(p.uids),
   getDurations: (p) => session.getDurations(p.uids),
   getMediaTypes: (p) => session.getMediaTypes(p.uids),
-  startUpload: (p) => session.startUpload(p.paths, p.frames ?? {}, p.media ?? {}),
+  startUpload: (p) =>
+    session.startUpload(
+      p.paths,
+      p.frames ?? {},
+      p.media ?? {},
+      typeof p.albumUid === "string" && p.albumUid
+        ? { uid: p.albumUid, name: typeof p.albumName === "string" ? p.albumName : "" }
+        : undefined,
+    ),
+  startImport: (p) =>
+    session.startImport(
+      Array.isArray(p.paths) ? p.paths.filter((x: unknown) => typeof x === "string") : [],
+    ),
+  prepareImport: (p) => session.prepareImport(p.frames ?? {}, p.media ?? {}),
+  getImportReview: () => session.getImportReview(),
+  getImportChecks: () => session.getImportChecks(),
+  confirmImport: (p) =>
+    session.confirmImport(
+      Array.isArray(p.exclude) ? p.exclude.filter((x: unknown) => Number.isInteger(x)) : [],
+      p.albums !== false,
+      p.live !== false,
+    ),
+  discardImport: () => session.discardImport(),
+  startDropUpload: (p) =>
+    session.startDropUpload(
+      Array.isArray(p.paths) ? p.paths.filter((x: unknown) => typeof x === "string") : [],
+      p.frames ?? {},
+      p.media ?? {},
+      typeof p.albumUid === "string" ? p.albumUid : undefined,
+      typeof p.albumName === "string" ? p.albumName : undefined,
+      p.favorite === true,
+    ),
   uploadStatus: () => session.uploadStatus(),
+  thumbServer: () => session.thumbServer(),
   cancelUpload: () => session.cancelUpload(),
   clearUploads: () => session.clearUploads(),
   getNodeDetails: (p) => session.getNodeDetails(p.uid),
+  cloudEditorSource: (p) => session.cloudEditorSource(p.uid),
+  saveCloudEdit: (p) => session.saveCloudEdit(p.jpegBase64, p.meta),
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
@@ -158,7 +207,9 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
 };
 
 async function handle(req: Request): Promise<unknown> {
-  const handler = handlers[req.method];
+  // The table's own entries only: a name like `constructor` or `toString` must not reach
+  // whatever the object inherits.
+  const handler = Object.hasOwn(handlers, req.method) ? handlers[req.method] : undefined;
   if (!handler) {
     return { id: req.id, ok: false, error: `unknown method: ${req.method}` };
   }

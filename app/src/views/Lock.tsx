@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -29,6 +29,7 @@ type UnlockResult =
   | { status: "ok"; email: string }
   | { status: "2fa" }
   | { status: "hv"; url: string }
+  | { status: "relogin" }
   | { status: "error"; error: string };
 
 /**
@@ -62,8 +63,9 @@ export function Lock({
         return;
       }
       // "ok", or (when the saved tokens expired and the sidecar fell back to a
-      // fresh login) "hv" / "2fa". Hand it to the app, which leaves the lock
-      // screen and shows the captcha / 2FA step.
+      // fresh login) "hv" / "2fa", or "relogin" for a browser sign-in, which only
+      // Proton's page can redo. Hand it to the app, which leaves the lock screen
+      // and shows the step it asks for.
       setPassword("");
       onResult(r);
     } catch (err) {

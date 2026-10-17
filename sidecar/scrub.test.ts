@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -65,9 +65,9 @@ describe("scrubSecrets", () => {
   });
 
   it("redacts the account name from an fs error path", () => {
-    const s = "ENOENT: no such file or directory, unlink 'C:/Users/akos.kovacs/AppData/Local/x/session.enc'";
+    const s = "ENOENT: no such file or directory, unlink 'C:/Users/jane.doe/AppData/Local/x/session.enc'";
     const out = scrubSecrets(s);
-    expect(out).not.toContain("akos.kovacs");
+    expect(out).not.toContain("jane.doe");
     expect(out).toContain("[user]");
   });
 
@@ -79,5 +79,24 @@ describe("scrubSecrets", () => {
   it("leaves a normal hydrate diagnostic untouched", () => {
     const s = "[cloud] hydrate start (size=349828 by=explorer.exe explicit=false)";
     expect(scrubSecrets(s)).toBe(s);
+  });
+
+  it("redacts a 32-character session token, which the long-run rule misses", () => {
+    const token = "k3j9x0q2m5n8b7v1c4z6a0s9d8f7g6h5";
+    const out = scrubSecrets(`refresh failed for uid ${token}: 401`);
+    expect(out).not.toContain(token);
+    expect(out).toBe("refresh failed for uid [redacted]: 401");
+  });
+
+  it("keeps a long word with no digit in it", () => {
+    const s = "[drive] listing: counterrevolutionarieswithoutdigits";
+    expect(scrubSecrets(s)).toBe(s);
+  });
+
+  it("stops a name from forging a line or an escape sequence", () => {
+    const out = scrubSecrets("upload failed: IMG\r[sidecar] signed out\x1b[2J.jpg");
+    expect(out).not.toMatch(/[\r\x1b]/);
+    // A stack trace's own lines and tabs are what it is made of.
+    expect(scrubSecrets("Error: x\n\tat f (a.ts:1:2)")).toBe("Error: x\n\tat f (a.ts:1:2)");
   });
 });

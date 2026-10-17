@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -28,7 +28,34 @@ export const BASE_URL = "https://drive-api.proton.me";
 // both ProtonCore's client-side regex and the auth server; other shapes get a
 // "this version is no longer supported" rejection. Do not change the shape.
 export const APP_VERSION = "external-drive-akoos_proton_photos@2.3.10-stable";
-export const USER_AGENT = "AkoosProtonPhotos/2.3.10 (Windows 11; Desktop)";
+
+/**
+ * The User-Agent, which is what Proton's security log shows as the device ("the app, and
+ * the system it runs on"). Unlike the appVersion it is only displayed, so it names the
+ * system the sidecar is actually running on. The Windows string is kept exactly as it
+ * always was.
+ */
+export function userAgentFor(platform: NodeJS.Platform): string {
+  const system = platform === "win32" ? "Windows 11" : platform === "darwin" ? "macOS" : "Linux";
+  return `AkoosProtonPhotos/2.3.10 (${system}; Desktop)`;
+}
+export const USER_AGENT = userAgentFor(process.platform);
+
+const API_ORIGIN = new URL(BASE_URL).origin;
+
+/**
+ * Whether a request goes to the Proton API itself, the only place the session's tokens
+ * may be sent. Compared by origin: a prefix test would also match
+ * `https://drive-api.proton.me.example.com` or `https://drive-api.proton.me@example.com`,
+ * so a URL handed to the SDK from anywhere could carry the access token off.
+ */
+export function isApiUrl(url: string): boolean {
+  try {
+    return new URL(url).origin === API_ORIGIN;
+  } catch {
+    return false;
+  }
+}
 
 export type Session = { uid: string; accessToken: string; refreshToken?: string };
 
@@ -114,6 +141,8 @@ export const ProtonApi = {
   auth: (body: object, hv?: HvProof) => apiFetch("/auth/v4", { method: "POST", body, hv }),
   auth2fa: (session: Session, code: string) =>
     apiFetch("/auth/v4/2fa", { method: "POST", body: { TwoFactorCode: code }, session }),
+  /** Ends the session on Proton's side, so its tokens stop working everywhere. */
+  revoke: (session: Session) => apiFetch("/auth/v4", { method: "DELETE", session }),
   getUser: (session: Session) => apiFetch("/core/v4/users", { session }),
   getAddresses: (session: Session) => apiFetch("/core/v4/addresses", { session }),
   getKeySalts: (session: Session) => apiFetch("/core/v4/keys/salts", { session }),
@@ -121,6 +150,11 @@ export const ProtonApi = {
   getAddressPublicKeys: (session: Session, email: string) =>
     apiFetch(`/core/v4/keys/all?Email=${encodeURIComponent(email)}&InternalOnly=1`, { session }),
   photosShare: (session: Session) => apiFetch("/drive/v2/shares/photos", { session }),
+  /** A session fork to sign in through the browser: its selector and user code. */
+  forkInit: () => apiFetch("/auth/v4/sessions/forks"),
+  forkStatus: (selector: string) => apiFetch(`/auth/v4/sessions/forks/${encodeURIComponent(selector)}`),
+  forkDiscard: (selector: string) =>
+    apiFetch(`/auth/v4/sessions/forks/${encodeURIComponent(selector)}`, { method: "DELETE" }),
   /** A fresh SRP modulus, signed by Proton. Minting a public link needs one. */
   authModulus: (session: Session) => apiFetch("/core/v4/auth/modulus", { session }),
 };
@@ -208,7 +242,7 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
     headers.set("User-Agent", USER_AGENT);
     // Only attach the API session to first-party API hosts; block storage (CDN)
     // uses its own pm-storage-token that the SDK sets on the request itself.
-    if (url.startsWith(BASE_URL)) {
+    if (isApiUrl(url)) {
       headers.set("x-pm-uid", session.uid);
       headers.set("Authorization", `Bearer ${session.accessToken}`);
     }
@@ -236,7 +270,7 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
 
   async function withAuthRetry(url: string, run: () => Promise<Response>): Promise<Response> {
     const res = await run();
-    if (res.status === 401 && url.startsWith(BASE_URL)) {
+    if (res.status === 401 && isApiUrl(url)) {
       try {
         await refresh();
       } catch {

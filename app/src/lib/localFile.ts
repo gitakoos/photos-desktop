@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -54,6 +54,32 @@ export const renameLocalFile = (path: string, newName: string) =>
 
 /** Send the file to the recycle bin. Rejects with "cancelled" if the user backed out. */
 export const deleteLocalFile = (path: string) => invoke<void>("delete_local_file", { path });
+
+/**
+ * The editor's source: the file's pixels as a same-origin `data:` URL (upright, full
+ * resolution, so a canvas can read them back without the cross-origin taint an asset URL
+ * would carry), plus the metadata the saved copy has to keep.
+ */
+export type EditorSource = {
+  dataUrl: string;
+  width: number;
+  height: number;
+  captureTime: number | null;
+  camera: string | null;
+  latitude: number | null;
+  longitude: number | null;
+};
+
+export const localEditorSource = (path: string) =>
+  invoke<EditorSource>("local_editor_source", { path });
+
+/**
+ * Write the edited image as a new copy beside the original, re-attaching the source's
+ * metadata (date, GPS, camera) with orientation reset. Returns the new file's path.
+ * `jpegBase64` is the canvas output, already encoded at quality ~0.92.
+ */
+export const saveLocalEdit = (srcPath: string, jpegBase64: string) =>
+  invoke<string>("save_local_edit", { srcPath, jpegBase64 });
 
 /**
  * Formats the engine has no decoder for, which go straight to the host rather

@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -37,9 +37,22 @@ export function formatBytes(n: number | null): string {
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/**
+ * The locale dates are formatted in. The system's tag is not always a valid BCP 47 one:
+ * on Linux the WebView derives it from LANG, which is often `C` or `C.UTF-8`, and Intl
+ * throws on `C`. Anything Intl cannot use falls back to English.
+ */
+export const locale: string = (() => {
+  try {
+    return Intl.getCanonicalLocales(navigator.language)[0] ?? "en";
+  } catch {
+    return "en";
+  }
+})();
+
 export function formatDate(ms: number | null): string {
   if (!ms) return "—";
-  return new Date(ms).toLocaleString(navigator.language || "en");
+  return new Date(ms).toLocaleString(locale);
 }
 
 /**

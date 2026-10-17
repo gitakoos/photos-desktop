@@ -7,7 +7,15 @@
     "core:default",
     "core:event:default",
     "core:webview:default",
-    "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://akoos.eu" },
+        { "url": "https://www.buymeacoffee.com/akoos" },
+        { "url": "https://www.photosforproton.eu" },
+        { "url": "https://github.com/gitakoos/photos-desktop" }
+      ]
+    },
     "dialog:allow-open",
     "core:window:allow-minimize",
     "core:window:allow-maximize",

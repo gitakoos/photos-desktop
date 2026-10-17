@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -26,6 +26,8 @@
 
 export const toMillis = (value: unknown): number => (value ? new Date(value as string).getTime() : 0);
 
+import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
+
 /** How the SDK reports one node's fate in a multi-node operation. */
 export type NodeOpResult = { uid: string; ok: boolean; error?: string };
 
@@ -35,7 +37,9 @@ export type NodeOpResult = { uid: string; ok: boolean; error?: string };
  */
 export async function collectResults(results: AsyncGenerator<any>): Promise<NodeOpResult[]> {
   const out: NodeOpResult[] = [];
-  for await (const r of results) {
+  // Guarded here rather than at each caller: this is the one drain every per-node
+  // batch operation goes through, so one bound covers all of them.
+  for await (const r of withStallGuard(results, SDK_STALL_MS, "nodeResults")) {
     const result = r as any;
     out.push(
       result.ok

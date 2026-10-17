@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -26,7 +26,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import logo from "./assets/logo.png";
 
-const VERSION = "0.2.0-beta.1";
+const VERSION = "1.0.0";
 const APP_NAME = "Photos for Proton";
 
 // Each of these is allow-listed in src-tauri/capabilities/default.json; the opener
@@ -34,8 +34,8 @@ const APP_NAME = "Photos for Proton";
 const LINKS = {
   author: "https://akoos.eu",
   website: "https://www.photosforproton.eu",
-  source: "https://github.com/PhotosforProton/photos-desktop",
-  issues: "https://github.com/PhotosforProton/photos-desktop/issues",
+  source: "https://github.com/gitakoos/photos-desktop",
+  issues: "https://github.com/gitakoos/photos-desktop/issues",
   contact: "mailto:github@akoos.eu",
 };
 

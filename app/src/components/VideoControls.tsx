@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -218,7 +218,7 @@ export function VideoControls({ video }: Props) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [toggle, wake]);
 
-  // What the native bar used to give for free: a click on the picture itself plays or
+  // What a native control bar gives for free: a click on the picture itself plays or
   // pauses. The stage closes the viewer on a click, and the element already stops that
   // one from reaching it.
   useEffect(() => {

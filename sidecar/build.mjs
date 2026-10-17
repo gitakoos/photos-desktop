@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -47,8 +47,17 @@
 // declared licence, and build-setup.ps1 stages it beside app.exe.
 import { build } from "esbuild";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -65,6 +74,12 @@ const banner = [
 ].join("\n");
 
 await build({
+  // Resolve imports, and the openpgp alias below, from the sidecar dir rather than the
+  // process working directory, so the bundle builds the same whether it is invoked as
+  // `npm run build` here or as `node sidecar/build.mjs` from the repo root, which is how
+  // the Flatpak build runs it. Without this the alias resolves against the wrong tree
+  // and openpgp is not found.
+  absWorkingDir: here,
   entryPoints: [join(here, "server.ts")],
   outfile: join(outDir, "server.mjs"),
   bundle: true,
@@ -79,21 +94,88 @@ await build({
 });
 console.log("bundled  -> build/server.mjs");
 
-// sharp is the one dependency that cannot be bundled, so install just it, with
+// sharp is the one dependency that cannot be bundled, so stage just it, with
 // its own dependency tree, beside the bundle where Node will resolve it.
+// The exact version the sidecar itself is installed with, so the build ships what was
+// tested and listed in the notices, not whatever 0.35.x is newest on the day.
+const SHARP_VERSION = JSON.parse(readFileSync(join(here, "package.json"), "utf8")).dependencies.sharp;
 writeFileSync(
   join(outDir, "package.json"),
-  JSON.stringify({ name: "sidecar-dist", private: true, dependencies: { sharp: "^0.35.3" } }, null, 2),
+  JSON.stringify({ name: "sidecar-dist", private: true, dependencies: { sharp: SHARP_VERSION } }, null, 2),
 );
-// `shell: true` is required on Windows: since Node 20, spawning a `.cmd` such as
-// npm.cmd without a shell is refused.
-const npm = spawnSync("npm", ["install", "--omit=dev", "--silent"], {
-  cwd: outDir,
-  stdio: "inherit",
-  shell: true,
-});
-if (npm.status !== 0) throw new Error("installing sharp beside the bundle failed");
+if (process.env.PFP_OFFLINE === "1") {
+  // The Flatpak build runs without network, so sharp is copied out of the sidecar's own
+  // installed dependencies instead of being installed a second time.
+  stageSharpFromDeps();
+} else {
+  // `shell: true` is required on Windows: since Node 20, spawning a `.cmd` such as
+  // npm.cmd without a shell is refused.
+  const npm = spawnSync("npm", ["install", "--omit=dev", "--silent"], {
+    cwd: outDir,
+    stdio: "inherit",
+    shell: true,
+  });
+  if (npm.status !== 0) throw new Error("installing sharp beside the bundle failed");
+}
+cleanResourceTree(join(outDir, "node_modules"));
 console.log("staged   -> build/node_modules (sharp)");
+
+// sharp and everything it loads at run time: its dependencies, plus the optional ones
+// actually installed, which are the platform's own native binaries. Each package keeps
+// its place in the tree, since the native addon finds libvips by a relative path.
+function stageSharpFromDeps() {
+  const deps = join(here, "node_modules");
+  if (!existsSync(join(deps, "sharp", "package.json"))) {
+    throw new Error("sharp is not installed in sidecar/node_modules; run `npm ci` there first");
+  }
+  const found = new Set();
+  const pending = [join(deps, "sharp")];
+  while (pending.length > 0) {
+    const dir = pending.pop();
+    if (found.has(dir)) continue;
+    found.add(dir);
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    for (const name of Object.keys({ ...pkg.dependencies, ...pkg.optionalDependencies })) {
+      // An optional dependency built for another platform is simply not installed.
+      const installed = findInstalled(dir, name);
+      if (installed) pending.push(installed);
+    }
+  }
+  for (const dir of found) {
+    cpSync(dir, join(outDir, "node_modules", relative(deps, dir)), { recursive: true });
+  }
+  const binding = `@img/sharp-${process.platform}-${process.arch}`;
+  if (!existsSync(join(outDir, "node_modules", binding, "package.json"))) {
+    throw new Error(`${binding} is not installed in sidecar/node_modules`);
+  }
+}
+
+// Node's own lookup order: the package's nested node_modules first, then each parent's.
+function findInstalled(fromDir, name) {
+  for (let dir = fromDir; ; dir = dirname(dir)) {
+    const candidate = join(dir, "node_modules", name);
+    if (existsSync(join(candidate, "package.json"))) return candidate;
+    if (dir === here || dir === dirname(dir)) return null;
+  }
+}
+
+// Drop npm's bin symlinks under the staged node_modules. They are CLI shims the app
+// never runs, and Tauri bundles build/ as a resource: its walker follows a symlink
+// and fails with "Not a directory" when it is a real one, which it is on Linux (on
+// Windows they were .cmd shims and slipped through). Removing every symlink keeps the
+// resource tree a plain file tree on every platform.
+function cleanResourceTree(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name);
+    // Symlinks (npm bin shims), the .bin dir, and npm's lock metadata are none of them
+    // needed at runtime, and each has tripped Tauri's resource walker on Linux.
+    if (entry.isSymbolicLink() || entry.name === ".bin" || entry.name === ".package-lock.json") {
+      rmSync(p, { recursive: true, force: true });
+    } else if (entry.isDirectory()) {
+      cleanResourceTree(p);
+    }
+  }
+}
 
 // Tauri's externalBin looks for a target-triple suffix and strips it when it
 // copies the file next to the app executable.

@@ -1,0 +1,452 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/*
+ * The photo editor overlay. It sits above the viewer (z 1000 over the lightbox's 950)
+ * and takes the whole window: a top bar of file-level actions, the live canvas on a
+ * dark stage that matches the viewer's, then the active tool's controls above a row of
+ * tool tabs. The stage stays dark in both themes, exactly as the viewer stage does; the
+ * chrome around it follows the app's tokens.
+ */
+
+.ed-root {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  /* Bar, stage, the active tool's controls, then the tool tabs. */
+  grid-template-rows: 52px minmax(0, 1fr) auto auto;
+  background: rgb(6, 6, 8);
+  user-select: none;
+  touch-action: none;
+}
+
+/* ---- Top bar ---- */
+.ed-topbar {
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+}
+.ed-topbar-left {
+  justify-self: start;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ed-topbar-right {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ed-topbar-title {
+  justify-self: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+/* Round icon button, the viewer's own shape. */
+.ed-ibtn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.ed-ibtn:hover:not(:disabled) {
+  color: var(--fg-primary);
+  border-color: var(--surface-2);
+}
+.ed-ibtn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* The one filled action in the bar. */
+.ed-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.12s ease, opacity 0.12s ease;
+}
+.ed-save:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.ed-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.ed-text-btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--fg-dim);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.ed-text-btn:hover:not(:disabled) {
+  color: var(--fg-primary);
+  border-color: var(--surface-2);
+}
+.ed-text-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Stage ---- */
+.ed-stage {
+  grid-row: 2;
+  position: relative;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+/* Sized in script to the fitted image, so an overlay can sit exactly over the pixels. */
+.ed-canvas-wrap {
+  position: relative;
+  line-height: 0;
+}
+.ed-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+}
+.ed-stage-msg {
+  color: var(--fg-mute);
+  font-size: 13px;
+}
+
+/* The interaction surface for crop and redact, exactly over the canvas. */
+.ed-overlay {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+.ed-overlay.crop {
+  cursor: crosshair;
+}
+.ed-overlay.redact {
+  cursor: crosshair;
+}
+.ed-crop-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ---- Error / saved line ---- */
+.ed-banner {
+  position: absolute;
+  top: 62px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  border: 0.5px solid var(--border);
+  background: var(--pill-bg);
+  color: var(--fg-dim);
+}
+.ed-banner.error {
+  background: rgba(var(--error-rgb), 0.16);
+  border-color: rgba(var(--error-rgb), 0.4);
+  color: var(--error);
+}
+.ed-banner.ok {
+  background: rgba(48, 209, 88, 0.16);
+  border-color: rgba(48, 209, 88, 0.4);
+  color: var(--status-synced);
+}
+
+/* ---- Controls panel (the active tool) ---- */
+.ed-controls {
+  min-height: 92px;
+  box-sizing: border-box;
+  padding: 14px 18px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Sliders, one bipolar row each. */
+.ed-adjust {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 28px;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+}
+.ed-slider-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 12px;
+}
+.ed-slider-label {
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ed-slider-val {
+  font-size: 12px;
+  color: var(--fg-mute);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A native range themed to the app, filled from the centre by an inline gradient. */
+.ed-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  cursor: pointer;
+  outline: none;
+}
+.ed-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--fg-primary);
+  border: 2px solid var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.ed-range::-webkit-slider-thumb:hover {
+  background: #fff;
+}
+
+/* ---- Filters ---- */
+.ed-filters {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 2px 4px 8px;
+  justify-content: center;
+  scrollbar-width: thin;
+}
+.ed-filter {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ed-filter-thumb {
+  width: 62px;
+  height: 62px;
+  border-radius: 12px;
+  object-fit: cover;
+  border: 2px solid transparent;
+  background: var(--bg2);
+}
+.ed-filter.sel .ed-filter-thumb {
+  border-color: var(--accent);
+}
+.ed-filter.sel {
+  color: var(--fg-primary);
+}
+
+/* ---- Chip rows (crop aspects, redact mode) ---- */
+.ed-chiprow {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+}
+.ed-chip {
+  height: 32px;
+  padding: 0 14px;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--line-soft);
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.ed-chip:hover:not(.sel) {
+  color: var(--fg-primary);
+}
+.ed-chip.sel {
+  color: var(--accent);
+  background: var(--accent-wash);
+  border-color: transparent;
+}
+
+/* ---- Redact controls ---- */
+.ed-redact {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+}
+.ed-redact-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.ed-brush {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 200px;
+}
+.ed-brush .ed-range {
+  width: 160px;
+}
+.ed-brush-label {
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.ed-mini-btn {
+  height: 32px;
+  padding: 0 14px;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--pill-bg);
+  color: var(--fg-dim);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.ed-mini-btn:hover:not(:disabled) {
+  color: var(--fg-primary);
+  border-color: var(--surface-2);
+}
+.ed-mini-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---- Rotate controls ---- */
+.ed-rotate {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  align-items: center;
+}
+.ed-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  border: 0.5px solid var(--border);
+  border-radius: 14px;
+  background: var(--line-soft);
+  color: var(--fg-soft);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.ed-action:hover {
+  color: var(--fg-primary);
+  border-color: var(--surface-2);
+}
+
+/* ---- Tool tabs ---- */
+.ed-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px 14px;
+}
+.ed-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 68px;
+  height: 50px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.ed-tab:hover:not(.sel) {
+  color: var(--fg-dim);
+  background: var(--line-06);
+}
+.ed-tab.sel {
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+.ed-tab-icon {
+  display: grid;
+  place-items: center;
+  height: 20px;
+}

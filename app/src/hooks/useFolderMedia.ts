@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -107,7 +107,7 @@ async function drain(): Promise<void> {
 }
 
 /** Ask for one file's picture. Returns an unsubscribe. */
-function requestThumbnail(path: string, cb: (url: string | null) => void): () => void {
+export function requestThumbnail(path: string, cb: (url: string | null) => void): () => void {
   const hit = cache.get(path);
   if (hit !== undefined) {
     keep(path, hit);

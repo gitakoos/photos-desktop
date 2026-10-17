@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -80,7 +80,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * holds exactly one original at a time and `getOriginal` is the only thing that ever
  * sets it. So a photo that was never asked for provably has nothing on disk, and the
  * release for it is a call the sidecar answers by doing nothing, once it has queued
- * behind everything else on the one channel. Stepping through fifty photos used to send
+ * behind everything else on the one channel. Stepping through fifty photos would send
  * fifty of those.
  *
  * Skipping the release for a photo this no longer names cannot strand a staged file

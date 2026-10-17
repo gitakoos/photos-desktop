@@ -2,7 +2,7 @@
  * Photos for Proton
  * Copyright (C) 2026 Akoos <https://akoos.eu>
  *
- * Source:  https://github.com/PhotosforProton/photos-desktop
+ * Source:  https://github.com/gitakoos/photos-desktop
  * Website: https://www.photosforproton.eu
  *
  * This file is part of Photos for Proton.
@@ -26,8 +26,7 @@
   z-index: 1100;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(2px);
+  background: var(--scrim);
 }
 
 .cf-panel {
@@ -36,7 +35,7 @@
   border-radius: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--dialog-shadow);
 }
 
 .cf-title {
