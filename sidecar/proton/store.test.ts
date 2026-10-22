@@ -22,7 +22,7 @@
 
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -106,6 +106,34 @@ describe("wipeCache", () => {
 
     expect(thumbGet("uid-1", 0)).toBeNull();
     expect(metaGet("uid-1")).toBeNull();
+  });
+
+  // A file per photo is hundreds of thousands of files on a large library, so the
+  // folders are moved aside at once and deleted behind; nothing of them may stay.
+  it("deletes the set-aside folders in the background", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pfp-store-test-"));
+    initStore(dir);
+    for (let i = 0; i < 50; i++) thumbPut(`uid-${i}`, 0, Buffer.from("thumbnail bytes"));
+
+    wipeCache();
+
+    const leftovers = () => readdirSync(dir).filter((n) => n.includes(".discard-"));
+    for (let i = 0; i < 100 && leftovers().length > 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(leftovers()).toEqual([]);
+    expect(readdirSync(join(dir, "thumbs"))).toEqual([]);
+  });
+
+  it("sweeps away a set-aside folder a quit left behind", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pfp-store-test-"));
+    mkdirSync(join(dir, "thumbs.discard-1234abcd"), { recursive: true });
+    writeFileSync(join(dir, "thumbs.discard-1234abcd", "x.bin"), "old");
+
+    initStore(dir);
+
+    for (let i = 0; i < 100 && existsSync(join(dir, "thumbs.discard-1234abcd")); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(existsSync(join(dir, "thumbs.discard-1234abcd"))).toBe(false);
   });
 
   it("leaves the store usable afterwards", () => {

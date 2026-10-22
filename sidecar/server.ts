@@ -33,10 +33,11 @@ import "@protontech/crypto/polyfill";
 import { VERSION } from "@protontech/drive-sdk";
 import { session } from "./proton/session.ts";
 import { initStore } from "./proton/store.ts";
+import { modelStatus as semanticModelStatus, removeModel, startModelDownload } from "./proton/semantic.ts";
 import { setVaultMetaKey } from "./proton/vault.ts";
 import { respond, type RpcWriter } from "./rpc.ts";
 import { scrubSecrets } from "./scrub.ts";
-import { checkUpdate, downloadUpdate } from "./update.ts";
+import { checkUpdate, downloadUpdate, startUpdateDownload, updateStatus } from "./update.ts";
 
 // Two hard rules for the sidecar's output. (1) stdout carries ONLY JSON-RPC
 // responses; a stray write corrupts the channel and knocks the sidecar offline.
@@ -106,13 +107,17 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   lockStatus: () => session.lockStatus(),
   unlock: (p) => session.unlock(p.password),
   unlockDevice: () => session.unlockDevice(),
+  retryResume: () => session.retryResume(),
   startBrowserLogin: () => session.startBrowserLogin(),
   browserLoginStatus: () => session.browserLoginStatus(),
   cancelBrowserLogin: () => session.cancelBrowserLogin(),
   protectSession: (p) => session.protectSession(typeof p?.password === "string" ? p.password : null),
   lock: () => session.lock(),
   getTimeline: () => session.getTimeline(),
+  startTimeline: () => session.startTimeline(),
+  timelinePage: (p) => session.timelinePage(p.run, p.offset ?? 0, p.limit ?? 20000),
   getThumbnails: (p) => session.getThumbnails(p.uids),
+  warmThumbnails: (p) => session.warmThumbnails(p.uids),
   getPreview: (p) => session.getPreview(p.uid),
   getOriginal: (p) => session.getOriginal(p.uid),
   releaseOriginal: (p) => session.releaseOriginal(p?.uid),
@@ -134,6 +139,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getAlbums: () => session.getAlbums(),
   getAlbumPhotos: (p) => session.getAlbumPhotos(p.uid),
   getAlbumPhotoUids: () => session.getAlbumPhotoUids(),
+  cachedAlbumPhotoUids: () => session.cachedAlbumPhotoUids(),
   listAlbumsForMount: () => session.listAlbumsForMount(),
   createAlbum: (p) => session.createAlbum(p.name),
   renameAlbum: (p) => session.renameAlbum(p.uid, p.name),
@@ -142,6 +148,9 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   addPhotosToAlbum: (p) => session.addPhotosToAlbum(p.albumUid, p.uids),
   removePhotosFromAlbum: (p) => session.removePhotosFromAlbum(p.albumUid, p.uids),
   getShared: (p) => session.getShared(!!p.withMe),
+  listInvitations: () => session.listInvitations(),
+  acceptInvitation: (p) => session.acceptInvitation(String(p.uid)),
+  declineInvitation: (p) => session.declineInvitation(String(p.uid)),
   getSharingInfo: (p) => session.getSharingInfo(p.uid),
   // An absent password or expiry keeps whatever the link has; null takes it off.
   setPublicLink: (p) =>
@@ -152,6 +161,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   stopSharing: (p) => session.stopSharing(p.uid),
   getMetadata: (p) => session.getMetadata(p.uids),
   getDurations: (p) => session.getDurations(p.uids),
+  getLocations: (p) => session.getLocations(Array.isArray(p?.uids) ? p.uids : []),
   getMediaTypes: (p) => session.getMediaTypes(p.uids),
   startUpload: (p) =>
     session.startUpload(
@@ -186,6 +196,20 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
       p.favorite === true,
     ),
   uploadStatus: () => session.uploadStatus(),
+  getDriveCollections: (p) =>
+    session.getDriveCollections(!!p?.refresh, {
+      faces: p?.faces !== false,
+      labels: p?.labels !== false,
+      search: !!p?.search,
+    }),
+  semanticSearch: (p) =>
+    session.semanticSearch(
+      String(p?.query ?? "").slice(0, 500),
+      Math.min(1000, Math.max(1, Math.floor(Number(p?.limit) || 200))),
+    ),
+  semanticModelStatus: () => semanticModelStatus(),
+  semanticModelDownload: () => startModelDownload(),
+  semanticModelRemove: () => removeModel(),
   thumbServer: () => session.thumbServer(),
   cancelUpload: () => session.cancelUpload(),
   clearUploads: () => session.clearUploads(),
@@ -204,6 +228,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   signOut: () => session.signOut(),
   checkUpdate: () => checkUpdate(),
   downloadUpdate: () => downloadUpdate(),
+  startUpdateDownload: () => startUpdateDownload(),
+  updateStatus: () => updateStatus(),
 };
 
 async function handle(req: Request): Promise<unknown> {

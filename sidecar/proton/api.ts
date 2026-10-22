@@ -23,6 +23,8 @@
 // Raw Proton API client for the sidecar: auth + core endpoints, plus the
 // session-aware HTTP client the Drive SDK consumes.
 
+import { Agent } from "undici";
+
 export const BASE_URL = "https://drive-api.proton.me";
 // Mirror the Android app's proven appVersion exactly. The underscore form passes
 // both ProtonCore's client-side regex and the auth server; other shapes get a
@@ -86,6 +88,16 @@ function hvChallengeFrom(json: any): HvChallenge | null {
   return { token, methods };
 }
 
+/**
+ * How long one of this module's own requests may go unanswered. Without a limit a request
+ * that never returns (the machine slept mid-call, the network changed) is ended only
+ * by the host giving up on the whole sidecar, which takes the session with it. The
+ * refresh gets longer: its token is spent the moment the server rotates it, so cutting
+ * one short that was only slow costs more than waiting.
+ */
+const API_TIMEOUT_MS = 30_000;
+const REFRESH_TIMEOUT_MS = 60_000;
+
 function baseHeaders(session?: Session): Record<string, string> {
   const h: Record<string, string> = {
     "x-pm-appversion": APP_VERSION,
@@ -113,6 +125,9 @@ async function apiFetch(
     method: opts.method ?? "GET",
     headers,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
+  }).catch((e: Error) => {
+    throw e.name === "TimeoutError" ? new Error("Proton did not answer in time") : e;
   });
   const text = await res.text();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -177,6 +192,7 @@ export async function randomModulus(
 /** Refresh the access token using the stored refresh token (used on resume). */
 export async function refreshSession(uid: string, refreshToken: string): Promise<Session> {
   const res = await fetch(BASE_URL + "/auth/v4/refresh", {
+    signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     method: "POST",
     headers: {
       "x-pm-appversion": APP_VERSION,
@@ -197,7 +213,11 @@ export async function refreshSession(uid: string, refreshToken: string): Promise
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const json: any = await res.json().catch(() => ({}));
   if (!res.ok || (json?.Code && json.Code !== 1000)) {
-    throw new Error(json?.Error || `token refresh failed (HTTP ${res.status})`);
+    // The status travels with the error: a busy server is worth asking again, a
+    // refused token is not.
+    const err = new Error(json?.Error || `token refresh failed (HTTP ${res.status})`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
   return { uid: json.UID ?? uid, accessToken: json.AccessToken, refreshToken: json.RefreshToken };
 }
@@ -225,6 +245,30 @@ function attemptSignal(timeoutMs: number, caller?: AbortSignal): AbortSignal | u
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return caller;
   const timeout = AbortSignal.timeout(timeoutMs);
   return caller ? AbortSignal.any([caller, timeout]) : timeout;
+}
+
+/**
+ * The connection pool file content travels through. Node's own cuts any request whose
+ * answer has not begun 300 s after it was sent, as "fetch failed", even while the body is
+ * still going up. On a slow uplink a 4 MB block shared with the other blocks in flight
+ * takes longer than that, so it failed every time, and the SDK, reading it as a network
+ * error, sent it again at the same pace. With that cut gone, the SDK's own 600 s limit
+ * applies, and its answer to a block that runs past it is to send one block at a time.
+ */
+export const STORAGE_AGENT_OPTIONS = { headersTimeout: 0 } as const;
+const storageAgent = new Agent(STORAGE_AGENT_OPTIONS);
+
+/** A block upload that took this long says the uplink, not the server, sets the pace. */
+export const SLOW_BLOCK_MS = 120_000;
+let slowUploadWatcher: (() => void) | null = null;
+
+/** Called whenever a block of file content takes `SLOW_BLOCK_MS` or more to go up. */
+export function watchSlowUploads(watcher: (() => void) | null): void {
+  slowUploadWatcher = watcher;
+}
+
+export function reportSlowUpload(): void {
+  slowUploadWatcher?.();
 }
 
 /**
@@ -312,15 +356,21 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
       body?: BodyInit;
       signal?: AbortSignal;
     }): Promise<Response> {
-      return withAuthRetry(req.url, () => {
-        const headers = inject(req.url, new Headers(req.headers));
-        return fetch(req.url, {
-          method: req.method,
-          headers,
-          body: req.body,
-          signal: attemptSignal(req.timeoutMs, req.signal),
+      const started = Date.now();
+      try {
+        return await withAuthRetry(req.url, () => {
+          const headers = inject(req.url, new Headers(req.headers));
+          return fetch(req.url, {
+            method: req.method,
+            headers,
+            body: req.body,
+            signal: attemptSignal(req.timeoutMs, req.signal),
+            dispatcher: storageAgent,
+          } as RequestInit);
         });
-      });
+      } finally {
+        if (req.body && Date.now() - started >= SLOW_BLOCK_MS) reportSlowUpload();
+      }
     },
   };
 }

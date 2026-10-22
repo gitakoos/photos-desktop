@@ -30,6 +30,7 @@ import { rpc } from "../lib/rpc";
 // so the popup header is identical to the one inside the main window.
 import { barColor, formatBytes, type Account } from "../components/ProfileMenu";
 import { useT } from "../lib/i18n";
+import { describeMount, useMountActivity } from "../lib/mountActivity";
 import "../styles/ProfileMenu.css";
 import "../styles/TrayPopup.css";
 
@@ -72,6 +73,8 @@ export function TrayPopup() {
   const t = useT();
   const [view, setView] = useState<AuthView>({ kind: "loading" });
   const [syncing, setSyncing] = useState(false);
+  const mountActivity = useMountActivity();
+  const doing = mountActivity ? describeMount(mountActivity, t) : null;
   // Only the newest refresh may commit: a stale in-flight one (e.g. a slow
   // getAccountInfo left over from a previous open) must not overwrite the current
   // state, or a just-switched account could flash back to the old one.
@@ -189,10 +192,11 @@ export function TrayPopup() {
     await invoke("sync_now").catch(() => {});
   }
 
+  // Signing out empties everything the app keeps on this PC, so the main window asks
+  // first, where there is room to say what goes and what stays.
   async function signOut() {
-    await rpc("signOut").catch(() => {});
+    await invoke("open_main_from_tray").catch(() => {});
     await emit("tray-signout").catch(() => {});
-    await invoke("hide_tray_popup").catch(() => {});
   }
 
   async function quit() {
@@ -273,7 +277,7 @@ export function TrayPopup() {
 
         <div className="tray-status" role="status" aria-live="polite">
           <span className={`tray-dot${syncing ? " on" : ""}`} aria-hidden="true" />
-          <span>{syncing ? t("tray.syncing") : t("tray.synced")}</span>
+          <span title={doing?.why}>{syncing ? (doing?.title ?? t("tray.syncing")) : t("tray.synced")}</span>
         </div>
         <button className="tray-row" onClick={syncNow} disabled={syncing}>
           <span className={syncing ? "tray-spin" : undefined}>

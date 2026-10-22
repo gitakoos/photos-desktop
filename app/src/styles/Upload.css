@@ -20,287 +20,87 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-.up-backdrop {
-  position: fixed;
+/* The upload screen covers the content column, over the view it was opened from, which
+   stays mounted underneath so leaving brings it back exactly as it was. */
+.up-page {
+  position: absolute;
   inset: 0;
-  z-index: 900;
-  display: grid;
-  place-items: center;
-  background: var(--scrim);
-}
-
-/* Sized to the screen, never taller than it. */
-.up-panel {
-  width: min(720px, 82vw);
-  max-height: 78vh;
+  z-index: 20;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 20px 22px 18px;
-  border-radius: 16px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  box-shadow: var(--dialog-shadow);
+  min-height: 0;
+  background: var(--bg0);
+}
+/* Clear of the floating dock, which stays on top so the other views are one click away. */
+.gallery:not(.has-sidebar) .up-page {
+  padding-bottom: 84px;
+}
+.gallery:not(.has-sidebar) .g-dock {
+  z-index: 30;
 }
 
 .up-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px 14px;
+  min-height: 38px;
+}
+.has-sidebar .up-head {
+  padding-top: 14px;
 }
 .up-title {
   margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--fg-primary);
 }
-.up-x {
-  width: 30px;
-  height: 30px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fg-dim);
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-}
-.up-x:hover:not(:disabled) {
-  background: var(--line);
-  color: #fff;
-}
-.up-x:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-/* ---- Drop zone ---- */
-.up-drop {
-  display: grid;
-  place-items: center;
-  gap: 6px;
-  padding: 38px 20px;
-  border-radius: 12px;
-  border: 1.5px dashed var(--surface-2);
-  background: var(--page-bg);
-  transition: border-color 0.12s ease, background 0.12s ease;
-}
-.up-drop.hot {
-  border-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.08);
-}
-.up-dropicon {
-  width: 40px;
-  height: 40px;
-  display: grid;
-  place-items: center;
-  border-radius: 999px;
-  background: var(--accent-wash);
-  color: var(--accent);
-  font-size: 20px;
-}
-.up-droptitle {
-  margin: 6px 0 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-primary);
-}
-.up-dropsub {
-  margin: 0;
-  max-width: 42ch;
-  text-align: center;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--fg-mute);
-}
-
-/* ---- Actions ---- */
-.up-actions {
+.up-headactions {
   display: flex;
-  gap: 10px;
-  justify-content: flex-end;
+  gap: 8px;
 }
+.up-spacer {
+  flex: 1 1 auto;
+}
+
+/* ---- Buttons: the top bar's pill shape and height ---- */
 .up-btn {
-  padding: 9px 16px;
+  height: 38px;
+  padding: 0 18px;
   border: none;
-  border-radius: 10px;
+  border-radius: 999px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #fff;
+  color: var(--on-accent);
+  font: inherit;
   font-size: 13px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
 }
 .up-btn:hover {
   filter: brightness(1.08);
 }
 .up-btn.ghost {
-  background: transparent;
-  border: 1px solid var(--surface-2);
-  color: var(--fg-dim);
+  background: var(--surface-2);
+  color: var(--fg-primary);
+  font-weight: 500;
 }
 .up-btn.ghost:hover {
-  color: var(--fg-primary);
-  filter: none;
+  filter: brightness(1.15);
 }
-
-/* ---- Import from another service ---- */
-.up-import {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 16px;
-  padding: 14px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--page-bg);
-}
-.up-importtext {
-  flex: 1 1 220px;
-  min-width: 0;
-}
-.up-importtitle {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg-primary);
-}
-.up-importsub {
-  margin: 2px 0 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--fg-mute);
-}
-.up-importstate {
-  flex: 1 0 100%;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 12px;
-  color: var(--fg-dim);
+.up-btn.small {
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
 }
 .up-btn:disabled {
   opacity: 0.5;
   cursor: default;
   filter: none;
 }
-
-/* ---- Progress ---- */
-.up-bar {
-  height: 5px;
-  border-radius: 999px;
-  background: var(--border);
-  overflow: hidden;
-}
-.up-barfill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
-  transition: width 0.2s ease;
-}
-.up-counts {
-  display: flex;
-  gap: 14px;
-  font-size: 12px;
-  color: var(--fg-dim);
-}
-.up-dim {
-  color: var(--fg-mute);
-}
-.up-rows {
-  margin: 0;
-  font-size: 11px;
-}
-.up-bad {
-  color: var(--error);
-}
-
-.up-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--page-bg);
-}
-.up-item {
+.up-actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--fg-dim);
-  border-bottom: 1px solid rgba(var(--line-rgb), 0.04);
-}
-.up-item:last-child {
-  border-bottom: none;
-}
-.up-item.done {
-  color: var(--fg-primary);
-}
-.up-item.failed {
-  color: var(--error);
-}
-.up-name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.up-album {
-  flex: 0 0 auto;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.16);
-}
-.up-state {
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--fg-mute);
-  max-width: 22ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.up-item.done .up-state {
-  color: var(--status-synced);
-}
-/* Why a file failed, in full on its own line and selectable, so it can be read and copied. */
-.up-reason {
-  flex: 1 0 100%;
-  font-size: 11px;
-  line-height: 1.4;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  user-select: text;
-  cursor: text;
-}
-
-.up-error {
-  margin: 0;
-  font-size: 12px;
-  color: var(--error);
-}
-
-/* The scrollbar inside the list follows the app's own style. */
-.up-list::-webkit-scrollbar {
-  width: 8px;
-}
-.up-list::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 999px;
-}
-
-.up-actions.center {
   justify-content: center;
-  margin-top: 12px;
-}
-.up-spacer {
-  flex: 1 1 auto;
+  gap: 10px;
 }
 .up-link {
   background: none;
@@ -308,12 +108,446 @@
   padding: 0;
   cursor: pointer;
   color: var(--accent);
-  font-size: 12px;
+  font: inherit;
+  font-size: 12.5px;
   font-weight: 500;
 }
 .up-link:hover {
   filter: brightness(1.15);
 }
+
+/* ---- Nothing in the queue: one large place to drop on, the import under it ---- */
+.up-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 36px;
+  padding: 20px 20px 40px;
+  text-align: center;
+  scrollbar-width: thin;
+}
+/* Plain: the words and the buttons in the middle of the page, nothing drawn around them.
+   A file dragged over the window gets the window's own drop veil. */
+.up-drop,
+.up-import {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 520px;
+}
+.up-dropicon {
+  display: grid;
+  place-items: center;
+  margin-bottom: 6px;
+  color: var(--fg-mute);
+}
+.up-droptitle {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+  color: var(--fg-primary);
+}
+.up-dropsub,
+.up-importsub {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+/* The import, a row of its own under a hairline. */
+.up-import {
+  padding-top: 32px;
+  border-top: 1px solid var(--line);
+  width: min(520px, 100%);
+}
+.up-importtitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+
+/* ---- Files in the queue: where the whole of it stands, then the files, as wide as the
+   top bar so their edges line up with it ---- */
+.up-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 20px 20px;
+}
+.up-summary {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: 16px;
+  background: var(--surface);
+}
+.up-sumtop {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.up-percent {
+  flex: 0 0 auto;
+  min-width: 3ch;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-primary);
+}
+.up-sumtext {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.up-sumtitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  font-variant-numeric: tabular-nums;
+}
+.up-sumsub {
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.up-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg2);
+  overflow: hidden;
+}
+.up-barfill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  transition: width 0.3s ease;
+}
+
+/* The counts, each a switch that shows only its own files. */
+.up-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.up-chip {
+  --dot: var(--fg-mute);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--bg2);
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.up-chip:hover {
+  color: var(--fg-primary);
+}
+.up-chip.on {
+  border-color: var(--dot);
+  color: var(--fg-primary);
+}
+.up-chip.done {
+  --dot: var(--status-synced);
+}
+.up-chip.waiting {
+  --dot: var(--accent);
+}
+.up-chip.failed {
+  --dot: var(--status-error);
+}
+.up-chipdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dot);
+}
+
+.up-error {
+  flex: 0 0 auto;
+  max-height: 96px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 10px 20px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--error);
+  background: rgba(var(--error-rgb), 0.1);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.up-queue {
+  flex: 1 1 auto;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.up-queuehead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 46px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+.up-queuetitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+.up-rows {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.up-empty {
+  margin: auto;
+  padding: 24px;
+  max-width: 40ch;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-mute);
+}
+.up-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  scrollbar-width: thin;
+}
+.up-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 6px 20px;
+}
+.up-item:hover {
+  background: var(--line-soft);
+}
+
+/* The state at the front of a row. */
+.up-mark {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+}
+.up-mark.done {
+  background: rgba(48, 209, 88, 0.16);
+  color: var(--status-synced);
+}
+.up-mark.skipped {
+  background: var(--bg2);
+  color: var(--fg-mute);
+}
+.up-mark.failed {
+  background: rgba(var(--error-rgb), 0.16);
+  color: var(--status-error);
+}
+.up-mark.waiting::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1.5px solid var(--fg-mute);
+}
+.up-mark.uploading svg {
+  transform: rotate(-90deg);
+}
+.up-ringtrack {
+  fill: none;
+  stroke: var(--bg2);
+  stroke-width: 2.5;
+}
+.up-ringfill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.3s ease;
+}
+.up-ringfill.spin {
+  transform-origin: 11px 11px;
+  animation: up-spin 0.9s linear infinite;
+}
+@keyframes up-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.up-itemmain {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.up-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--fg-primary);
+}
+.up-item.skipped .up-name,
+.up-item.pending .up-name {
+  color: var(--fg-dim);
+}
+.up-album {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--accent);
+}
+/* Why a file failed, in full and selectable, so it can be read and copied. */
+.up-reason {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--error);
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+.up-state {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
 .up-item.uploading .up-state {
   color: var(--accent);
+  font-weight: 600;
+}
+.up-item.failed .up-state {
+  color: var(--status-error);
+}
+
+/* Narrow: the top bar's pickers wrap under the title rather than crowd it. */
+@container main (max-width: 760px) {
+  .up-head {
+    flex-wrap: wrap;
+  }
+  .up-headactions {
+    order: 3;
+    flex: 1 0 100%;
+    flex-wrap: wrap;
+  }
+  .up-percent {
+    font-size: 28px;
+  }
+}
+/* Short (a 13-inch screen at 150% scaling is 720 pixels high): the drop area and the
+   summary give up their extra room, so the buttons and the files stay in view. */
+@media (max-height: 640px) {
+  .up-drop {
+    min-height: 180px;
+    padding: 20px;
+  }
+  .up-dropicon {
+    width: 48px;
+    height: 48px;
+    margin-bottom: 2px;
+  }
+  .up-dropsub {
+    margin-bottom: 8px;
+  }
+  .up-summary {
+    padding: 14px 16px;
+    gap: 10px;
+  }
+}
+/* The smallest windows: a long message keeps to two lines and scrolls inside them. */
+@media (max-height: 580px) {
+  .up-error {
+    max-height: 46px;
+  }
+}
+
+/* What else the app is syncing, and why: a quiet line above the page, not a second queue. */
+.up-sync {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0 20px 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--surface);
+}
+.up-syncicon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  margin-top: 1px;
+  color: var(--accent);
+  animation: g-spin 0.9s linear infinite;
+}
+.up-synctext {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.up-synctitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.up-syncwhy {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--fg-mute);
+}
+.up-sync .up-bar {
+  height: 6px;
+  margin-top: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .up-syncicon {
+    animation: none;
+  }
 }

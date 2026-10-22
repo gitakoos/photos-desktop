@@ -61,6 +61,8 @@ import {
 } from "./importer.ts";
 import type { SidecarMeta } from "./takeout.ts";
 import { readMp4CreationTime } from "./mp4Date.ts";
+import { withRetry } from "./transient.ts";
+import { watchSlowUploads } from "./api.ts";
 import { PhotoTag, ThumbnailType } from "@protontech/drive-sdk";
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -144,6 +146,9 @@ export type UploadItem = {
   album: string | null;
   status: UploadItemStatus;
   error?: string;
+  /** While it uploads: the file's size, and how much of it has gone up. */
+  size?: number;
+  sent?: number;
 };
 
 /**
@@ -353,6 +358,23 @@ export function getUploadStatusView(): UploadStatus & { itemsTotal: number } {
 }
 
 /** The rows worth showing, in their order: failures, what is moving, what is next, the latest. */
+/**
+ * The pauses before trying a file again after a failure that may pass (the network
+ * dropped, the server was busy). Two more tries, the second after a longer rest.
+ */
+const UPLOAD_RETRY_MS = [3_000, 10_000];
+
+/** What the upload panel says about a failure: its message, or its kind when it has none. */
+export function failureText(e: unknown): string {
+  const err = e as { message?: unknown; name?: unknown; statusCode?: unknown; status?: unknown } | null;
+  const message = typeof err?.message === "string" ? err.message.trim() : "";
+  if (message) return message;
+  const status = Number(err?.statusCode ?? err?.status ?? 0);
+  const name = typeof err?.name === "string" && err.name !== "Error" ? err.name : "";
+  if (status) return `Upload failed (${name || "server error"} ${status})`;
+  return name ? `Upload failed (${name})` : "Upload failed";
+}
+
 export function statusRows(all: UploadItem[], limit: number): UploadItem[] {
   if (all.length <= limit) return all;
   const keep = new Set<number>();
@@ -725,7 +747,13 @@ async function uploadOne(
   signal: AbortSignal,
   favorite = false,
   sidecar?: SidecarMeta,
-  options: { mainPhotoNodeUid?: string; extraTags?: number[]; known?: string; fresh?: boolean } = {},
+  options: {
+    mainPhotoNodeUid?: string;
+    extraTags?: number[];
+    known?: string;
+    fresh?: boolean;
+    onProgress?: (sent: number, size: number) => void;
+  } = {},
 ): Promise<{ uid: string | null; duplicates: string[] }> {
   const name = basename(path);
   const mediaType = mediaTypeOf(path);
@@ -734,6 +762,7 @@ async function uploadOne(
   if (options.known) return { uid: null, duplicates: [options.known] };
 
   const info = await stat(path);
+  options.onProgress?.(0, info.size);
   const sha1 = await sha1Of(path);
 
   // A file the import's review has just found new is not asked about a second time.
@@ -804,7 +833,10 @@ async function uploadOne(
   // The SDK wants a web ReadableStream; Node gives us one straight off the disk
   // stream, so a large photo is never buffered in memory.
   const stream = Readable.toWeb(createReadStream(path)) as any;
-  const controller = await uploader.uploadFromStream(stream, thumbnails);
+  // The SDK counts what has gone up, a block at a time, thumbnails included.
+  const controller = await uploader.uploadFromStream(stream, thumbnails, (sent: number) =>
+    options.onProgress?.(Math.min(sent, info.size), info.size),
+  );
   const { nodeUid } = await controller.completion();
   return { uid: nodeUid, duplicates: [] };
 }
@@ -848,9 +880,20 @@ async function planGroups(paths: string[]): Promise<Group[]> {
 // memory for a throughput the SDK gate caps anyway.
 const UPLOAD_CONCURRENCY = 4;
 
+// Set once a block has taken long enough that the uplink sets the pace: from then on one
+// file goes up at a time, so the files no longer split a slow line between them and each
+// get too little of it to finish a block in time. Cleared when the queue next starts.
+let slowLink = false;
+
 async function drain(photos: any): Promise<void> {
   draining = true;
   status.running = true;
+  slowLink = false;
+  watchSlowUploads(() => {
+    if (slowLink) return;
+    slowLink = true;
+    process.stderr.write("[upload] slow uplink: one file at a time\n");
+  });
 
   try {
     while (queue.length > 0 && !abort.signal.aborted) {
@@ -912,6 +955,9 @@ async function drain(photos: any): Promise<void> {
         const intoAlbum = (uid: string) => {
           if (albumUid && !inAlbum.has(uid) && !toAlbum.includes(uid)) toAlbum.push(uid);
         };
+        // A photo the library already had, copied into the Favorites folder: what was
+        // asked for is that photo as a favourite.
+        const toFavorite: string[] = [];
 
         // A bounded worker pool over the group's files. The SDK's own queue caps the
         // uploads at 5 concurrent, but the expensive per-file PREP (hashing, EXIF read,
@@ -928,23 +974,36 @@ async function drain(photos: any): Promise<void> {
           const item = status.items[group.itemOf?.get(file) ?? group.startIndex + i];
           if (abort.signal.aborted) return;
           item.status = "uploading";
+          const progress = (sent: number, size: number) => {
+            item.sent = sent;
+            item.size = size;
+          };
           const video = group.related?.get(file);
           let mainUid: string | null = null;
           try {
             const key = frameKey(file);
-            const { uid, duplicates } = await uploadOne(
-              photos,
-              file,
-              group.frames.get(key),
-              group.media.get(key),
+            let attempt = 0;
+            const { uid, duplicates } = await withRetry(
+              () =>
+                uploadOne(
+                  photos,
+                  file,
+                  group.frames.get(key),
+                  group.media.get(key),
+                  abort.signal,
+                  group.favorite,
+                  group.sidecars?.get(file),
+                  {
+                    known: group.known?.get(file),
+                    // A try after a failure asks the library first: the failed one may
+                    // have finished on the server with only its answer lost.
+                    fresh: attempt++ === 0 && group.fresh?.has(file),
+                    extraTags: video ? [PhotoTag.LivePhotos] : [],
+                    onProgress: progress,
+                  },
+                ),
+              UPLOAD_RETRY_MS,
               abort.signal,
-              group.favorite,
-              group.sidecars?.get(file),
-              {
-                known: group.known?.get(file),
-                fresh: group.fresh?.has(file),
-                extraTags: video ? [PhotoTag.LivePhotos] : [],
-              },
             );
             mainUid = uid ?? duplicates[0] ?? null;
             if (mainUid) group.uidOf?.set(file, mainUid);
@@ -958,13 +1017,14 @@ async function drain(photos: any): Promise<void> {
               // copied into an album folder in the file manager: what was asked for is
               // that photo in that album, so it goes in, and only once.
               if (duplicates[0]) intoAlbum(duplicates[0]);
+              if (duplicates[0] && group.favorite && !toFavorite.includes(duplicates[0])) toFavorite.push(duplicates[0]);
               item.status = "skipped";
               item.error = "already in your library";
               status.skipped++;
             }
           } catch (e) {
             item.status = "failed";
-            item.error = (e as Error).message;
+            item.error = failureText(e);
             status.failed++;
           } finally {
             // Gone only once the photo is in the library, uploaded now or already there.
@@ -985,16 +1045,31 @@ async function drain(photos: any): Promise<void> {
           try {
             if (!mainUid) throw new Error("its photo did not upload");
             item.status = "uploading";
+            const progress = (sent: number, size: number) => {
+              item.sent = sent;
+              item.size = size;
+            };
             const key = frameKey(video);
-            const { uid } = await uploadOne(
-              photos,
-              video,
-              group.frames.get(key),
-              group.media.get(key),
+            let attempt = 0;
+            const { uid } = await withRetry(
+              () =>
+                uploadOne(
+                  photos,
+                  video,
+                  group.frames.get(key),
+                  group.media.get(key),
+                  abort.signal,
+                  false,
+                  group.sidecars?.get(photo),
+                  {
+                    mainPhotoNodeUid: mainUid!,
+                    known: group.known?.get(video),
+                    fresh: attempt++ === 0 && group.fresh?.has(video),
+                    onProgress: progress,
+                  },
+                ),
+              UPLOAD_RETRY_MS,
               abort.signal,
-              false,
-              group.sidecars?.get(photo),
-              { mainPhotoNodeUid: mainUid, known: group.known?.get(video), fresh: group.fresh?.has(video) },
             );
             if (uid) {
               item.status = "done";
@@ -1006,23 +1081,38 @@ async function drain(photos: any): Promise<void> {
             }
           } catch (e) {
             item.status = "failed";
-            item.error = (e as Error).message;
+            item.error = failureText(e);
             status.failed++;
           } finally {
             if (group.staging && isStagedImport(video)) await rm(video, { force: true }).catch(() => {});
           }
         };
         let nextFile = 0;
-        const worker = async () => {
+        // On a slow line every worker but the first stops once its file is done.
+        const worker = async (n: number) => {
           for (;;) {
+            if (n > 0 && slowLink) return;
             const i = nextFile++;
             if (i >= group.files.length || abort.signal.aborted) return;
             await processFile(group.files[i], i);
           }
         };
         await Promise.all(
-          Array.from({ length: Math.min(UPLOAD_CONCURRENCY, group.files.length) }, worker),
+          Array.from({ length: Math.min(UPLOAD_CONCURRENCY, group.files.length) }, (_, n) => worker(n)),
         );
+
+        if (toFavorite.length > 0) {
+          try {
+            const updates = toFavorite.map((nodeUid) => ({ nodeUid, tagsToAdd: [PhotoTag.Favorites], tagsToRemove: [] }));
+            for await (const result of photos.updatePhotos(updates)) {
+              if (!(result as any).ok) process.stderr.write(`[upload] favourite not set on a photo already there
+`);
+            }
+          } catch (e) {
+            process.stderr.write(`[upload] favourite: ${(e as Error).message}
+`);
+          }
+        }
 
         if (albumUid && toAlbum.length > 0) {
           // Add the files that DID upload to their album even if the user cancelled:
@@ -1061,6 +1151,7 @@ async function drain(photos: any): Promise<void> {
   } catch (e) {
     process.stderr.write(`[upload] drain failed: ${(e as Error).stack ?? String(e)}\n`);
   } finally {
+    watchSlowUploads(null);
     draining = false;
     status.running = false;
     if (abort.signal.aborted) abort = new AbortController(); // ready for the next drop

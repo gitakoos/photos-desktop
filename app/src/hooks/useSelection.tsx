@@ -53,7 +53,7 @@ const DRAG_THRESHOLD_PX = 5;
 
 /** Any open dialog or panel, which owns the keyboard while it is up. */
 const DIALOG_SELECTOR =
-  ".cf-backdrop, .up-backdrop, .st-backdrop, .lbx, .ap-veil";
+  ".cf-backdrop, .up-page, .st-backdrop, .lbx, .ap-veil";
 
 /** Auto-scroll speed, in px per frame, from the moment the pointer clears the edge
  *  to the point where pulling further adds nothing. */

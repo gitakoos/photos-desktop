@@ -86,7 +86,7 @@ await build({
   platform: "node",
   target: "node22",
   format: "esm",
-  external: ["sharp"],
+  external: ["sharp", "onnxruntime-node"],
   alias: { "openpgp/lightweight": "openpgp" },
   banner: { js: banner },
   legalComments: "none",
@@ -117,8 +117,54 @@ if (process.env.PFP_OFFLINE === "1") {
   });
   if (npm.status !== 0) throw new Error("installing sharp beside the bundle failed");
 }
+stageOnnxRuntime();
 cleanResourceTree(join(outDir, "node_modules"));
-console.log("staged   -> build/node_modules (sharp)");
+console.log("staged   -> build/node_modules (sharp, onnxruntime-node)");
+
+// The vocabulary the search tokenizer reads, beside the bundle where it looks for it.
+mkdirSync(join(outDir, "assets"), { recursive: true });
+copyFileSync(
+  join(here, "proton", "assets", "bpe_simple_vocab_16e6.txt.gz"),
+  join(outDir, "assets", "bpe_simple_vocab_16e6.txt.gz"),
+);
+console.log("staged   -> build/assets (search vocabulary)");
+
+/**
+ * The ONNX runtime the search's text encoder runs on, copied from the installed packages with
+ * only this platform's binaries: the package carries every platform's, and on Windows the
+ * DirectML files too, which the CPU provider it runs on never loads.
+ */
+function stageOnnxRuntime() {
+  const deps = join(here, "node_modules");
+  for (const name of ["onnxruntime-node", "onnxruntime-common"]) {
+    if (!existsSync(join(deps, name, "package.json"))) {
+      throw new Error(`${name} is not installed in sidecar/node_modules; run \`npm ci\` there first`);
+    }
+    const to = join(outDir, "node_modules", name);
+    rmSync(to, { recursive: true, force: true });
+    cpSync(join(deps, name), to, { recursive: true });
+  }
+  const bin = join(outDir, "node_modules", "onnxruntime-node", "bin");
+  for (const napi of readdirSync(bin)) {
+    for (const platform of readdirSync(join(bin, napi))) {
+      if (platform !== process.platform) {
+        rmSync(join(bin, napi, platform), { recursive: true, force: true });
+        continue;
+      }
+      for (const arch of readdirSync(join(bin, napi, platform))) {
+        if (arch !== process.arch) rmSync(join(bin, napi, platform, arch), { recursive: true, force: true });
+      }
+    }
+  }
+  if (process.platform === "win32") {
+    for (const napi of readdirSync(bin)) {
+      const dir = join(bin, napi, "win32", process.arch);
+      for (const file of ["DirectML.dll", "dxcompiler.dll", "dxil.dll"]) rmSync(join(dir, file), { force: true });
+    }
+  }
+  const binding = join(bin, readdirSync(bin)[0], process.platform, process.arch, "onnxruntime_binding.node");
+  if (!existsSync(binding)) throw new Error("the ONNX runtime binding for this platform is missing");
+}
 
 // sharp and everything it loads at run time: its dependencies, plus the optional ones
 // actually installed, which are the platform's own native binaries. Each package keeps

@@ -36,10 +36,31 @@
 export type ThemeMode = "dark" | "light" | "system";
 
 /** Storage keys match Android's `ThemePalette.storageKey`. */
-export type PaletteKey = "default" | "forest" | "sunset" | "sea" | "sepia" | "mono" | "amoled";
+export type PaletteKey =
+  | "default"
+  | "forest"
+  | "sunset"
+  | "sea"
+  | "sepia"
+  | "mono"
+  | "lavender"
+  | "rose"
+  | "mint"
+  | "gold"
+  | "ruby"
+  | "amoled";
 
 type Accent = { accent: string; accent2: string };
-type SurfaceOverrides = { bg0: string; bg2: string; pageBg: string; surface: string };
+type SurfaceOverrides = {
+  bg0: string;
+  bg2: string;
+  pageBg: string;
+  surface: string;
+  /** The frame around the page in the sidebar layout, its search field, and the page's edge. */
+  frameBg: string;
+  stripField: string;
+  panelEdge: string;
+};
 
 export type PaletteDef = {
   key: PaletteKey;
@@ -92,17 +113,62 @@ export const PALETTES: PaletteDef[] = [
     light: { accent: "#424242", accent2: "#212121" },
   },
   {
+    key: "lavender",
+    labelKey: "settings.palette.lavender",
+    dark: { accent: "#c9a7eb", accent2: "#9b7fd4" },
+    light: { accent: "#9575cd", accent2: "#6a4caf" },
+  },
+  {
+    key: "rose",
+    labelKey: "settings.palette.rose",
+    dark: { accent: "#f48fb1", accent2: "#e06699" },
+    light: { accent: "#d6336c", accent2: "#a61e4d" },
+  },
+  {
+    key: "mint",
+    labelKey: "settings.palette.mint",
+    dark: { accent: "#6fe0c4", accent2: "#2fb89c" },
+    light: { accent: "#12a98c", accent2: "#0b7a66" },
+  },
+  {
+    key: "gold",
+    labelKey: "settings.palette.gold",
+    dark: { accent: "#ffd166", accent2: "#e9ae3c" },
+    light: { accent: "#cc8a00", accent2: "#995f00" },
+  },
+  {
+    key: "ruby",
+    labelKey: "settings.palette.ruby",
+    dark: { accent: "#ff7a88", accent2: "#e84c5e" },
+    light: { accent: "#c62838", accent2: "#8e1b27" },
+  },
+  {
     key: "amoled",
     labelKey: "settings.palette.amoled",
     dark: { accent: "#8b7cff", accent2: "#6957d7" },
     light: { accent: "#6957d7", accent2: "#4a37bc" },
-    surfaces: { bg0: "#000000", bg2: "#101010", pageBg: "#000000", surface: "#0c0c0d" },
+    surfaces: {
+      bg0: "#000000",
+      bg2: "#101010",
+      pageBg: "#000000",
+      surface: "#0c0c0d",
+      frameBg: "#000000",
+      stripField: "#121214",
+      panelEdge: "rgba(255, 255, 255, 0.08)",
+    },
   },
 ];
+
+import { mix, textOnAccent } from "./colour";
 
 const prefersLight = window.matchMedia("(prefers-color-scheme: light)");
 let mode: ThemeMode = "dark";
 let palette: PaletteKey = "default";
+/** Pure black behind everything in dark mode, whatever the palette. */
+let amoled = false;
+
+/** The palettes offered to pick from: AMOLED is a switch of its own, not one of them. */
+export const PICKABLE_PALETTES = PALETTES.filter((p) => p.key !== "amoled");
 
 /** Resolve a mode to a concrete side, following the OS while on "system". */
 export function resolvedMode(m: ThemeMode): "dark" | "light" {
@@ -120,11 +186,18 @@ function hexToRgb(hex: string): string {
   return `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`;
 }
 
+/** The frame and its search field, as theme.css paints them, leaned a touch toward the
+ *  palette's accent so the window's chrome belongs to it. Mono stays neutral. */
+const FRAME = { dark: { frame: "#19191b", field: "#232326" }, light: { frame: "#e7e7eb", field: "#ffffff" } };
+const FRAME_TINT = { dark: 0.05, light: 0.035 };
+
 function paint(): void {
   const light = resolvedMode(mode) === "light";
   document.documentElement.dataset.theme = light ? "light" : "dark";
 
-  const p = paletteDef(palette);
+  // A palette saved as "amoled" before it became a switch is the default palette in black.
+  const black = amoled || palette === "amoled";
+  const p = paletteDef(palette === "amoled" ? "default" : palette);
   const a = light ? p.light : p.dark;
   const rgb = hexToRgb(a.accent);
   const style = document.documentElement.style;
@@ -134,15 +207,24 @@ function paint(): void {
   // Washes track the accent; the alphas match the light / dark blocks in theme.css.
   style.setProperty("--accent-wash", `rgba(${rgb}, ${light ? 0.14 : 0.18})`);
   style.setProperty("--accent-wash-strong", `rgba(${rgb}, ${light ? 0.18 : 0.2})`);
+  style.setProperty("--on-accent", textOnAccent(a.accent));
+  const side = light ? "light" : "dark";
+  const tint = p.key === "mono" ? 0 : FRAME_TINT[side];
+  style.setProperty("--frame-bg", mix(FRAME[side].frame, a.accent, tint));
+  style.setProperty("--strip-field", light ? FRAME[side].field : mix(FRAME[side].field, a.accent, tint));
+  style.removeProperty("--panel-edge");
 
   // Only AMOLED overrides the base surfaces, and only in dark mode; every other
   // palette (and light mode) clears the overrides so theme.css applies.
-  const s = p.surfaces;
+  const s = black ? paletteDef("amoled").surfaces : undefined;
   if (s && !light) {
     style.setProperty("--bg0", s.bg0);
     style.setProperty("--bg2", s.bg2);
     style.setProperty("--page-bg", s.pageBg);
     style.setProperty("--surface", s.surface);
+    style.setProperty("--frame-bg", s.frameBg);
+    style.setProperty("--strip-field", s.stripField);
+    style.setProperty("--panel-edge", s.panelEdge);
   } else {
     style.removeProperty("--bg0");
     style.removeProperty("--bg2");
@@ -155,8 +237,9 @@ prefersLight.addEventListener("change", () => {
   if (mode === "system") paint();
 });
 
-export function applyTheme(nextMode: ThemeMode, nextPalette?: PaletteKey): void {
+export function applyTheme(nextMode: ThemeMode, nextPalette?: PaletteKey, nextAmoled?: boolean): void {
   mode = nextMode;
   if (nextPalette) palette = nextPalette;
+  if (nextAmoled !== undefined) amoled = nextAmoled;
   paint();
 }

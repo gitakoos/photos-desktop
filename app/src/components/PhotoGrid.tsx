@@ -287,6 +287,8 @@ export function PhotoCell({
   const showFavorite = isFavorite && allow("favorite");
 
   const src = served ?? (lazy ? self : thumb);
+  // A thumbnail that will not decode shows the empty tile, not the browser's broken image.
+  const [broken, setBroken] = useState<string | null>(null);
   return (
     <div
       className={`g-cell ${selected ? "sel" : ""}`}
@@ -305,8 +307,23 @@ export function PhotoCell({
         })
       }
     >
-      {src ? (
-        <img src={src} loading="lazy" decoding="async" alt="" draggable={false} />
+      {src && broken !== src ? (
+        // Eager: the list only builds the rows near the screen, so the browser's own lazy
+        // loading only added a wait. A picture already decoded shows at once; one still
+        // arriving fades in rather than popping over the empty tile.
+        <img
+          src={src}
+          decoding="async"
+          alt=""
+          draggable={false}
+          ref={(img) => {
+            if (img && img.complete && img.naturalWidth > 0) img.dataset.ok = "1";
+          }}
+          onLoad={(e) => {
+            e.currentTarget.dataset.ok = "1";
+          }}
+          onError={() => setBroken(src)}
+        />
       ) : (
         <div className={`g-cell-ph${loading ? " g-cell-loading" : ""}`} />
       )}

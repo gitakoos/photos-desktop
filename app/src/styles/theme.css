@@ -54,6 +54,13 @@
   --surface: #1c1c1e;
   --surface-2: #3a3a3c;
   --surface-deep: #131315;
+  /* The sidebar layout's frame: the title strip and the sidebar, one colour around the panel. */
+  --frame-bg: #19191b;
+  --strip-field: #232326;
+  /* The panel's edge against the frame: none while the two differ in shade. */
+  --panel-edge: transparent;
+  /* Text on an accent fill; the palettes darken it where the accent is pale. */
+  --on-accent: #fff;
   --border: #2c2c2e;
 
   --fg-primary: #ecebf3;
@@ -96,12 +103,16 @@
   --scrim: rgba(0, 0, 0, 0.32);
   --dialog-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
   --menu-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
-  --bg0: #f7f7f8;
+  --bg0: #fbfbfc;
   --bg2: #eaeaec;
   --page-bg: #f2f2f5;
   --surface: #ffffff;
   --surface-2: #e2e2e5;
   --surface-deep: #ffffff;
+  --frame-bg: #e7e7eb;
+  --strip-field: #ffffff;
+  --panel-edge: transparent;
+  --on-accent: #fff;
   --border: #d8d8dc;
 
   --fg-primary: #131318;
@@ -175,7 +186,7 @@
   border-radius: 8px;
   background: var(--line-soft, #2a2a31);
   font-family: ui-monospace, monospace;
-  font-size: 11.5px;
+  font-size: 12.5px;
   line-height: 1.45;
   color: var(--fg-dim, #b6b6c0);
   word-break: break-word;
@@ -186,7 +197,7 @@
   border-radius: 999px;
   border: 0;
   background: var(--accent, #6d4aff);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;

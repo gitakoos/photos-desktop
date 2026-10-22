@@ -62,7 +62,7 @@ use file_assoc::{APP_EXE, APP_NAME, LEGACY_APP_EXE, PACK_ID};
 #[path = "../../../app/src-tauri/src/autostart.rs"]
 pub mod autostart;
 
-const VERSION: &str = "1.0.0";
+const VERSION: &str = "1.1.0";
 const PUBLISHER: &str = "Akoos";
 const DATA_DIR_NAME: &str = "eu.akoos.photos.desktop"; // where the app keeps its vault/caches
 
@@ -341,13 +341,29 @@ mod tests {
     }
 }
 
+fn is_update() -> bool {
+    std::env::args().any(|a| a == "--update")
+}
+
 #[tauri::command]
 fn mode() -> String {
     if is_uninstall() {
         "uninstall".into()
+    } else if is_update() {
+        "update".into()
     } else {
         "install".into()
     }
+}
+
+/// Where an update started by the running app stands: "running", "done", or
+/// "failed: <reason>". The work runs on its own from `run()`, so it happens even if
+/// the window never draws; the window only shows it.
+static UPDATE_STATE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[tauri::command]
+fn update_state() -> String {
+    UPDATE_STATE.lock().unwrap().clone()
 }
 
 fn default_dir_impl() -> String {
@@ -1171,13 +1187,23 @@ pub fn run() {
     //   uninstall.exe --uninstall --silent   remove everything, no prompt
     let args: Vec<String> = std::env::args().collect();
     // The running app's updater: it has already quit, so bring it back up when the
-    // payload is in place.
-    if args.iter().any(|a| a == "--update") {
-        if let Err(e) = registered_install().and_then(|d| upgrade_impl(&d, true)) {
-            eprintln!("update error: {e}");
-            std::process::exit(1);
-        }
-        return;
+    // payload is in place. The window below shows this while it runs.
+    if is_update() {
+        *UPDATE_STATE.lock().unwrap() = "running".into();
+        std::thread::spawn(|| {
+            let result = registered_install().and_then(|d| upgrade_impl(&d, true));
+            let ok = result.is_ok();
+            *UPDATE_STATE.lock().unwrap() = match result {
+                Ok(_) => "done".into(),
+                Err(e) => format!("failed: {e}"),
+            };
+            // The window closes itself once it has said so; this is for one that never
+            // drew, so a finished update never leaves an installer behind.
+            if ok {
+                std::thread::sleep(std::time::Duration::from_secs(8));
+                std::process::exit(0);
+            }
+        });
     }
     if args.iter().any(|a| a == "--silent") {
         let result = if is_uninstall() {
@@ -1202,6 +1228,13 @@ pub fn run() {
             // Safety net: the window starts hidden and the frontend reveals it
             // once painted. If that never happens (a load failure), show it anyway
             // after a moment so the installer is never invisible.
+            // An update only says what it is doing, so it gets a small window of its own.
+            if is_update() {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.set_size(tauri::LogicalSize::new(440.0, 300.0));
+                    let _ = w.center();
+                }
+            }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(4));
@@ -1220,7 +1253,8 @@ pub fn run() {
             uninstall,
             uninstall_existing,
             existing_install,
-            show_window
+            show_window,
+            update_state
         ])
         .build(tauri::generate_context!())
         .expect("error while running the installer");

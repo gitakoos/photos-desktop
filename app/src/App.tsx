@@ -20,20 +20,22 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { ChevronLeftIcon, LockIcon } from "./components/icons";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Titlebar } from "./components/Titlebar";
-import { UpdateBanner } from "./components/UpdateBanner";
+import { UpdateOverlay } from "./components/UpdateOverlay";
 import { ContextMenu, type MenuAction } from "./components/ContextMenu";
 import { Photos } from "./views/Photos";
 import { Lock } from "./views/Lock";
+import { SignOutConfirm } from "./components/SignOutConfirm";
 import { rpc } from "./lib/rpc";
 import { applyTheme, type ThemeMode } from "./lib/theme";
 import { useT } from "./lib/i18n";
 import "./styles/App.css";
 
-type Phase = "credentials" | "twofa" | "captcha" | "browser" | "protect";
+type Phase = "credentials" | "twofa" | "captcha" | "browser" | "protect" | "offline";
 type MenuState = { x: number; y: number } | null;
 type LoginResult =
   | { status: "ok"; email: string }
@@ -41,6 +43,7 @@ type LoginResult =
   | { status: "hv"; url: string }
   | { status: "protect"; email: string }
   | { status: "relogin" }
+  | { status: "offline" }
   | { status: "error"; error: string };
 type BrowserStatus = LoginResult | { status: "waiting" } | { status: "cancelled" };
 type LockStatus = {
@@ -51,6 +54,8 @@ type LockStatus = {
   protect: boolean;
 };
 
+/** How often the app tries again to resume a saved session while Proton cannot be reached. */
+const OFFLINE_RETRY_MS = 15_000;
 /** How often the app asks whether the sign-in in the browser has finished. */
 const BROWSER_POLL_MS = 1500;
 /** As the sidecar requires of a password of the user's own. */
@@ -71,6 +76,7 @@ function App() {
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState>(null);
   const [hvUrl, setHvUrl] = useState<string | null>(null);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
   const [passwordForm, setPasswordForm] = useState(false);
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -90,7 +96,7 @@ function App() {
         const raw = await invoke<string | null>("store_get", { name: "settings" });
         if (raw) {
           const s = JSON.parse(raw);
-          applyTheme((s.theme as ThemeMode) ?? "dark", s.palette);
+          applyTheme((s.theme as ThemeMode) ?? "dark", s.palette, s.amoled === true);
         }
       } catch {
         /* keep the default dark theme */
@@ -104,41 +110,80 @@ function App() {
   // process is the single most expensive thing about a launch. This window is the only
   // one that pays it: a file opened from Explorer gets a window of its own, which is
   // built without any of this and paints with no vault, no sign-in and no sidecar.
-  useEffect(() => {
-    (async () => {
-      try {
-        // A reload throws away the WebView, not the sidecar process. If the vault
-        // is still unlocked in it, reuse the live session and skip the password.
-        const live = await rpc<{ email: string } | null>("whoami").catch(() => null);
-        if (live) {
-          setEmail(live.email);
-          setRestoring(false);
-          return;
-        }
-
-        // Otherwise ask the sidecar what it holds. A saved-but-locked account
-        // (cold start) always needs the password before the session is readable.
-        const s = await rpc<LockStatus>("lockStatus");
-        if (s.protect) {
-          // A browser sign-in finished before a reload, and still waits for its choice.
-          setPhase("protect");
-        } else if (s.unlocked && s.email) {
-          setEmail(s.email);
-        } else if (s.unlocked) {
-          // The vault is open but its session lapsed: a sign-in again, into the same vault.
-        } else if (s.hasVault && s.mode === "device") {
-          // Nothing to ask: this Windows account opens the vault.
-          await applyResult(await rpc<LoginResult>("unlockDevice"));
-        } else if (s.hasVault) {
-          setLocked({ email: s.email });
-        }
-        // else: no saved account -> fall through to the full sign-in screen.
-      } catch {
-        /* fall through to the login screen */
+  async function decideSession() {
+    try {
+      // A reload throws away the WebView, not the sidecar process. If the vault
+      // is still unlocked in it, reuse the live session and skip the password.
+      const live = await rpc<{ email: string } | null>("whoami").catch(() => null);
+      if (live) {
+        setEmail(live.email);
+        setRestoring(false);
+        return;
       }
-      setRestoring(false);
-    })();
+
+      // Otherwise ask the sidecar what it holds. A saved-but-locked account
+      // (cold start) always needs the password before the session is readable.
+      const s = await rpc<LockStatus>("lockStatus");
+      if (s.protect) {
+        // A browser sign-in finished before a reload, and still waits for its choice.
+        setPhase("protect");
+      } else if (s.unlocked && s.email) {
+        setEmail(s.email);
+      } else if (s.unlocked && s.mode === "device") {
+        // Open with no session yet: a resume may still be under way (the window was
+        // reloaded during it), and this waits for that one rather than starting another.
+        // A session that lapsed answers with a sign-in, as below.
+        await applyResult(await rpc<LoginResult>("unlockDevice"));
+      } else if (s.unlocked) {
+        // The vault is open but its session lapsed: a sign-in again, into the same vault.
+      } else if (s.hasVault && s.mode === "device") {
+        // Nothing to ask: this Windows account opens the vault.
+        await applyResult(await rpc<LoginResult>("unlockDevice"));
+      } else if (s.hasVault) {
+        setLocked({ email: s.email });
+      }
+      // else: no saved account -> fall through to the full sign-in screen.
+    } catch {
+      /* fall through to the login screen */
+    }
+    setRestoring(false);
+  }
+
+  useEffect(() => {
+    void decideSession();
   }, []);
+
+  // The sidecar was replaced (it stopped answering, or it quit) and the signed-in session
+  // went with it. Decide again from the start: a vault this Windows account opens is
+  // unlocked straight back, a password one shows the lock screen. Left alone, every
+  // call would fail while the window still looked signed in.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let disposed = false;
+    void listen("sidecar-restarted", () => {
+      if (!emailRef.current) return;
+      setEmail(null);
+      setLocked(null);
+      setPhase("credentials");
+      setRestoring(true);
+      void decideSession();
+    }).then((stop) => {
+      if (disposed) stop();
+      else off = stop;
+    });
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, []);
+
+  // With no session to show, the page has nothing more to do by itself once it has put
+  // the sign-in or the lock screen up, and the host may then suspend it in the tray. Not
+  // while offline: that screen tries again on its own. A session that is restored is
+  // settled by the photos view, once the timeline is read.
+  useEffect(() => {
+    if (!restoring && !email && phase !== "offline") void invoke("page_settled").catch(() => {});
+  }, [restoring, email, phase]);
 
   // The native menu is off everywhere, and this is what stands in for it on a
   // right-click nothing else claimed. A photo or an album has a menu of its own
@@ -168,6 +213,9 @@ function App() {
     } else if (r.status === "relogin") {
       setPhase("credentials");
       setStatus(t("login.sessionEnded"));
+    } else if (r.status === "offline") {
+      setLocked(null);
+      setPhase("offline");
     } else {
       setStatus(r.error);
     }
@@ -317,6 +365,29 @@ function App() {
     };
   }, [phase]);
 
+  // The saved sign-in is kept while Proton cannot be reached: try again now and then,
+  // and the moment it gets through the app opens as it would have.
+  async function retryResume() {
+    setBusy(true);
+    setStatus("");
+    try {
+      const r = await rpc<LoginResult>("retryResume");
+      if (r.status !== "offline") {
+        setPhase("credentials");
+        await applyResult(r);
+      }
+    } catch (err) {
+      setStatus(String(err));
+    }
+    setBusy(false);
+  }
+
+  useEffect(() => {
+    if (phase !== "offline") return;
+    const timer = window.setInterval(() => void retryResume(), OFFLINE_RETRY_MS);
+    return () => window.clearInterval(timer);
+  }, [phase]);
+
   async function copySignInLink() {
     if (!browserUrl) return;
     try {
@@ -401,7 +472,7 @@ function App() {
 
     (async () => {
       const offSignout = await listen("tray-signout", () => {
-        void signOut();
+        if (emailRef.current) setConfirmSignOut(true);
       });
       const offHidden = await listen("window-hidden", async () => {
         const current = emailRef.current;
@@ -462,7 +533,7 @@ function App() {
   return (
     <div className="app-shell">
       <Titlebar />
-      <UpdateBanner />
+      <UpdateOverlay />
 
       {restoring ? (
         <div className="app-content">
@@ -484,28 +555,41 @@ function App() {
           }}
         />
       ) : email ? (
-        <Photos email={email} onSignOut={signOut} />
+        <Photos email={email} onSignOut={() => setConfirmSignOut(true)} />
       ) : (
         <div className="app-content">
           <div className={phase === "captcha" ? "login-card wide" : "login-card"}>
             <h1 className="login-title">Photos for Proton</h1>
             <p className="login-sub">{t("login.subtitle")}</p>
 
-            {phase === "credentials" && (
+            {phase === "credentials" && !passwordForm && (
               <form className="login-form" onSubmit={onBrowserSignIn}>
                 <button type="submit" disabled={busy}>
                   {t("login.withBrowser")}
                 </button>
-                <p className="login-hint">{t("login.withBrowserHint")}</p>
-                {!passwordForm && (
-                  <button type="button" className="link" onClick={() => setPasswordForm(true)}>
-                    {t("login.withPassword")}
-                  </button>
-                )}
+                <p className="login-hint login-safe">
+                  <LockIcon size={13} />
+                  {t("login.withBrowserHint")}
+                </p>
+                <button type="button" className="login-secondary" onClick={() => setPasswordForm(true)}>
+                  {t("login.withPassword")}
+                </button>
               </form>
             )}
 
-            {phase === "credentials" && passwordForm && <div className="login-or">{t("login.or")}</div>}
+            {/* Email and password in place of the browser's way in, not under it: one way at a
+                time, with the way back at the top and the other way at the foot. */}
+            {phase === "credentials" && passwordForm && (
+              <button
+                type="button"
+                className="login-back"
+                onClick={() => setPasswordForm(false)}
+                title={t("common.back")}
+                aria-label={t("common.back")}
+              >
+                <ChevronLeftIcon />
+              </button>
+            )}
 
             {phase === "credentials" && passwordForm && (
               <form className="login-form" onSubmit={onSignIn}>
@@ -534,7 +618,19 @@ function App() {
                 <button type="submit" disabled={busy}>
                   {busy ? t("login.signingIn") : t("login.signIn")}
                 </button>
+                <button type="button" className="link" onClick={() => setPasswordForm(false)}>
+                  {t("login.withBrowserInstead")}
+                </button>
               </form>
+            )}
+
+            {phase === "offline" && (
+              <div className="login-form">
+                <p className="login-hint">{t("login.offline")}</p>
+                <button type="button" className="login-secondary" disabled={busy} onClick={() => void retryResume()}>
+                  {busy ? t("login.verifying") : t("login.retry")}
+                </button>
+              </div>
             )}
 
             {phase === "browser" && (
@@ -654,6 +750,16 @@ function App() {
             {phase === "credentials" && <p className="login-note">{t("login.unofficial")}</p>}
           </div>
         </div>
+      )}
+
+      {confirmSignOut && (
+        <SignOutConfirm
+          onConfirm={() => {
+            setConfirmSignOut(false);
+            void signOut();
+          }}
+          onCancel={() => setConfirmSignOut(false)}
+        />
       )}
 
       {menu && (

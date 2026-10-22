@@ -100,7 +100,7 @@
   border: 0;
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
@@ -233,14 +233,14 @@
   gap: 12px;
 }
 .ed-slider-label {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--fg-dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ed-slider-val {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--fg-mute);
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -290,7 +290,7 @@
   border: 0;
   background: transparent;
   color: var(--fg-dim);
-  font-size: 11.5px;
+  font-size: 12.5px;
   cursor: pointer;
 }
 .ed-filter-thumb {
@@ -362,7 +362,7 @@
   width: 160px;
 }
 .ed-brush-label {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--fg-dim);
   white-space: nowrap;
 }
@@ -432,7 +432,7 @@
   border-radius: 14px;
   background: transparent;
   color: var(--fg-mute);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: color 0.12s ease, background 0.12s ease;

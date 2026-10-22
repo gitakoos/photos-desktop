@@ -85,6 +85,16 @@
   color: var(--fg-primary);
 }
 
+/* A short screen: the grid is the point, so the frame gives it almost all the height. */
+@media (max-height: 760px) {
+  .ap-veil {
+    padding: 16px;
+  }
+  .ap-card {
+    height: calc(100vh - 32px);
+  }
+}
+
 .ap-body {
   flex: 1;
   overflow-y: auto;
@@ -128,7 +138,7 @@
   border: none;
   border-radius: 999px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;

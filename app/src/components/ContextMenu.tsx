@@ -45,6 +45,11 @@ export type MenuAction = {
   separator?: boolean;
   /** Named but not offered yet. Skipped by the keys, and `onSelect` never runs. */
   disabled?: boolean;
+  /** For a choice: whether it is the one in force, marked by a dot at the row's start.
+   *  A menu with any such row keeps the dot's room on all of them, so the icons line up. */
+  checked?: boolean;
+  /** Leaves the menu open after the row is picked, for choices made several at a time. */
+  keepOpen?: boolean;
 };
 
 /** Where a right-click landed, and what it landed on. */
@@ -58,6 +63,8 @@ type Props = {
   y: number;
   actions: MenuAction[];
   onClose: () => void;
+  /** "end": the menu's right edge at `x`, for one dropped from a button at the right. */
+  align?: "start" | "end";
 };
 
 /**
@@ -70,8 +77,9 @@ type Props = {
  * spot. The keys work it in full: it takes the focus as it opens, the arrows walk
  * the actions, and the focus goes back where it came from on the way out.
  */
-export function ContextMenu({ x, y, actions, onClose }: Props) {
+export function ContextMenu({ x, y, actions, onClose, align = "start" }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const choices = actions.some((a) => a.checked !== undefined);
   // Placed only once measured, so it cannot paint at the wrong spot first.
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
@@ -80,10 +88,15 @@ export function ContextMenu({ x, y, actions, onClose }: Props) {
     if (!el) return;
     const { width, height } = el.getBoundingClientRect();
     setPos({
-      left: x + width + EDGE_MARGIN_PX > window.innerWidth ? Math.max(EDGE_MARGIN_PX, x - width) : x,
+      left:
+        align === "end"
+          ? Math.max(EDGE_MARGIN_PX, x - width)
+          : x + width + EDGE_MARGIN_PX > window.innerWidth
+            ? Math.max(EDGE_MARGIN_PX, x - width)
+            : x,
       top: y + height + EDGE_MARGIN_PX > window.innerHeight ? Math.max(EDGE_MARGIN_PX, y - height) : y,
     });
-  }, [x, y, actions.length]);
+  }, [x, y, actions.length, align]);
 
   /** Walk the actions with the arrows, wrapping at both ends. */
   const move = useCallback((delta: number) => {
@@ -170,11 +183,13 @@ export function ContextMenu({ x, y, actions, onClose }: Props) {
             role="menuitem"
             className={`cm-item ${a.danger ? "danger" : ""}`}
             disabled={a.disabled}
+            aria-checked={a.checked}
             onClick={() => {
-              onClose();
+              if (!a.keepOpen) onClose();
               a.onSelect();
             }}
           >
+            {choices && <span className={`cm-dot${a.checked ? " on" : ""}`} aria-hidden />}
             {a.icon && <span className="cm-icon">{a.icon}</span>}
             {a.label}
           </button>

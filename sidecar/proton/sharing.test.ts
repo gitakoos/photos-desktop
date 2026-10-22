@@ -27,8 +27,11 @@
 
 import { describe, it, expect, vi } from "vitest";
 import {
+  acceptInvitation,
+  declineInvitation,
   getSharingInfo,
   invitePeople,
+  listInvitations,
   removePerson,
   removePublicLink,
   setPublicLink,
@@ -502,5 +505,76 @@ describe("what a failure writes down", () => {
   it("writes nothing at all when the call succeeds", async () => {
     const trace = await traceOf(() => getSharingInfo(makePhotos(), PHOTO_UID));
     expect(trace).toBe("");
+  });
+});
+
+describe("invitations to someone else's photos", () => {
+  const invitation = (over: any = {}) => ({
+    uid: "share-1~inv-1",
+    invitationTime: new Date("2026-10-01T10:00:00Z"),
+    addedByEmail: { ok: true, value: "anna@proton.me" },
+    inviteeEmail: "me@proton.me",
+    role: "viewer",
+    node: { uid: "vol-theirs~album-1", name: { ok: true, value: "Lisbon" }, type: "album" },
+    ...over,
+  });
+  const client = (list: any[], calls: Calls = []) => ({
+    async *iterateInvitations() {
+      yield* list;
+    },
+    async acceptInvitation(uid: string) {
+      calls.push({ method: "acceptInvitation", args: [uid] });
+    },
+    async rejectInvitation(uid: string) {
+      calls.push({ method: "rejectInvitation", args: [uid] });
+    },
+  });
+
+  it("lists them newest first, with who sent each and what it is for", async () => {
+    const older = invitation({ uid: "share-2~inv-2", invitationTime: new Date("2026-09-01T10:00:00Z") });
+    const list = await listInvitations(client([older, invitation()]));
+    expect(list.map((i) => i.uid)).toEqual(["share-1~inv-1", "share-2~inv-2"]);
+    expect(list[0]).toEqual({
+      uid: "share-1~inv-1",
+      from: "anna@proton.me",
+      verified: true,
+      name: "Lisbon",
+      type: "album",
+      role: "viewer",
+      time: Date.parse("2026-10-01T10:00:00Z"),
+    });
+  });
+
+  it("keeps the claimed sender of an unverified invitation, marked as unverified", async () => {
+    const [inv] = await listInvitations(
+      client([invitation({ addedByEmail: { ok: false, error: { claimedAuthor: "anna@proton.me", error: "bad signature" } } })]),
+    );
+    expect(inv.from).toBe("anna@proton.me");
+    expect(inv.verified).toBe(false);
+  });
+
+  it("shows the SDK's placeholder for a name it cannot read, and nothing for any other failure", async () => {
+    const [placeholder, failed] = await listInvitations(
+      client([
+        invitation({ node: { uid: "a", type: "album", name: { ok: false, error: { name: "Unnamed", error: "x" } } } }),
+        invitation({
+          invitationTime: new Date("2026-01-01T00:00:00Z"),
+          node: { uid: "b", type: "photo", name: { ok: false, error: new Error("decrypt") } },
+        }),
+      ]),
+    );
+    expect(placeholder.name).toBe("Unnamed");
+    expect(failed.name).toBe("");
+  });
+
+  it("accepts and declines the invitation it is handed", async () => {
+    const calls: Calls = [];
+    const photos = client([], calls);
+    await acceptInvitation(photos, "share-1~inv-1");
+    await declineInvitation(photos, "share-2~inv-2");
+    expect(calls).toEqual([
+      { method: "acceptInvitation", args: ["share-1~inv-1"] },
+      { method: "rejectInvitation", args: ["share-2~inv-2"] },
+    ]);
   });
 });

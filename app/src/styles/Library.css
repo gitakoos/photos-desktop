@@ -1,0 +1,251 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* ---- The shortcut row at the top of the Albums tab ----
+   The Android app's tiles: a 64px rounded square with the icon in it, the name under it. */
+.lib-tiles {
+  display: flex;
+  gap: 12px;
+  /* A tile's square sits 4px inside its column; this puts the first square on the page's edge. */
+  margin-left: -4px;
+  padding: 8px 0 20px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.lib-tile {
+  flex: 0 0 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-primary);
+  font: inherit;
+  cursor: pointer;
+}
+.lib-tilebox {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  background: var(--bg2);
+  color: var(--fg-dim);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.lib-tilebox {
+  position: relative;
+}
+.lib-tiledot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.lib-tile:hover .lib-tilebox {
+  color: var(--fg-primary);
+  filter: brightness(1.15);
+}
+.lib-tile:active .lib-tilebox {
+  transform: scale(0.95);
+}
+.lib-tilelabel {
+  max-width: 100%;
+  font-size: 12.5px;
+  line-height: 1.25;
+  text-align: center;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---- People and labels ----
+   The Android app's person card: the picture fills a 132:168 card, a dark fade at the foot
+   carries the name and the count in white. */
+.lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  padding-top: 4px;
+}
+.lib-card {
+  position: relative;
+  aspect-ratio: 132 / 168;
+  overflow: hidden;
+  padding: 0;
+  border: none;
+  border-radius: 16px;
+  background: var(--bg2);
+  cursor: pointer;
+  isolation: isolate;
+}
+.lib-card::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 76px;
+  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.66));
+  pointer-events: none;
+}
+.lib-card:hover {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.lib-cardimg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* The face's square, as tall as the card and centred, so its sides are cut as a cover is. */
+.lib-facebox {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  aspect-ratio: 1 / 1;
+  transform: translateX(-50%);
+  overflow: hidden;
+}
+.lib-facebox img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lib-cardtext {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+}
+.lib-cardname {
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lib-cardcount {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  font-weight: 500;
+}
+.lib-note {
+  max-width: 52ch;
+  margin: 0 auto;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+.lib-note.warn {
+  margin: 0 0 10px;
+  text-align: left;
+  color: var(--error);
+}
+.lib-retry {
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.lib-retry:hover {
+  border-color: var(--accent);
+}
+.lib-skeleton {
+  animation: lib-pulse 1.4s ease-in-out infinite;
+}
+@keyframes lib-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* ---- The Collection: a section per kind of memory, a sideways row of cards in each ---- */
+.lib-collection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+.lib-sectionhead {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 0 8px;
+  border: none;
+  background: none;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  cursor: pointer;
+}
+.lib-sectionhead svg {
+  color: var(--fg-mute);
+}
+.lib-sectionhead:hover svg {
+  color: var(--fg-primary);
+}
+.lib-row {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  /* The hover ring stands 4px off a card; the row's own edge would cut it, so the row
+     reaches that much past the page's edge and pads it back. */
+  margin: 0 -6px;
+  padding: 6px 6px 8px;
+  scrollbar-width: thin;
+}
+.lib-rowcell {
+  flex: 0 0 auto;
+}
+.lib-rowcell .lib-card {
+  width: 100%;
+}
+
+/* A person or label the search found, ahead of the categories: its glyph, then its name. */
+.lib-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}

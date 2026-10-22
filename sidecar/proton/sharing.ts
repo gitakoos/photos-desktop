@@ -349,3 +349,58 @@ export async function stopSharing(photos: any, uid: string): Promise<SharingInfo
     return describe(uid, ctx, result);
   });
 }
+
+/** An invitation to someone else's photo or album, waiting for an answer. */
+export type Invitation = {
+  uid: string;
+  /** Who sent it, as the invitation claims; `verified` says whether their signature holds. */
+  from: string;
+  verified: boolean;
+  /** The album's or the photo's name, or "" when it cannot be read. */
+  name: string;
+  type: string;
+  role: string;
+  time: number;
+};
+
+/** One invitation as the SDK hands it over, reduced to what the Shared page shows. */
+export function toInvitation(inv: any): Invitation {
+  const by = inv?.addedByEmail;
+  const from = by?.ok ? by.value : by?.error?.claimedAuthor;
+  const name = inv?.node?.name;
+  return {
+    uid: String(inv?.uid ?? ""),
+    from: typeof from === "string" ? from : "",
+    verified: !!by?.ok && typeof by.value === "string",
+    name: name?.ok
+      ? String(name.value)
+      : typeof name?.error?.name === "string" && typeof name?.error?.error === "string"
+        ? name.error.name
+        : "",
+    type: String(inv?.node?.type ?? ""),
+    role: String(inv?.role ?? ""),
+    time: toMillis(inv?.invitationTime) || 0,
+  };
+}
+
+/** The invitations waiting for an answer, the newest first. `guard` wraps the SDK's walk. */
+export async function listInvitations(
+  photos: any,
+  guard: <T>(walk: AsyncIterable<T>) => AsyncIterable<T> = (walk) => walk,
+): Promise<Invitation[]> {
+  return watch("listInvitations", async () => {
+    const out: Invitation[] = [];
+    for await (const inv of guard(photos.iterateInvitations())) out.push(toInvitation(inv));
+    return out.sort((a, b) => b.time - a.time);
+  });
+}
+
+/** Takes an invitation up, which puts the album or the photo among the shared-with-me ones. */
+export async function acceptInvitation(photos: any, uid: string): Promise<void> {
+  return watch("acceptInvitation", () => photos.acceptInvitation(uid));
+}
+
+/** Turns an invitation down. */
+export async function declineInvitation(photos: any, uid: string): Promise<void> {
+  return watch("declineInvitation", () => photos.rejectInvitation(uid));
+}

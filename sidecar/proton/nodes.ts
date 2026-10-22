@@ -79,6 +79,23 @@ export function nodeName(node: any): string {
  * Null for an image, for a video uploaded before the block existed, and for any
  * value that is not a positive number.
  */
+/**
+ * Where a photo was taken, as its uploader recorded it beside the file: Drive's `Location`
+ * attribute, latitude then longitude. Null when there is none, or it is not a place on Earth
+ * (a 0,0 that a camera without a fix wrote is no place either).
+ */
+export function nodeLocation(node: any): [number, number] | null {
+  const revision = node?.activeRevision?.ok ? node.activeRevision.value : null;
+  const extra = revision?.claimedAdditionalMetadata as Record<string, any> | undefined | null;
+  const location = extra?.Location ?? extra?.location;
+  if (!location) return null;
+  const lat = Number(location.Latitude ?? location.latitude);
+  const lon = Number(location.Longitude ?? location.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) return null;
+  return [lat, lon];
+}
+
 export function nodeDurationMs(node: any): number | null {
   const revision = node?.activeRevision?.ok ? node.activeRevision.value : null;
   const extra = revision?.claimedAdditionalMetadata as Record<string, any> | undefined | null;

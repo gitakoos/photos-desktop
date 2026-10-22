@@ -27,6 +27,13 @@
 
 * {
   box-sizing: border-box;
+  /* Every scrolling box wears the app's own thin scrollbar unless it sets another, so
+     no panel falls back to the system's arrowed one. */
+  scrollbar-width: thin;
+}
+
+:root {
+  scrollbar-color: var(--border) transparent;
 }
 
 html,
@@ -110,6 +117,7 @@ body {
 
 /* ---- Login card ---- */
 .login-card {
+  position: relative;
   width: 100%;
   max-width: 360px;
   background: var(--surface);
@@ -184,11 +192,22 @@ body {
   font-weight: 600;
   font-size: 0.95rem;
   cursor: pointer;
-  transition: filter 0.15s ease;
+  transition:
+    filter 0.15s ease,
+    transform 0.15s ease,
+    box-shadow 0.2s ease;
 }
 
-.login-form button[type="submit"]:hover {
+.login-form button[type="submit"]:hover:not(:disabled) {
   filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(var(--accent-rgb), 0.32);
+}
+
+.login-form button[type="submit"]:active:not(:disabled) {
+  transform: scale(0.98);
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.25);
+  transition-duration: 0.06s;
 }
 
 .login-form button[type="submit"]:disabled {
@@ -197,12 +216,19 @@ body {
 }
 
 .login-form button.link {
+  align-self: center;
   background: none;
   border: none;
   color: var(--fg-dim);
   font-size: 0.85rem;
   cursor: pointer;
-  padding: 0;
+  padding: 0.15rem 0.35rem;
+  border-radius: 6px;
+  transition: color 0.15s ease;
+}
+
+.login-form button.link:hover {
+  color: var(--fg-primary);
 }
 
 .login-status {
@@ -219,6 +245,33 @@ body {
 }
 
 /* ---- Human verification (embedded Proton captcha) ---- */
+/* The way back from the email and password form to the choice of how to sign in. */
+.login-back {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-primary);
+  cursor: pointer;
+  transition:
+    filter 0.15s ease,
+    transform 0.15s ease;
+}
+.login-back:hover {
+  filter: brightness(1.12);
+  transform: translateX(-2px);
+}
+.login-back:active {
+  transform: translateX(-2px) scale(0.92);
+}
+
 .login-card.wide {
   max-width: 440px;
 }
@@ -281,23 +334,21 @@ body {
   flex: 0 0 auto;
 }
 
-/* ---- Sidebar layout ----
-   The navigation widget rises the full height of the window and carries the brand
-   itself, so the title bar drops its own copy and shrinks to the three window
-   buttons, floated into the top-right corner where nothing else sits. The window is
-   then dragged by the sidebar head and the top bar's empty stretch instead. */
-:root[data-layout="sidebar"] .titlebar {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: auto;
-  width: auto;
-  padding: 0;
-  z-index: 6;
-  background: transparent;
+/* The system draws the window's corners and edge on Windows. */
+:root[data-native-frame] .app-shell {
+  border-radius: 0;
+  border: none;
 }
 
-:root[data-layout="sidebar"] .titlebar-title {
+/* ---- Sidebar layout ----
+   One frame around the content: the title strip and the sidebar share the frame colour
+   with no line between them, and the page sits inside as a rounded panel. The brand's
+   logo lines up with the sidebar's icons below it. */
+:root[data-layout="sidebar"] .app-shell {
+  background: var(--frame-bg);
+}
+
+:root[data-layout="sidebar"] .titlebar {
   display: none;
 }
 
@@ -325,10 +376,58 @@ body {
   color: var(--fg-primary);
   font-size: 0.9rem;
   cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    transform 0.15s ease;
 }
 
 .login-form button.login-secondary:hover {
-  border-color: var(--accent);
+  border-color: rgba(var(--accent-rgb), 0.6);
+  background: rgba(var(--accent-rgb), 0.07);
+}
+
+.login-form button.login-secondary:active {
+  transform: scale(0.98);
+  transition-duration: 0.06s;
+}
+
+/* The one line on why the browser way is the safe one, kept quiet under its button. */
+.login-hint.login-safe {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  margin-top: -0.35rem;
+  font-size: 0.78rem;
+}
+
+/* The card rises in, and each way of signing in fades in as it takes the other's place. */
+.login-card {
+  animation: login-rise 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.login-form,
+.login-back {
+  animation: login-fade 0.22s ease;
+}
+@keyframes login-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+@keyframes login-fade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-card,
+  .login-form,
+  .login-back {
+    animation: none;
+  }
 }
 
 .login-form label.login-choice {

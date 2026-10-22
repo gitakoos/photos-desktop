@@ -585,6 +585,37 @@ export function NavSharedIcon({ size = 20 }: Props) {
   );
 }
 
+/** People: a face, as the Android app's People tile draws it. */
+export function FaceIcon({ size = 20 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="9.5" />
+      <path d="M8.5 14.5c.9 1.2 2.1 1.8 3.5 1.8s2.6-.6 3.5-1.8" />
+      <path d="M9 9.5v.5M15 9.5v.5" />
+    </svg>
+  );
+}
+
+/** Map: a folded map, three panels. */
+export function MapIcon({ size = 20 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3.5 6.2 9 4l6 2.2 5.5-2.2v13.8L15 20l-6-2.2-5.5 2.2Z" />
+      <path d="M9 4v13.8M15 6.2V20" />
+    </svg>
+  );
+}
+
+/** Labels: a tag with its hole. */
+export function LabelIcon({ size = 20 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3.5 12.4V4.5a1 1 0 0 1 1-1h7.9a1 1 0 0 1 .7.3l7.6 7.6a1 1 0 0 1 0 1.4l-7.9 7.9a1 1 0 0 1-1.4 0l-7.6-7.6a1 1 0 0 1-.3-.7Z" />
+      <circle cx="8" cy="8" r="1.3" />
+    </svg>
+  );
+}
+
 /** Trash: the lidded bin Proton Drive uses, two marks on the body. */
 export function NavTrashIcon({ size = 20 }: Props) {
   return (
@@ -734,6 +765,69 @@ export function RedoIcon({ size = 17 }: Props) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
       <path d="M18.4 10.6C16.55 8.99 14.15 8 11.5 8c-4.65 0 -8.58 3.03 -9.96 7.22L3.9 16c1.05 -3.19 4.05 -5.5 7.6 -5.5c1.95 0 3.73 0.72 5.12 1.88L13 16h9V7l-3.6 3.6Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.SwapVert, the sort control's mark. */
+export function SortIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M16 17.01V10h-2v7.01h-3L15 21l4 -3.99h-3ZM9 3L5 6.99h3V14h2V6.99h3L9 3Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.KeyboardArrowDown, after a toolbar button that opens a menu. */
+export function ChevronDownIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M7.41 8.59L12 13.17l4.59 -4.58L18 10l-6 6l-6 -6l1.41 -1.41Z" />
+    </svg>
+  );
+}
+
+/** Icons.Outlined.CalendarMonth, for a date: the date a photo was taken, or one searched for. */
+export function CalendarIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0 -1.99 0.9 -1.99 2L3 20a2 2 0 0 0 2 2h14c1.1 0 2 -0.9 2 -2V6c0 -1.1 -0.9 -2 -2 -2Zm0 16H5V10h14v10Zm0 -12H5V6h14v2ZM9 14H7v-2h2v2Zm4 0h-2v-2h2v2Zm4 0h-2v-2h2v2Zm-8 4H7v-2h2v2Zm4 0h-2v-2h2v2Zm4 0h-2v-2h2v2Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.TextFields, for sorting by name. */
+export function TextIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M2.5 4v3h5v12h3V7h5V4h-13Zm19 5h-9v3h3v7h3v-7h3V9Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.ArrowUpward */
+export function ArrowUpIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8 -8l-8 8Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.ArrowDownward */
+export function ArrowDownIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M20 12l-1.41 -1.41L13 16.17V4h-2v12.17l-5.58 -5.59L4 12l8 8l8 -8Z" />
+    </svg>
+  );
+}
+
+/** Icons.Outlined.Smartphone, for what the phone saved. */
+export function PhoneIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M17 1.01L7 1c-1.1 0 -2 0.9 -2 2v18c0 1.1 0.9 2 2 2h10c1.1 0 2 -0.9 2 -2V3c0 -1.1 -0.9 -1.99 -2 -1.99ZM17 21H7v-1h10v1Zm0 -3H7V6h10v12ZM7 4V3h10v1H7Z" />
     </svg>
   );
 }

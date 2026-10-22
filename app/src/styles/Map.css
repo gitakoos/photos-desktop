@@ -1,0 +1,315 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The map holds still in the scroll area at its full height; the floating dock leaves room. */
+.g-scroll.map-mode {
+  overflow: hidden;
+  padding-bottom: 20px;
+}
+.gallery:not(.has-sidebar) .g-scroll.map-mode {
+  padding-bottom: 88px;
+}
+/* In the sidebar layout the map takes the page edge to edge under its title; the panel's
+   own corners round it. */
+.has-sidebar .g-scroll.map-mode {
+  padding: 0;
+}
+.has-sidebar .map-view {
+  border-radius: 0;
+}
+/* The view's fade wrapper passes the full height down to the map. */
+.g-scroll.map-mode > .g-viewfade {
+  height: 100%;
+}
+
+.map-view {
+  position: relative;
+  height: 100%;
+  min-height: 300px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: var(--bg2);
+}
+.map-canvas {
+  position: absolute;
+  inset: 0;
+  background: var(--bg2);
+  font: inherit;
+}
+/* The dark theme reads the light OpenStreetMap tiles inverted and muted, as the Android
+   app does, turned back round the colour wheel so water stays blue and parks green; only
+   the tiles, never the photos on the pins. */
+:root[data-theme="dark"] .map-canvas .leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) saturate(0.55);
+}
+
+/* A pin: the newest photo of the place in a white frame with a soft shadow, a point under
+   it on the spot, and the count of the photos it holds. */
+.map-pinwrap {
+  background: none;
+  border: none;
+}
+.map-pin {
+  position: relative;
+  width: 56px;
+  height: 64px;
+  cursor: pointer;
+}
+.map-pinbody {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  border: 2px solid #fff;
+  background: var(--bg2);
+  overflow: hidden;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45);
+  transition: transform 0.12s ease;
+}
+.map-pin::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 1px;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top: 7px solid #fff;
+  border-bottom: 0;
+}
+.map-pin:hover .map-pinbody {
+  transform: scale(1.06);
+}
+/* Above Leaflet's own rule for images in the marker pane, which sets them to auto width. */
+.map-canvas .leaflet-marker-pane .map-pinbody img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.map-pincount {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 22px;
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.map-progress {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 500;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--pill-bg-opaque);
+  border: 1px solid var(--border);
+  color: var(--fg-primary);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* Leaflet's own controls in the app's colours. */
+.map-canvas .leaflet-bar a {
+  background: var(--pill-bg-opaque);
+  color: var(--fg-primary);
+  border-color: var(--border);
+}
+.map-canvas .leaflet-bar a:hover {
+  background: var(--surface-2);
+}
+.map-canvas .leaflet-control-attribution {
+  margin: 0 8px 8px 0 !important;
+  padding: 3px 9px;
+  border-radius: 8px;
+  background: var(--pill-bg-opaque);
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.map-canvas .leaflet-control-attribution a {
+  color: var(--fg-primary);
+  text-decoration: none;
+}
+
+/* ---- Over the map: the page's title, and the search through the towns ---- */
+.map-titlepill {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 600;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--pill-bg-opaque);
+  border: 1px solid var(--border);
+  box-shadow: var(--menu-shadow);
+  color: var(--fg-primary);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.map-places {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 650;
+  width: min(340px, calc(100% - 28px));
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--pill-bg-opaque);
+  border: 1px solid var(--border);
+  box-shadow: var(--menu-shadow);
+  overflow: hidden;
+}
+.map-placesearch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 42px;
+  padding: 0 10px 0 14px;
+  color: var(--fg-mute);
+}
+.map-placesearch input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.map-placeclose {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.map-placeclose:hover {
+  background: var(--line-06);
+}
+.map-placelist {
+  max-height: min(60vh, 460px);
+  margin: 0;
+  padding: 4px 6px 6px;
+  list-style: none;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  scrollbar-width: thin;
+}
+.map-placerow {
+  display: flex;
+  align-items: center;
+}
+.map-place {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.map-place:hover,
+.map-placeopen:hover {
+  background: var(--line-06);
+}
+.map-placethumb {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--bg2);
+}
+.map-placethumb img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+.map-placetext {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.map-placename {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.map-placesub {
+  font-size: 12.5px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.map-placeopen {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.map-placeempty {
+  padding: 12px 10px;
+  font-size: 13px;
+  color: var(--fg-mute);
+}
+
+/* In the sidebar layout the map takes the whole page, the title floating over it. */
+.has-sidebar .g-main.map-full > .g-topbar {
+  display: none;
+}

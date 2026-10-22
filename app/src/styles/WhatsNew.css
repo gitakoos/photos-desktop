@@ -1,0 +1,134 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* What a new version brought: a plain card over the app, the changes as a list. */
+.wn-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--scrim);
+}
+.wn-card {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding: 28px 28px 24px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--dialog-shadow);
+  scrollbar-width: thin;
+}
+.wn-title {
+  margin: 0 0 20px;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--fg-primary);
+}
+.wn-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.wn-item {
+  display: flex;
+  gap: 14px;
+}
+.wn-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+.wn-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.wn-itemtitle {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+.wn-itembody {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-dim);
+}
+.wn-done {
+  display: block;
+  margin: 26px 0 0 auto;
+  height: 38px;
+  padding: 0 22px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    filter 0.15s ease,
+    transform 0.12s ease;
+}
+.wn-done:hover {
+  filter: brightness(1.08);
+}
+.wn-done:active {
+  transform: scale(0.97);
+}
+.wn-backdrop {
+  animation: wn-fade 0.2s ease;
+}
+.wn-card {
+  animation: wn-rise 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes wn-fade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes wn-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wn-backdrop,
+  .wn-card {
+    animation: none;
+  }
+}

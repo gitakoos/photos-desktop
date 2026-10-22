@@ -62,6 +62,7 @@ const TIMEOUT_MS: Record<string, number> = {
   // A batch of decrypts admitted below everything else, so the wait for the channel
   // can dwarf the work itself.
   getThumbnails: 3 * MINUTE,
+  warmThumbnails: 3 * MINUTE,
 
   // Whole files: a video crosses as one payload, and an update is an installer.
   getVideo: 15 * MINUTE,

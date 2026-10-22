@@ -31,6 +31,7 @@ import { TrayPopup } from "./views/TrayPopup";
 import { ViewerWindow } from "./views/ViewerWindow";
 import { LangProvider } from "./lib/i18n";
 import { applyTheme, type ThemeMode } from "./lib/theme";
+import { isWindows } from "./lib/platform";
 
 /**
  * A line in the app's log, from the page.
@@ -65,12 +66,34 @@ if (isTrayPopup || isViewer) {
       const raw = await invoke<string | null>("store_get", { name: "settings" });
       if (raw) {
         const s = JSON.parse(raw);
-        applyTheme((s.theme as ThemeMode) ?? "dark", s.palette);
+        applyTheme((s.theme as ThemeMode) ?? "dark", s.palette, s.amoled === true);
       }
     } catch {
       /* keep the default dark theme */
     }
   })();
+}
+
+// On Windows the system rounds and shades the window (see the host's `framed`), so the
+// page draws no corners of its own; and the window's own colour, which shows for a frame
+// wherever a resize uncovers it, follows what the page paints at its edge.
+if (isWindows) {
+  const root = document.documentElement;
+  root.setAttribute("data-native-frame", "");
+  let painted = "";
+  const follow = () => {
+    const edge =
+      document.querySelector(".app-shell") ?? document.querySelector(".lbx.owns-window") ?? document.body;
+    const match = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(getComputedStyle(edge).backgroundColor);
+    if (!match || match[0] === painted) return;
+    painted = match[0];
+    void getCurrentWindow()
+      .setBackgroundColor([Number(match[1]), Number(match[2]), Number(match[3]), 255])
+      .catch(() => {});
+  };
+  new MutationObserver(follow).observe(root, { attributes: true, attributeFilter: ["data-theme", "data-layout", "style"] });
+  window.addEventListener("load", follow);
+  setTimeout(follow, 1500);
 }
 
 // Outside the language provider on purpose: it has to survive a fault in the very

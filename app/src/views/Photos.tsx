@@ -42,22 +42,30 @@ import { DownloadProgress } from "../components/DownloadProgress";
 import { Avatar } from "../components/Avatar";
 import { ProfileMenu, type Account } from "../components/ProfileMenu";
 import { Sidebar, type Activity } from "../components/Sidebar";
+import { WHATS_NEW_ID, WhatsNew } from "../components/WhatsNew";
+import { describeMount, useMountActivity, type SyncInfo } from "../lib/mountActivity";
+import { SearchField, TopStrip, type SearchPill, type SearchSuggestion } from "../components/TopStrip";
+import { foldPhrase, termAtEnd, termsStartedAtEnd, wordForms, type SearchTerm } from "../lib/searchTerms";
 import { Settings, DEFAULT_SETTINGS, type AppSettings } from "./Settings";
 import { applyTheme } from "../lib/theme";
 import { Albums, type Album, type AlbumSort } from "./Albums";
-import { Shared, type SharedItem, type Tab } from "./Shared";
+import { Shared, type Invitation, type SharedItem, type Tab } from "./Shared";
 import { Trash } from "./Trash";
 import {
   CallMadeIcon,
   CallReceivedIcon,
   ChevronLeftIcon,
   CloseIcon,
+  CollectionsIcon,
   DownloadIcon,
+  FaceIcon,
   FolderOpenIcon,
   UploadArrowIcon,
   FilterIcon,
   HeartIcon,
+  LabelIcon,
   LibraryAddIcon,
+  MapIcon,
   MoreHorizIcon,
   NavAlbumsIcon,
   NavPhotosIcon,
@@ -71,7 +79,35 @@ import {
   SwapHorizIcon,
   TrashIcon,
 } from "../components/icons";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  CalendarIcon,
+  ChevronDownIcon,
+  DeleteForeverIcon,
+  ImageIcon,
+  MotionPhotoIcon,
+  PanoramaIcon,
+  PlayArrowIcon,
+  RawIcon,
+  SortIcon,
+  TextIcon,
+} from "../components/icons";
+import { dateLabel, inDate, parseDateQuery, type DateQuery } from "../lib/dateQuery";
 import { MEDIA_EXTENSIONS, Upload } from "../components/Upload";
+import {
+  CollectionPage,
+  EntryGrid,
+  LibraryPage,
+  LibraryTiles,
+  type CollectionSection,
+  type DriveCollection,
+  type DriveCollections,
+  type LibraryEntry,
+  type LibraryPageKind,
+  type Tile,
+} from "../components/Library";
+import { MapView, type MapPoint } from "../components/MapView";
 import { ImportReview } from "../components/ImportReview";
 import { AlbumAddPhotos } from "../components/AlbumAddPhotos";
 import { Lightbox } from "../components/Lightbox";
@@ -95,14 +131,28 @@ import { useWarmViews } from "../hooks/useWarmViews";
 import { CATEGORIES, isVideo, TAG, withFavorite } from "../lib/tags";
 import { cachedMediaType } from "../lib/mediaTypes";
 import { useUploads } from "../hooks/useUploads";
-import { useT } from "../lib/i18n";
+import { useLang, useT } from "../lib/i18n";
+import { onThisDay, seasons } from "../lib/memories";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
 import "../styles/Photos.css";
+
+/** Each category's mark in the filter menu, where there is one to draw. */
+const CATEGORY_ICONS: Record<string, ReactNode> = {
+  fav: <HeartIcon size={17} />,
+  video: <PlayArrowIcon size={17} />,
+  live: <MotionPhotoIcon size={17} />,
+  selfie: <FaceIcon size={17} />,
+  pano: <PanoramaIcon size={17} />,
+  raw: <RawIcon size={17} />,
+};
 
 /** How many neighbours on each side of the open photo to warm in advance. */
 const PREFETCH_RADIUS = 2;
 
 type TimelineItem = { uid: string; captureTime: number; tags: number[] };
+
+/** Photos asked about per call while the map gathers places. */
+const PLACES_BATCH = 2000;
 type NodeMeta = { name: string; mediaType: string | null };
 type View = "photos" | "albums" | "shared" | "trash";
 
@@ -124,6 +174,18 @@ function videoKind(item: TimelineItem): "video" | "image" | undefined {
 // Zoom changes the minimum cell width (in px). The chosen step is persisted in
 // the settings, so the default only applies before a first choice is made.
 const CELL_SIZES = [92, 116, 148, 190, 248];
+/** The wheel travel one zoom step takes (a mouse notch is 100), and the least time between steps. */
+const WHEEL_STEP = 60;
+/** How long the typing pauses before a typed date becomes a pill: Android's 700 ms. */
+const DATE_PILL_MS = 700;
+/** How often the phone's copies on Drive are looked at again, and how stale they may be when
+ *  the window comes back before they are. */
+const DRIVE_REFRESH_MS = 15 * 60 * 1000;
+const DRIVE_REFRESH_ON_FOCUS_MS = 5 * 60 * 1000;
+/** A search by what a photo shows waits for this much typed, and for the typing to settle. */
+const SEMANTIC_MIN_CHARS = 3;
+const SEMANTIC_SETTLE_MS = 350;
+const WHEEL_STEP_MS = 140;
 
 // The album LIST's own zoom ladder (minimum card width in px). The first step is the
 // current size, so zooming only ever makes the cards larger, down to a few per row.
@@ -191,6 +253,10 @@ function AlbumHero({
   );
 }
 
+/** The most timeline items one page carries, and the wait before asking again when none had arrived. */
+const TIMELINE_PAGE = 20_000;
+const TIMELINE_POLL_MS = 250;
+
 export function Photos({ email, onSignOut }: { email: string; onSignOut: () => void }) {
   const t = useT();
   const [items, setItems] = useState<TimelineItem[]>([]);
@@ -201,12 +267,25 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const [categories, setCategories] = useState<Set<string>>(new Set());
   const [mediaType, setMediaType] = useState<MediaType>("all");
   const [filterOpen, setFilterOpen] = useState(false);
+  // The timeline's order, from the toolbar's sort menu: by when a photo was taken (in
+  // months) or by its name (one grid), newest or A first unless turned round.
+  const [timelineSort, setTimelineSort] = useState<{ by: "taken" | "name"; asc: boolean }>({
+    by: "taken",
+    asc: false,
+  });
+  // The toolbar menu dropped from its button: the sort, the filter, or the albums' sort.
+  const [toolMenu, setToolMenu] = useState<{ kind: "sort" | "filter" | "albumSort"; x: number; y: number } | null>(
+    null,
+  );
   const [view, setView] = useState<View>("photos");
   // Lifted so the open album's header can share the top bar row.
   const [albumOpen, setAlbumOpen] = useState<Album | null>(null);
   // Lifted so the Shared by-me / with-me toggle can live in the top bar row too.
   const [sharedTab, setSharedTab] = useState<Tab>("by");
   const [sharedCount, setSharedCount] = useState<number | null>(null);
+  // Invitations to someone else's photos waiting for an answer: a dot on the Shared tile, and
+  // a list over what is shared with the reader. Read again whenever Albums or Shared is shown.
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
   // The album list's own search query (transient) and sort order, plus where the sort menu opens.
   const [albumQuery, setAlbumQuery] = useState("");
   const [albumSort, setAlbumSort] = useState<AlbumSort>("activity");
@@ -214,6 +293,61 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // A shared album looked into, lifted for the same reason as the one above: the
   // header its back button lives in belongs to this row.
   const [sharedAlbumOpen, setSharedAlbumOpen] = useState<SharedItem | null>(null);
+  // The people or the labels the phone saved to Drive, opened from the Albums tab's tiles.
+  const [libraryPage, setLibraryPage] = useState<LibraryPageKind | null>(null);
+  // One of the Collection's sections opened in full. Kept while its photos are looked at, so
+  // the way back from them returns to it.
+  const [collectionSection, setCollectionSection] = useState<"onthisday" | "seasons" | null>(null);
+  // The timeline narrowed to one person, one label or the offline set, and where it was
+  // opened from, which its back button returns to.
+  const [uidFilter, setUidFilter] = useState<{
+    name: string;
+    uids: Set<string>;
+    back: LibraryPageKind | "albums";
+  } | null>(null);
+  // The photos that carry a place, read in batches the first time the map is opened.
+  const [places, setPlaces] = useState<{ points: MapPoint[]; done: number; total: number; finished: boolean } | null>(
+    null,
+  );
+  // Those Drive copies, read when the Albums tab is first shown and again on request.
+  const [drive, setDrive] = useState<{
+    state: "loading" | "failed" | "ready";
+    data: DriveCollections | null;
+    at: number;
+  } | null>(
+    null,
+  );
+  // A view's own tab or sidebar row takes it back to where it starts: from inside an
+  // album to the albums, from inside a shared album to everything shared.
+  // Settings and Upload are pages over the current view; opening one closes the other.
+  const openSettings = () => {
+    setUploadOpen(false);
+    setSettingsOpen(true);
+  };
+  const openUpload = () => {
+    setSettingsOpen(false);
+    setUploadOpen(true);
+  };
+  const goToView = (next: View) => {
+    setUploadOpen(false);
+    setSettingsOpen(false);
+    setLibraryPage(null);
+    setUidFilter(null);
+    if (next === "albums") setAlbumOpen(null);
+    if (next === "shared") setSharedAlbumOpen(null);
+    setView(next);
+  };
+  /** The timeline narrowed to a set of photos, with a way back to where they were picked. */
+  const openFiltered = (filter: { name: string; uids: Set<string>; back: LibraryPageKind | "albums" }) => {
+    goToView("photos");
+    setUidFilter(filter);
+  };
+  const loadInvitations = useCallback(() => {
+    rpc<Invitation[]>("listInvitations").then(setInvitations, () => {});
+  }, []);
+  useEffect(() => {
+    if (view === "albums" || view === "shared") loadInvitations();
+  }, [view, loadInvitations]);
   // Lifted so the trash's count and its empty button can share the top bar row.
   const [trashCount, setTrashCount] = useState<number | null>(null);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
@@ -268,14 +402,27 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     }
   }, [items.length]);
 
+  // The timeline is read and the Explorer fill started: the host may suspend the page now
+  // if the window is in the tray, which it held off while this was under way.
+  useEffect(() => {
+    if (!loading) void invoke("page_settled").catch(() => {});
+  }, [loading]);
+
   // Which photos are downloaded (hydrated placeholders) so the grid can badge them.
-  // Polled, because Explorer can hydrate/free them independently of the app.
+  // Polled, because Explorer can hydrate/free them independently of the app. The host
+  // answers from its own background scan with a version, and sends the list only when
+  // it moved, so an unchanged library costs neither a copy nor a re-render.
   const [localUids, setLocalUids] = useState<Set<string>>(new Set());
   useEffect(() => {
     let active = true;
+    let version: number | null = null;
     const poll = async () => {
-      const uids = await invoke<string[]>("hydrated_uids").catch(() => [] as string[]);
-      if (active) setLocalUids(new Set(uids));
+      const answer = await invoke<{ version: number; uids: string[] | null }>("hydrated_uids", {
+        since: version,
+      }).catch(() => null);
+      if (!active || !answer) return;
+      version = answer.version;
+      if (answer.uids) setLocalUids(new Set(answer.uids));
     };
     void poll();
     const id = setInterval(poll, 4000);
@@ -322,6 +469,8 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     };
   }, []);
 
+  const mountActivity = useMountActivity();
+
   const mountBusyRef = useRef(false);
   useEffect(() => {
     mountBusyRef.current = mountBusy;
@@ -358,7 +507,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         }
         if (cancelled) break;
         try {
-          await rpc("getThumbnails", { uids: uids.slice(i, i + BATCH) });
+          await rpc("warmThumbnails", { uids: uids.slice(i, i + BATCH) });
         } catch {
           /* keep warming the rest */
         }
@@ -374,7 +523,13 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
-  const [albumMembers, setAlbumMembers] = useState<Set<string>>(new Set());
+  // The photos filed in an album, hidden from the timeline when the setting asks: null
+  // while not yet known. Read from the last start's copy at once, then fresh.
+  const [albumMembers, setAlbumMembers] = useState<Set<string> | null>(null);
+  // Whether the saved settings have been read; until then the defaults stand in, and the
+  // hide setting is not known either.
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [whatsNewOpen, setWhatsNewOpen] = useState(false);
 
   // The open album's header actions, raised into the top bar in the album view.
   // `albumPhotoUids` is lifted from Albums so the top bar's Download can act on the
@@ -431,7 +586,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     }).catch(() => null);
     const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
     if (paths.length === 0) return;
-    setUploadOpen(true);
+    openUpload();
     await uploads.start(paths, { uid: album.uid, name: album.name });
   }
 
@@ -482,40 +637,34 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     (async () => {
       try {
         const raw = await invoke<string | null>("store_get", { name: "settings" });
-        if (!raw) return;
-        const merged: AppSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
-        setSettings(merged);
-        applyTheme(merged.theme, merged.palette);
+        if (raw) {
+          const merged: AppSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+          // The sidebar layout is the app's only layout now; one saved off from before still opens it.
+          merged.sidebarLayout = true;
+          // AMOLED was a palette before it became a switch beside them.
+          if (merged.palette === "amoled") {
+            merged.palette = "default";
+            merged.amoled = true;
+          }
+          setSettings(merged);
+          applyTheme(merged.theme, merged.palette, merged.amoled);
+          if (merged.whatsNewSeen !== WHATS_NEW_ID) setWhatsNewOpen(true);
+        } else {
+          // A first start has nothing new to compare against.
+          const fresh = { ...DEFAULT_SETTINGS, whatsNewSeen: WHATS_NEW_ID };
+          setSettings(fresh);
+          void invoke("store_set", { name: "settings", value: JSON.stringify(fresh) }).catch(() => {});
+        }
       } catch {
         /* fall back to defaults */
       }
+      setSettingsLoaded(true);
     })();
   }, []);
 
   function updateSettings(next: AppSettings) {
     setSettings(next);
     void invoke("store_set", { name: "settings", value: JSON.stringify(next) }).catch(() => {});
-  }
-
-  /** Pin or unpin an album in the sidebar list, holding the pin count to five. */
-  function toggleAlbumPin(uid: string) {
-    const pinned = settings.pinnedAlbums;
-    if (pinned.includes(uid)) {
-      updateSettings({ ...settings, pinnedAlbums: pinned.filter((u) => u !== uid) });
-    } else if (pinned.length >= 5) {
-      setToast(t("albums.pinLimit"));
-    } else {
-      updateSettings({ ...settings, pinnedAlbums: [...pinned, uid] });
-    }
-  }
-
-  /** Remember an album as the most recently opened, so the sidebar can surface it below the
-      pins. Kept to a modest window; the sidebar only ever shows the first ten of it. */
-  function recordAlbumOpen(uid: string) {
-    updateSettings({
-      ...settings,
-      recentAlbums: [uid, ...settings.recentAlbums.filter((u) => u !== uid)].slice(0, 24),
-    });
   }
 
   // Tell the shell it is in the sidebar layout, so the window chrome can step aside:
@@ -551,33 +700,84 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
 
   // Album membership costs a walk over every album, so only resolve it when the
   // hide setting is actually on. Android takes the same "zero cost when off" path.
+  //
+  // The timeline waits for it rather than showing album photos that then vanish: the copy
+  // from the last start answers at once, and only a first start waits for the walk.
   useEffect(() => {
+    if (!settingsLoaded) return;
     if (!settings.hideAlbumPhotos) {
       setAlbumMembers(new Set());
       return;
     }
     let cancelled = false;
+    let fresh = false;
+    (async () => {
+      try {
+        const cached = await rpc<string[] | null>("cachedAlbumPhotoUids");
+        if (!cancelled && !fresh && cached) setAlbumMembers(new Set(cached));
+      } catch {
+        /* the walk below answers instead */
+      }
+    })();
     (async () => {
       try {
         const uids = await rpc<string[]>("getAlbumPhotoUids");
+        fresh = true;
         if (!cancelled) setAlbumMembers(new Set(uids));
       } catch {
-        /* nothing is hidden if membership cannot be resolved */
+        // Nothing is hidden if membership cannot be resolved, rather than nothing shown.
+        if (!cancelled) setAlbumMembers((known) => known ?? new Set());
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [settings.hideAlbumPhotos, reloadKey]);
+  }, [settingsLoaded, settings.hideAlbumPhotos, reloadKey]);
+  /** The timeline can be drawn: what it hides is known. */
+  const hidingKnown = settingsLoaded && (!settings.hideAlbumPhotos || albumMembers !== null);
+
+  // Whether the grid has shown a timeline yet. The first read paints page by page; a
+  // reload keeps the grid it has until the new timeline is complete, so it never
+  // shrinks and grows back.
+  const timelineShown = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     setError("");
+    const progressive = !timelineShown.current;
     (async () => {
       try {
-        const timeline = await rpc<TimelineItem[]>("getTimeline");
-        if (cancelled) return;
-        setItems(timeline);
+        // Read in pages as the sidecar receives them, so a large library paints its
+        // first screen at once and no single answer carries the whole timeline.
+        const { run } = await rpc<{ run: number }>("startTimeline");
+        const all: TimelineItem[] = [];
+        let shown = 0;
+        let shownAt = 0;
+        for (;;) {
+          const page = await rpc<{ items: TimelineItem[]; done: boolean; error: string | null }>(
+            "timelinePage",
+            { run, offset: all.length, limit: TIMELINE_PAGE },
+          );
+          if (cancelled) return;
+          for (const item of page.items) all.push(item);
+          if (page.done) {
+            if (page.error && all.length === 0) throw new Error(page.error);
+            break;
+          }
+          // Each paint recounts the months and the filters over everything so far, so
+          // the grid is refreshed when the timeline has doubled or every two seconds,
+          // not on every page.
+          const now = performance.now();
+          if (progressive && all.length > shown && (all.length >= shown * 2 || now - shownAt > 2000)) {
+            shown = all.length;
+            shownAt = now;
+            timelineShown.current = true;
+            setItems(all.slice());
+          }
+          if (page.items.length === 0) await new Promise((r) => setTimeout(r, TIMELINE_POLL_MS));
+        }
+        timelineShown.current = true;
+        setItems(all);
         setLoading(false);
         // Thumbnails load lazily per visible cell (see thumbStore), so a large
         // library does not pull every thumbnail into memory up front.
@@ -657,9 +857,91 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   }, []);
 
   const activeFilterCount = categories.size + (mediaType === "all" ? 0 : 1);
-  const query_ = query.trim().toLowerCase();
+  // The Drive copies name photos by link id; the timeline knows them as `volume~link`.
+  const byLinkId = useMemo(() => {
+    const m = new Map<string, TimelineItem>();
+    for (const it of items) m.set(it.uid.slice(it.uid.indexOf("~") + 1), it);
+    return m;
+  }, [items]);
+  const toEntries = useCallback(
+    (list: DriveCollection[] | undefined): LibraryEntry[] =>
+      (list ?? [])
+        .map((c) => {
+          const found = c.keys
+            .map((k) => byLinkId.get(k))
+            .filter((it): it is TimelineItem => !!it)
+            .sort((a, b) => b.captureTime - a.captureTime);
+          const cover = c.cover ? (byLinkId.get(c.cover)?.uid ?? null) : null;
+          return { name: c.name, uids: found.map((it) => it.uid), cover: cover ?? found[0]?.uid ?? null, box: cover ? c.box : null };
+        })
+        // A person or label whose photos are all gone from the library has nothing to show.
+        .filter((e) => e.uids.length > 0),
+    [byLinkId],
+  );
+  const peopleEntries = useMemo(() => toEntries(drive?.data?.people), [toEntries, drive]);
+  const { lang } = useLang();
+  const memoryEntries = useMemo(() => {
+    const plural = new Intl.PluralRules(lang);
+    const entry = (name: string, uids: string[]): LibraryEntry => ({ name, uids, cover: uids[0] ?? null, box: null });
+    return {
+      onThisDay: onThisDay(items).map(({ yearsAgo, uids }) => {
+        const key = `library.yearsAgo.${plural.select(yearsAgo)}`;
+        const label = t(key, { count: yearsAgo });
+        return entry(label === key ? t("library.yearsAgo.other", { count: yearsAgo }) : label, uids);
+      }),
+      seasons: seasons(items).map(({ season, year, uids }) => entry(`${t(`library.season.${season}`)} ${year}`, uids)),
+    };
+  }, [items, lang, t]);
+  const labelEntries = useMemo(() => toEntries(drive?.data?.labels), [toEntries, drive]);
+
+  // A name or a label typed into the search finds that person's or label's photos, matched
+  // as the names are folded elsewhere: case and accents aside, anywhere in the name.
+  const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase().trim();
+  // A month and a year at the end of the strip's search ("2026 january", "jan 2026") are a
+  // date, as on Android: the photos of that month, year, or month of every year.
+  const dateQ = useMemo(
+    () => parseDateQuery(query, lang),
+    [query, lang],
+  );
+  const textQuery = dateQ ? dateQ.rest : query;
+  // The date a pause in the typing turned into a pill. A date typed after it takes over.
+  const [datePin, setDatePin] = useState<DateQuery | null>(null);
+  // People and labels picked into the search as pills: their photos only, every pill at once.
+  const [namePins, setNamePins] = useState<{ kind: "people" | "labels"; name: string; uids: Set<string> }[]>([]);
+  useEffect(() => {
+    if (!dateQ) return;
+    const id = setTimeout(() => {
+      setDatePin({ year: dateQ.year, month: dateQ.month, rest: "" });
+      setQuery(dateQ.rest);
+    }, DATE_PILL_MS);
+    return () => clearTimeout(id);
+  }, [dateQ]);
+  const activeDate = dateQ ?? datePin;
+  const searching = query.trim() !== "" || datePin !== null || namePins.length > 0;
+  const namedMatches = useMemo(() => {
+    const q = fold(textQuery);
+    if (q.length < 2) return [];
+    return [
+      ...peopleEntries.map((entry) => ({ kind: "people" as const, entry })),
+      ...labelEntries.map((entry) => ({ kind: "labels" as const, entry })),
+    ].filter(({ entry }) => fold(entry.name).includes(q));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [textQuery, peopleEntries, labelEntries]);
+  const namedUids = useMemo(() => new Set(namedMatches.flatMap(({ entry }) => entry.uids)), [namedMatches]);
+  const query_ = textQuery.trim().toLowerCase();
 
   const filtered = useMemo(() => {
+    // A person, a label or the offline set is the whole question: no category, search or
+    // album hiding narrows it further, as none of their controls is shown with it.
+    const ordered = (list: TimelineItem[]) => {
+      if (timelineSort.by === "name") {
+        const dir = timelineSort.asc ? 1 : -1;
+        const nameOf = (it: TimelineItem) => meta[it.uid]?.name ?? "";
+        return [...list].sort((a, b) => dir * nameOf(a).localeCompare(nameOf(b), undefined, { numeric: true }));
+      }
+      return timelineSort.asc ? [...list].reverse() : list;
+    };
+    if (uidFilter) return ordered(items.filter((it) => uidFilter.uids.has(it.uid)));
     // Categories are multi-select: an item matches if it carries a tag from ANY
     // selected category (OR) — the same union a single category already forms over
     // its own tag list (e.g. Live = Live + Motion photos).
@@ -670,8 +952,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         : items;
 
     // Android parity: the album-hide only applies to the unfiltered timeline. A
-    // category selection (Favorites, Videos, ...) deliberately bypasses it.
-    if (selectedCats.length === 0 && settings.hideAlbumPhotos && albumMembers.size > 0) {
+    // category selection (Favorites, Videos, ...) deliberately bypasses it, and so does a
+    // search, which looks for photos wherever they are filed.
+    if (selectedCats.length === 0 && !searching && settings.hideAlbumPhotos && albumMembers && albumMembers.size > 0) {
       base = base.filter((it) => !albumMembers.has(it.uid));
     }
 
@@ -688,23 +971,215 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       );
     }
 
+    if (activeDate) base = base.filter((it) => inDate(it.captureTime, activeDate));
+    for (const pin of namePins) base = base.filter((it) => pin.uids.has(it.uid));
     if (query_) {
       base = base.filter((it) => {
+        if (namedUids.has(it.uid)) return true;
         const m = meta[it.uid];
         if (!m) return false; // not indexed yet
         return m.name.toLowerCase().includes(query_) || (m.mediaType ?? "").toLowerCase().includes(query_);
       });
     }
-    return base;
-  }, [items, categories, mediaType, query_, meta, settings.hideAlbumPhotos, albumMembers]);
+    return ordered(base);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, categories, mediaType, query_, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namedUids]);
+
+
+  // What the phone's copies are read for, from the settings: each kind on its own switch.
+  const driveKinds = `${settings.driveFaces}:${settings.driveLabels}:${settings.semanticSearch}`;
+  const loadDrive = useCallback(
+    (refresh: boolean) => {
+      // A read over data already shown keeps showing it, and a failed one leaves it be.
+      setDrive((d) => ({ state: "loading", data: d?.data ?? null, at: d?.at ?? 0 }));
+      rpc<DriveCollections>("getDriveCollections", {
+        refresh,
+        faces: settings.driveFaces,
+        labels: settings.driveLabels,
+        search: settings.semanticSearch,
+      })
+        .then((data) => setDrive({ state: "ready", data, at: Date.now() }))
+        .catch(() =>
+          setDrive((d) => (d?.data ? { ...d, state: "ready" } : { state: "failed", data: null, at: d?.at ?? 0 })),
+        );
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [driveKinds],
+  );
+  // Read once the library is in, and again whenever the switches change what is read.
+  const driveKindsRead = useRef<string | null>(null);
+  useEffect(() => {
+    if (!settingsLoaded || items.length === 0) return;
+    if (driveKindsRead.current === driveKinds) return;
+    driveKindsRead.current = driveKinds;
+    loadDrive(false);
+  }, [settingsLoaded, items.length, driveKinds, loadDrive]);
+  // Kept fresh: the phone may save new copies at any time. A look costs a folder listing; only
+  // a copy whose revision changed is downloaded again.
+  const driveAt = useRef(0);
+  driveAt.current = drive?.at ?? 0;
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    const every = window.setInterval(() => loadDrive(true), DRIVE_REFRESH_MS);
+    const onFocus = () => {
+      if (driveAt.current > 0 && Date.now() - driveAt.current > DRIVE_REFRESH_ON_FOCUS_MS) loadDrive(true);
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(every);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [settingsLoaded, loadDrive]);
+
+  // Search by what a photo shows: the phone's index on Drive, asked once the typing settles.
+  const semanticOn = settings.semanticSearch && (drive?.data?.searchPhotos ?? 0) > 0;
+  const [semanticHits, setSemanticHits] = useState<TimelineItem[]>([]);
+  useEffect(() => {
+    const q = textQuery.trim();
+    if (!semanticOn || q.length < SEMANTIC_MIN_CHARS) {
+      setSemanticHits([]);
+      return;
+    }
+    let live = true;
+    const id = window.setTimeout(() => {
+      rpc<{ key: string; score: number }[]>("semanticSearch", { query: q }).then(
+        (hits) => {
+          if (!live) return;
+          setSemanticHits(hits.map((h) => byLinkId.get(h.key)).filter((it): it is TimelineItem => !!it));
+        },
+        () => live && setSemanticHits([]),
+      );
+    }, SEMANTIC_SETTLE_MS);
+    return () => {
+      live = false;
+      window.clearTimeout(id);
+    };
+  }, [semanticOn, textQuery, byLinkId]);
+  /** The photos found by what they show and not already by their words, narrowed as the rest. */
+  const semanticItems = useMemo(() => {
+    if (semanticHits.length === 0 || !searching || uidFilter) return [];
+    const shownAlready = new Set(filtered.map((it) => it.uid));
+    const selectedCats = CATEGORIES.filter((c) => categories.has(c.key));
+    return semanticHits.filter(
+      (it) =>
+        !shownAlready.has(it.uid) &&
+        (!activeDate || inDate(it.captureTime, activeDate)) &&
+        namePins.every((pin) => pin.uids.has(it.uid)) &&
+        (selectedCats.length === 0 || selectedCats.some((cat) => it.tags?.some((tg) => cat.tags.includes(tg)))) &&
+        (mediaType === "all" ||
+          (isVideo(it.tags, meta[it.uid]?.mediaType ?? cachedMediaType(it.uid)) ?? false) === (mediaType === "video")),
+    );
+  }, [semanticHits, searching, uidFilter, filtered, activeDate, namePins, categories, mediaType, meta]);
+  /** What the grid shows, in its order: the photos found by their words, then by what they show.
+   *  The viewer and the selection walk this. */
+  const shown = useMemo(
+    () => (semanticItems.length > 0 ? [...filtered, ...semanticItems] : filtered),
+    [filtered, semanticItems],
+  );
+
+  // The places, newest photos first and a batch at a time, so the map fills as they come.
+  const placesStarted = useRef(false);
+  useEffect(() => {
+    if (libraryPage !== "map" || placesStarted.current || items.length === 0) return;
+    placesStarted.current = true;
+    const all = items.map((it) => it.uid);
+    const takenAt = new Map(items.map((it) => [it.uid, it.captureTime]));
+    setPlaces({ points: [], done: 0, total: all.length, finished: false });
+    void (async () => {
+      const points: MapPoint[] = [];
+      for (let at = 0; at < all.length; at += PLACES_BATCH) {
+        const found = await rpc<{ uid: string; lat: number; lon: number }[]>("getLocations", {
+          uids: all.slice(at, at + PLACES_BATCH),
+        }).catch(() => []);
+        for (const f of found) points.push({ ...f, captureTime: takenAt.get(f.uid) ?? 0 });
+        const done = Math.min(all.length, at + PLACES_BATCH);
+        setPlaces({ points: points.slice(), done, total: all.length, finished: done >= all.length });
+      }
+    })();
+  }, [libraryPage, items]);
+
+  // The shortcut row over the album list, in the Android app's order where they overlap.
+  const collectionSections: CollectionSection[] = [
+    { key: "people", title: t("library.people"), entries: peopleEntries, onSeeAll: () => setLibraryPage("people") },
+    {
+      key: "onthisday",
+      title: t("library.onThisDay"),
+      entries: memoryEntries.onThisDay,
+      onSeeAll: () => setCollectionSection("onthisday"),
+    },
+    {
+      key: "seasons",
+      title: t("library.seasons"),
+      entries: memoryEntries.seasons,
+      onSeeAll: () => setCollectionSection("seasons"),
+    },
+  ];
+  const librarySelected: string | null =
+    view === "shared"
+      ? "shared"
+      : view === "albums" && libraryPage
+        ? libraryPage
+        : view === "photos" && uidFilter
+          ? uidFilter.back === "albums"
+            ? "offline"
+            : uidFilter.back
+          : null;
+  /** A library page, opened from any view: the sidebar's shortcuts sit beside every page,
+   *  not only on the Albums tab the tiles live on. */
+  const openLibrary = (page: LibraryPageKind) => {
+    goToView("albums");
+    setCollectionSection(null);
+    setLibraryPage(page);
+  };
+  const libraryTilesAll: Tile[] = [
+    {
+      key: "collection",
+      label: t("library.collection"),
+      icon: <CollectionsIcon size={18} />,
+      onClick: () => openLibrary("collection"),
+    },
+    {
+      key: "shared",
+      label: t("nav.shared"),
+      icon: <NavSharedIcon size={18} />,
+      badge: invitations.length > 0,
+      // The invitations are listed with what is shared with the reader, so that side opens.
+      onClick: () => {
+        if (invitations.length > 0) setSharedTab("with");
+        goToView("shared");
+      },
+    },
+    { key: "map", label: t("library.map"), icon: <MapIcon size={18} />, onClick: () => openLibrary("map") },
+    {
+      key: "people",
+      label: t("library.people"),
+      icon: <FaceIcon size={18} />,
+      onClick: () => openLibrary("people"),
+    },
+    {
+      key: "labels",
+      label: t("library.labels"),
+      icon: <LabelIcon size={18} />,
+      onClick: () => openLibrary("labels"),
+    },
+    {
+      key: "offline",
+      label: t("library.offline"),
+      icon: <OfflinePinIcon size={18} />,
+      onClick: () => openFiltered({ name: t("library.offline"), uids: new Set(offlineUids), back: "albums" }),
+    },
+  ];
+  const libraryTiles = libraryTilesAll.filter(
+    (tile) => (tile.key !== "people" || settings.driveFaces) && (tile.key !== "labels" || settings.driveLabels),
+  );
 
   // What the viewer's filmstrip and contents list walk: the same order the grid
   // shows, so stepping through the viewer and scrolling the grid agree. Memoised
   // because the viewer takes the array's identity as "the list changed", and a
   // fresh one built on every render would restart its thumbnail loading.
   const viewerItems = useMemo(
-    () => filtered.map((it) => ({ uid: it.uid, name: meta[it.uid]?.name, video: videoKind(it) === "video" })),
-    [filtered, meta],
+    () => shown.map((it) => ({ uid: it.uid, name: meta[it.uid]?.name, video: videoKind(it) === "video" })),
+    [shown, meta],
   );
 
   // Un-favouriting under the Favorites filter drops the open photo out of the
@@ -712,11 +1187,12 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // keys and marquee disabled, so pull it back in range (or close).
   useEffect(() => {
     setLightboxIdx((i) =>
-      i === null || i < filtered.length ? i : filtered.length > 0 ? filtered.length - 1 : null,
+      i === null || i < shown.length ? i : shown.length > 0 ? shown.length - 1 : null,
     );
-  }, [filtered.length]);
+  }, [shown.length]);
 
   const sections = useMemo(() => {
+    if (timelineSort.by === "name") return [{ label: "name", items: filtered }];
     const map = new Map<string, { label: string; items: TimelineItem[] }>();
     for (const it of filtered) {
       const k = monthKey(it.captureTime);
@@ -728,16 +1204,16 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       s.items.push(it);
     }
     return [...map.values()];
-  }, [filtered]);
+  }, [filtered, timelineSort.by]);
   // The grid draws a deferred copy, so a filter chip answers at once and the grid follows
   // behind it, in work the next click can interrupt. Clearing a filter on a large library
   // brings thousands of tiles back at once, and drawing them in the click itself is what
   // made clearing one stall where setting it did not.
   const shownSections = useDeferredValue(sections);
-  const virtualSections = useMemo(
-    () => shownSections.map((s) => ({ key: s.label, items: s.items })),
-    [shownSections],
-  );
+  const virtualSections = useMemo(() => {
+    const base = shownSections.map((s) => ({ key: s.label, items: s.items }));
+    return semanticItems.length > 0 ? [...base, { key: t("search.byContent"), items: semanticItems }] : base;
+  }, [shownSections, semanticItems, t]);
 
   // The timeline photos not already in the open album, for the "Add photos" picker.
   // `albumPhotoUids` is what Albums reported up, so this stays in step with the album.
@@ -754,6 +1230,150 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   );
   const albumCoverThumbs = useThumbnails(heroCoverUids);
 
+  // The top strip's search also finds albums by name, shown in a row over the photos it
+  // finds. Only in the sidebar layout, where that one search stands for the whole library.
+  const albumMatches = useMemo(() => {
+    const q = fold(textQuery);
+    if (!q) return [];
+    return (warm.albums ?? []).filter((a) => fold(a.name ?? "").includes(q)).slice(0, 40);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [textQuery, warm.albums]);
+  const albumMatchCovers = useThumbnails(
+    useMemo(() => albumMatches.map((a) => a.coverUid).filter((u): u is string => !!u), [albumMatches]),
+  );
+  const albumsWanted = query.trim() !== "" && warm.albums === null;
+  useEffect(() => {
+    if (!albumsWanted) return;
+    void rpc<Album[]>("getAlbums").then(warm.putAlbums, () => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [albumsWanted]);
+  const stripSearch = useRef<HTMLInputElement>(null);
+  /**
+   * The names the search turns into pills, in the app's language and in English: the
+   * categories, the two types, and the people and labels the phone saved. Videos are the
+   * type rather than the category of the same name, as in the filter menu.
+   */
+  const searchTerms = useMemo(() => {
+    const terms: (SearchTerm & { kind: string; icon: ReactNode; apply: () => void })[] = [];
+    for (const c of CATEGORIES) {
+      if (c.key === "video") continue;
+      const label = t(`category.${c.key}`);
+      terms.push({
+        key: `cat:${c.key}`,
+        label,
+        forms: [...new Set([...wordForms(label, lang), ...wordForms(c.label, "en")])],
+        kind: t("filter.categories"),
+        icon: CATEGORY_ICONS[c.key] ?? <ImageIcon size={17} />,
+        apply: () => setCategories((cur) => new Set(cur).add(c.key)),
+      });
+    }
+    const photos = t("filter.mediaPhotos");
+    terms.push({
+      key: "type:photo",
+      label: photos,
+      forms: [...new Set([...wordForms(photos, lang), "photos", "photo", "pictures", "picture", "images", "image"])],
+      kind: t("filter.type"),
+      icon: <ImageIcon size={17} />,
+      apply: () => setMediaType("photo"),
+    });
+    const videos = t("filter.videos");
+    terms.push({
+      key: "type:video",
+      label: videos,
+      forms: [...new Set([...wordForms(videos, lang), "videos", "video", "movies", "movie"])],
+      kind: t("filter.type"),
+      icon: <PlayArrowIcon size={17} />,
+      apply: () => setMediaType("video"),
+    });
+    const named = (kind: "people" | "labels", entry: LibraryEntry) => ({
+      key: `${kind}:${entry.name}`,
+      label: entry.name,
+      forms: [foldPhrase(entry.name)],
+      kind: t(kind === "people" ? "library.people" : "library.labels"),
+      icon: kind === "people" ? <FaceIcon size={17} /> : <LabelIcon size={17} />,
+      apply: () =>
+        setNamePins((pins) =>
+          pins.some((p) => p.kind === kind && p.name === entry.name)
+            ? pins
+            : [...pins, { kind, name: entry.name, uids: new Set(entry.uids) }],
+        ),
+    });
+    for (const entry of peopleEntries) terms.push(named("people", entry));
+    for (const entry of labelEntries) terms.push(named("labels", entry));
+    return terms;
+  }, [t, lang, peopleEntries, labelEntries]);
+  /** Picks a term: its pill goes in, and the words that named it leave the text. */
+  const pickTerm = (term: (typeof searchTerms)[number], rest: string) => {
+    term.apply();
+    const datePart = dateQ ? query.trim().slice(dateQ.rest.length).trim() : "";
+    setQuery([rest, datePart].filter(Boolean).join(" "));
+  };
+  // A whole name at the end of the text becomes its pill once the typing pauses, as on Android.
+  useEffect(() => {
+    const found = termAtEnd(textQuery, searchTerms);
+    if (!found) return;
+    const id = window.setTimeout(() => pickTerm(found.term as (typeof searchTerms)[number], found.rest), DATE_PILL_MS);
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [textQuery, searchTerms]);
+  /** Empties the search: the text and every pill it holds. */
+  const clearSearch = () => {
+    setQuery("");
+    setDatePin(null);
+    setNamePins([]);
+    resetFilter();
+  };
+  const searchSuggestions: SearchSuggestion[] = termsStartedAtEnd(textQuery, searchTerms).map(({ term, rest }) => {
+    const full = term as (typeof searchTerms)[number];
+    return { key: full.key, label: full.label, kind: full.kind, icon: full.icon, onPick: () => pickTerm(full, rest) };
+  });
+  /** What narrows the photos besides the text, shown in the strip's search: the date a
+   *  pause turned into a pill, the type, the categories. */
+  const searchPills: SearchPill[] = [
+    ...(datePin
+      ? [{ key: "date", label: dateLabel(datePin, lang), icon: <CalendarIcon size={15} />, onRemove: () => setDatePin(null) }]
+      : []),
+    ...(mediaType !== "all"
+      ? [
+          {
+            key: "type",
+            label: t(mediaType === "video" ? "filter.videos" : "filter.mediaPhotos"),
+            icon: mediaType === "video" ? <PlayArrowIcon size={15} /> : <ImageIcon size={15} />,
+            onRemove: () => setMediaType("all"),
+          },
+        ]
+      : []),
+    // The dock layout keeps its rail of category chips, which already shows them.
+    ...CATEGORIES.filter((c) => settings.sidebarLayout && categories.has(c.key)).map((c) => ({
+      key: `cat:${c.key}`,
+      label: t(`category.${c.key}`),
+      onRemove: () => toggleCategory(c.key),
+    })),
+    ...namePins.map((pin) => ({
+      key: `${pin.kind}:${pin.name}`,
+      label: pin.name,
+      icon: pin.kind === "people" ? <FaceIcon size={15} /> : <LabelIcon size={15} />,
+      onRemove: () => setNamePins((pins) => pins.filter((p) => p !== pin)),
+    })),
+  ];
+  /** The strip's search reaches the whole library, so a query takes the page to its results. */
+  const onGlobalQuery = (q: string) => {
+    setQuery(q);
+    if (q.trim() && (view !== "photos" || uidFilter || uploadOpen)) goToView("photos");
+  };
+  // Ctrl + F goes to that search, as it does in the system's own Photos app.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        stripSearch.current?.focus();
+        stripSearch.current?.select();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // The masthead is a sticky header (see .g-albumhero): it pins to the top of the scroll
   // so the album's cover, title and actions stay in view while the photos scroll under it.
 
@@ -762,7 +1382,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     setItems((prev) => prev.filter((it) => it.uid !== uid));
     setLightboxIdx((i) => {
       if (i === null) return null;
-      const remaining = filtered.length - 1;
+      const remaining = shown.length - 1;
       if (remaining <= 0) return null;
       return Math.min(i, remaining - 1);
     });
@@ -877,12 +1497,12 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // the one the user is actually waiting for on the single channel.
   useEffect(() => {
     if (lightboxIdx === null) return;
-    const current = filtered[lightboxIdx];
+    const current = shown[lightboxIdx];
     if (!current) return;
     const uids: string[] = [];
     for (let d = 1; d <= PREFETCH_RADIUS; d++) {
-      const next = filtered[lightboxIdx + d];
-      const prev = filtered[lightboxIdx - d];
+      const next = shown[lightboxIdx + d];
+      const prev = shown[lightboxIdx - d];
       if (next) uids.push(next.uid);
       if (prev) uids.push(prev.uid);
     }
@@ -1192,7 +1812,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   }
 
   // Only while the timeline is the view on screen: Albums and the trash keep their own.
-  sel.order.current = view === "photos" ? filtered.map((f) => f.uid) : [];
+  sel.order.current = view === "photos" ? shown.map((f) => f.uid) : [];
 
   /**
    * A click on a tile: ignore the one a drag emits, otherwise select or open. Shift or
@@ -1201,17 +1821,30 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   function onCellClick(uid: string, e?: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) {
     if (sel.wasDragging()) return;
     if (selected.size > 0 || e?.shiftKey || e?.ctrlKey || e?.metaKey) sel.toggle(uid, e);
-    else setLightboxIdx(filtered.findIndex((f) => f.uid === uid));
+    else setLightboxIdx(shown.findIndex((f) => f.uid === uid));
   }
 
+  // A wheel notch is one step, but a touchpad pinch sends a stream of small deltas that
+  // stepped the zoom on every one of them. They are added up, and a step waits for a whole
+  // notch's worth and for the last step's glide to be under way.
+  const wheelZoom = useRef({ sum: 0, at: 0 });
   function onWheel(e: WheelEvent) {
     if (!e.ctrlKey) return;
+    // The map zooms itself under the wheel.
+    if (view === "albums" && libraryPage === "map") return;
     e.preventDefault();
+    const acc = wheelZoom.current;
+    acc.sum += e.deltaY;
+    const now = performance.now();
+    if (Math.abs(acc.sum) < WHEEL_STEP || now - acc.at < WHEEL_STEP_MS) return;
+    const out = acc.sum > 0;
+    acc.sum = 0;
+    acc.at = now;
     // The album list zooms its own cards; the timeline and an open album share the photo zoom.
     if (view === "albums" && !albumOpen) {
-      setAlbumZoom(e.deltaY > 0 ? albumZoom - 1 : albumZoom + 1);
+      setAlbumZoom(out ? albumZoom - 1 : albumZoom + 1);
     } else {
-      setZoom(e.deltaY > 0 ? zoom - 1 : zoom + 1);
+      setZoom(out ? zoom - 1 : zoom + 1);
     }
   }
 
@@ -1276,6 +1909,14 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // download, which outranks the search index, which outranks a background sync.
   const downloadCount =
     saveProgress && saveProgress.total > 0 ? `${saveProgress.done}/${saveProgress.total}` : "";
+  // What a "syncing" is, said where it shows: the folder's own work first, then the
+  // library's first read. The folder's quiet checks name nothing, so they show nothing.
+  const syncInfo: SyncInfo | null = mountActivity
+    ? describeMount(mountActivity, t)
+    : loading
+      ? { title: t("sync.library"), why: t("sync.libraryWhy"), done: 0, total: 0 }
+      : null;
+
   const activity: Activity | null = uploads.running
     ? {
         kind: "upload",
@@ -1292,11 +1933,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         }
       : indexing
         ? { kind: "index" }
-        : loading || mountBusy
-          ? { kind: "sync" }
+        : syncInfo
+          ? { kind: "sync", label: syncInfo.title, why: syncInfo.why }
           : null;
 
-  const current = lightboxIdx !== null ? filtered[lightboxIdx] : null;
+  const current = lightboxIdx !== null ? shown[lightboxIdx] : null;
 
   // Rename and delete are the album header's own actions, pointed at whichever
   // album the click picked out rather than at a second copy of them.
@@ -1426,39 +2067,122 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   return (
     <div className={`gallery${sidebar ? " has-sidebar" : ""}`}>
       {sidebar && (
+        <TopStrip
+          ref={stripSearch}
+          query={query}
+          onQuery={onGlobalQuery}
+          pills={searchPills}
+          onClearAll={clearSearch}
+          suggestions={searchSuggestions}
+          activity={activity}
+          dragging={uploads.dragging}
+          onUpload={() => openUpload()}
+          onSettings={() => openSettings()}
+        />
+      )}
+      <div className="g-frame">
+      {sidebar && (
         <Sidebar
-          view={view}
-          onView={setView}
+          view={librarySelected ? null : view === "shared" ? "albums" : view}
+          library={libraryTiles}
+          librarySelected={librarySelected}
+          onSettings={() => openSettings()}
+          onSignOut={onSignOut}
+          onView={goToView}
           collapsed={settings.sidebarCollapsed}
           onToggleCollapsed={() =>
             updateSettings({ ...settings, sidebarCollapsed: !settings.sidebarCollapsed })
           }
           account={account}
           email={email}
-          activity={activity}
-          dragging={uploads.dragging}
-          onProfile={() => setMenuOpen((o) => !o)}
-          onUpload={() => setUploadOpen(true)}
-          onNewAlbum={() => setAlbumCreating(true)}
-          reloadKey={reloadKey}
-          initialAlbums={warm.albums}
-          openAlbumUid={albumOpen?.uid ?? null}
-          onOpenAlbum={(a) => {
-            setView("albums");
-            setAlbumOpen(a);
-            recordAlbumOpen(a.uid);
-          }}
-          pinnedUids={settings.pinnedAlbums}
-          recentUids={settings.recentAlbums}
-          onTogglePin={toggleAlbumPin}
-          onAlbumContext={(album, e) =>
-            setAlbumMenu({ x: e.clientX, y: e.clientY, target: album })
-          }
         />
       )}
-      <div className="g-main">
+      <div className={`g-main${sidebar && view === "albums" && libraryPage === "map" ? " map-full" : ""}`}>
       <div className="g-topbar">
-        {view === "photos" && (
+        {view === "photos" && uidFilter && sidebar && uidFilter.back === "albums" && (
+          <>
+            <div className="g-pagehead">
+              <h1 className="g-pagetitle">{uidFilter.name}</h1>
+              <span className="g-pagesub">
+                {t(filtered.length === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: filtered.length })}
+              </span>
+            </div>
+            <div className="g-spacer" data-tauri-drag-region="" />
+          </>
+        )}
+        {view === "photos" && uidFilter && !(sidebar && uidFilter.back === "albums") && (
+          <>
+            <button
+              className="g-back"
+              title={
+                uidFilter.back === "people"
+                  ? t("library.people")
+                  : uidFilter.back === "labels"
+                    ? t("library.labels")
+                    : uidFilter.back === "map"
+                      ? t("library.map")
+                      : uidFilter.back === "collection"
+                        ? t("library.collection")
+                        : t("nav.albums")
+              }
+              onClick={() => {
+                const back = uidFilter.back;
+                goToView("albums");
+                if (back !== "albums") setLibraryPage(back);
+              }}
+            >
+              <ChevronLeftIcon />
+            </button>
+            <span className="g-crumbtitle">{uidFilter.name}</span>
+            <span className="g-crumbcount">
+              {t(filtered.length === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: filtered.length })}
+            </span>
+            <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
+          </>
+        )}
+        {view === "photos" && !uidFilter && sidebar && (
+          <>
+            <div className="g-pagehead">
+              <h1 className="g-pagetitle">
+                {searching
+                  ? t("search.resultsTitle", {
+                      query: [query.trim(), datePin ? dateLabel(datePin, lang) : "", ...namePins.map((p) => p.name)]
+                        .filter(Boolean)
+                        .join(" "),
+                    })
+                  : t("nav.photos")}
+              </h1>
+              <span className="g-pagesub">
+                {hidingKnown && !(loading && items.length === 0)
+                  ? t(shown.length === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: shown.length })
+                  : " "}
+              </span>
+            </div>
+            <div className="g-spacer" data-tauri-drag-region="" />
+            <div className="g-tools">
+              <button className="g-tool" onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setToolMenu({ kind: "sort", x: r.right, y: r.bottom + 6 });
+              }} title={t("sort.title")}>
+                <SortIcon size={18} />
+                <ChevronDownIcon size={15} />
+              </button>
+              <button
+                className={`g-tool${activeFilterCount > 0 ? " on" : ""}`}
+                onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setToolMenu({ kind: "filter", x: r.right, y: r.bottom + 6 });
+              }}
+                title={t("filter.title")}
+              >
+                <FilterIcon size={16} />
+                {activeFilterCount > 0 && <span className="g-toolbadge">{activeFilterCount}</span>}
+                <ChevronDownIcon size={15} />
+              </button>
+            </div>
+          </>
+        )}
+        {view === "photos" && !uidFilter && !sidebar && (
           <>
             <button
               className={`g-filterpill ${activeFilterCount > 0 ? "active" : ""}`}
@@ -1470,39 +2194,94 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               {activeFilterCount > 0 && <span className="g-filterbadge">{activeFilterCount}</span>}
               <span className="g-filtercount">{filtered.length}</span>
             </button>
-            <div className="g-search">
-              <SearchIcon size={15} />
-              <input
-                className="g-searchfield"
-                placeholder={t("photos.searchPlaceholder")}
-                value={query}
-                onChange={(e) => setQuery(e.currentTarget.value)}
-                onFocus={() => setSearchFocused(true)}
-                onBlur={() => setSearchFocused(false)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setQuery("");
-                    e.currentTarget.blur();
-                  }
-                }}
-              />
-              {query && (
-                <button
-                  className="g-searchx"
-                  title={t("photos.closeSearch")}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setQuery("")}
-                >
-                  <CloseIcon size={14} />
-                </button>
-              )}
-            </div>
-            <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
+            <button
+              className="g-tool"
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setToolMenu({ kind: "sort", x: r.right, y: r.bottom + 6 });
+              }}
+              title={t("sort.title")}
+            >
+              <SortIcon size={18} />
+              <ChevronDownIcon size={15} />
+            </button>
+            <SearchField
+              ref={stripSearch}
+              className="g-docksearch"
+              query={query}
+              onQuery={setQuery}
+              pills={searchPills}
+              onClearAll={clearSearch}
+              suggestions={searchSuggestions}
+              onFocusChange={setSearchFocused}
+            />
+            <div className="g-spacer" />
           </>
         )}
         {/* The album LIST gets the same search field the timeline has (filtering album
             names) plus a sort control, mirrored from the phone app. */}
-        {view === "albums" && !albumOpen && (
+        {view === "albums" && libraryPage && sidebar && !(libraryPage === "collection" && collectionSection) && (
+          <>
+            <div className="g-pagehead">
+              <h1 className="g-pagetitle">
+                {t(
+                  libraryPage === "collection"
+                    ? "library.collection"
+                    : libraryPage === "people"
+                      ? "library.people"
+                      : libraryPage === "labels"
+                        ? "library.labels"
+                        : "library.map",
+                )}
+              </h1>
+            </div>
+            <div className="g-spacer" data-tauri-drag-region="" />
+          </>
+        )}
+        {view === "albums" && libraryPage && !(sidebar && !(libraryPage === "collection" && collectionSection)) && (
+          <>
+            <button
+              className="g-back"
+              onClick={() =>
+                libraryPage === "collection" && collectionSection
+                  ? setCollectionSection(null)
+                  : setLibraryPage(null)
+              }
+              title={libraryPage === "collection" && collectionSection ? t("library.collection") : t("albums.backToAlbums")}
+            >
+              <ChevronLeftIcon />
+            </button>
+            <span className="g-crumbtitle">
+              {libraryPage === "collection"
+                ? collectionSection === "onthisday"
+                  ? t("library.onThisDay")
+                  : collectionSection === "seasons"
+                    ? t("library.seasons")
+                    : t("library.collection")
+                : t(libraryPage === "people" ? "library.people" : libraryPage === "labels" ? "library.labels" : "library.map")}
+            </span>
+            <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
+          </>
+        )}
+        {view === "albums" && !albumOpen && !libraryPage && sidebar && (
+          <>
+            <div className="g-pagehead">
+              <h1 className="g-pagetitle">{t("nav.albums")}</h1>
+              <span className="g-pagesub">{warm.albums ? t(warm.albums.length === 1 ? "albums.countLabel.one" : "albums.countLabel.other", { count: warm.albums.length }) : "\u00a0"}</span>
+            </div>
+            <div className="g-spacer" data-tauri-drag-region="" />
+            <div className="g-tools">
+              <button className="g-tool" onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setToolMenu({ kind: "albumSort", x: r.right, y: r.bottom + 6 });
+              }} title={t("sort.title")}>
+                <SortIcon size={18} />
+                <ChevronDownIcon size={15} />
+              </button>
+            </div>
+          </>
+        )}
+        {view === "albums" && !albumOpen && !libraryPage && !sidebar && (
           <>
             {/* Same order as the timeline: the sort/filter control first, the search after. */}
             <button
@@ -1550,16 +2329,31 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           <>
             <button className="g-back" onClick={() => setAlbumOpen(null)} title={t("albums.backToAlbums")}>
               <ChevronLeftIcon />
-              {t("nav.albums")}
             </button>
             <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
           </>
         )}
         {view === "shared" && !sharedAlbumOpen && (
           <>
+            {sidebar ? (
+              <div className="g-pagehead">
+                <h1 className="g-pagetitle">{t("nav.shared")}</h1>
+                {sharedCount != null && <span className="g-pagesub">{sharedCount}</span>}
+              </div>
+            ) : (
+              <>
+                <button className="g-back" onClick={() => goToView("albums")} title={t("albums.backToAlbums")}>
+                  <ChevronLeftIcon />
+                </button>
+                <span className="g-crumbtitle">{t("nav.shared")}</span>
+                {!!sharedCount && <span className="g-crumbcount">{sharedCount}</span>}
+              </>
+            )}
+            <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
             {/* Android's control for the same choice: one pill that turns round,
                 not two that compete. The arrow says which way the sharing goes and
-                the swap mark says a click flips it. */}
+                the swap mark says a click flips it. It sits at the row's end, apart
+                from the title it would otherwise read as part of. */}
             <button
               className="g-filterpill g-sharedpill"
               onClick={() => setSharedTab(sharedTab === "with" ? "by" : "with")}
@@ -1573,7 +2367,6 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 <SwapHorizIcon />
               </span>
             </button>
-            {!!sharedCount && <span className="g-headpill count">{sharedCount}</span>}
           </>
         )}
         {/* The open shared album takes the row the tab pill was using. The name does
@@ -1587,11 +2380,31 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               title={t("shared.back")}
             >
               <ChevronLeftIcon />
-              {t("nav.shared")}
             </button>
           </>
         )}
-        {view === "trash" && (
+        {view === "trash" && sidebar && (
+          <>
+            <div className="g-pagehead">
+              <div className="g-pagetitlerow">
+                <h1 className="g-pagetitle">{t("nav.trash")}</h1>
+                {!!trashCount && (
+                  <button
+                    className="g-titleact danger"
+                    onClick={() => setConfirmEmpty(true)}
+                    title={t("trash.emptyAction")}
+                    aria-label={t("trash.emptyAction")}
+                  >
+                    <DeleteForeverIcon size={19} />
+                  </button>
+                )}
+              </div>
+              <span className="g-pagesub">{t(trashCount === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: trashCount ?? 0 })}</span>
+            </div>
+            <div className="g-spacer" data-tauri-drag-region="" />
+          </>
+        )}
+        {view === "trash" && !sidebar && (
           <>
             {/* No redundant "Trash" label; the nav already says which view this is. A
                 count of nothing is not worth a pill, and neither is emptying an empty
@@ -1604,7 +2417,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             )}
           </>
         )}
-        {(view === "shared" || view === "trash") && (
+        {((view === "trash" && !sidebar) || (view === "shared" && sharedAlbumOpen)) && (
           <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
         )}
         {/* In the sidebar layout the upload button lives on the sidebar instead, and
@@ -1613,7 +2426,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         {!sidebar && (
           <button
             className={`g-uploadbtn ${uploads.running ? "busy" : ""}`}
-            onClick={() => setUploadOpen(true)}
+            onClick={() => openUpload()}
             title={
               uploads.running
                 ? t("photos.uploadingProgress", { progress: uploads.progressLabel })
@@ -1636,19 +2449,19 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             // outranks both, and says so in its own colour.
             syncing={(loading || mountBusy) && !uploads.running}
             onClick={() => setMenuOpen((o) => !o)}
-            onArrowClick={() => setUploadOpen(true)}
+            onArrowClick={() => openUpload()}
           />
         )}
       </div>
 
-      {menuOpen && (
+      {menuOpen && !sidebar && (
         <ProfileMenu
           placement={sidebar ? "sidebar" : "topright"}
           account={account}
           onClose={() => setMenuOpen(false)}
           onSettings={() => {
             setMenuOpen(false);
-            setSettingsOpen(true);
+            openSettings();
           }}
           onSignOut={() => {
             setMenuOpen(false);
@@ -1657,13 +2470,15 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         />
       )}
 
-      {settingsOpen && (
-        <Settings
-          settings={settings}
-          onChange={updateSettings}
-          onClose={() => setSettingsOpen(false)}
+      {whatsNewOpen && (
+        <WhatsNew
+          onClose={() => {
+            setWhatsNewOpen(false);
+            updateSettings({ ...settings, whatsNewSeen: WHATS_NEW_ID });
+          }}
         />
       )}
+
 
       {view === "photos" && filterOpen && (
         <FilterPanel
@@ -1680,18 +2495,21 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       {/* The category rail stays put whether or not the search is active, and its chips
           keep the focus in the search box (mousedown preventDefault) so they can be toggled
           mid-search. The indexing readout rides along here rather than in a row of its own. */}
-      {view === "photos" && (
+      {view === "photos" &&
+        !uidFilter &&
+        (!sidebar || indexing) && (
         <div className="g-catrail">
-          {CATEGORIES.map((c) => (
-            <button
-              key={c.key}
-              className={`g-chip ${categories.has(c.key) ? "sel" : ""}`}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => toggleCategory(c.key)}
-            >
-              {t(`category.${c.key}`)}
-            </button>
-          ))}
+          {!sidebar &&
+            CATEGORIES.map((c) => (
+              <button
+                key={c.key}
+                className={`g-chip ${categories.has(c.key) ? "sel" : ""}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => toggleCategory(c.key)}
+              >
+                {t(`category.${c.key}`)}
+              </button>
+            ))}
           {indexing && (
             <span className="g-indexing">
               {t("photos.indexing", { done: Object.keys(meta).length, total: items.length })}
@@ -1702,7 +2520,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
 
       {/* Albums and Shared run their own selection, so only bind ours here. */}
       <div
-        className="g-scroll"
+        className={`g-scroll${view === "albums" && libraryPage === "map" ? " map-mode" : ""}`}
         ref={scrollRef}
         onWheel={onWheel}
         {...(view === "photos" ? sel.containerProps : {})}
@@ -1724,6 +2542,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               >
                 <button
                   className="g-heroact"
+                  title={t("albums.addPhotos")}
                   onClick={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
                     setAddPhotosAt({ x: r.left, y: r.bottom + 4 });
@@ -1735,6 +2554,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 </button>
                 <button
                   className="g-heroact"
+                  title={t("selection.download")}
                   onClick={() => void downloadAlbumAll()}
                   disabled={downloading || albumPhotoUids.length === 0}
                 >
@@ -1743,6 +2563,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 </button>
                 <button
                   className="g-heroact"
+                  title={t("albums.share")}
                   onClick={() => setAlbumShareTarget(albumOpen)}
                   disabled={albumBusy}
                 >
@@ -1751,6 +2572,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 </button>
                 <button
                   className="g-heroact"
+                  title={t("albums.more")}
                   onClick={(e) => {
                     const r = e.currentTarget.getBoundingClientRect();
                     setAlbumMoreAt({ x: r.right, y: r.bottom + 4 });
@@ -1763,29 +2585,66 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               </AlbumHero>
             )}
             {albumOpen && <div className="g-albumhero-spacer" ref={heroSpacerRef} aria-hidden />}
-            <Albums
-              cellSize={cellSize}
-              albumCellSize={albumCellSize}
-              query={albumQuery}
-              sort={albumSort}
-              open={albumOpen}
-              onOpenChange={(a) => {
-                setAlbumOpen(a);
-                if (a) recordAlbumOpen(a.uid);
-              }}
-              localUids={localUids}
-              offlineUids={offlineUids}
-              reloadKey={reloadKey}
-              initial={warm.albums}
-              onChanged={bumpReload}
-              onPhotoUids={setAlbumPhotoUids}
-              onAlbumContext={(album, e) =>
-                setAlbumMenu({ x: e.clientX, y: e.clientY, target: album })
-              }
-              favoriteUids={favoriteUids}
-              onFavoriteChanged={handleFavoriteChanged}
-              onData={warm.putAlbums}
-            />
+            {libraryPage === "map" ? (
+              <MapView
+                points={places?.points ?? []}
+                progress={places && !places.finished ? { done: places.done, total: places.total } : null}
+                onOpen={(uids) => openFiltered({ name: t("library.map"), uids: new Set(uids), back: "map" })}
+                title={sidebar ? t("library.map") : undefined}
+                onOpenPlace={(name, uids) => openFiltered({ name, uids: new Set(uids), back: "map" })}
+              />
+            ) : libraryPage === "collection" ? (
+              collectionSection ? (
+                <EntryGrid
+                  entries={memoryEntries[collectionSection === "onthisday" ? "onThisDay" : "seasons"]}
+                  cardSize={Math.round((albumCellSize * 140) / 190)}
+                  onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "collection" })}
+                />
+              ) : (
+                <CollectionPage
+                  sections={collectionSections}
+                  cardSize={Math.round((albumCellSize * 140) / 190)}
+                  onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "collection" })}
+                />
+              )
+            ) : libraryPage ? (
+              <LibraryPage
+                kind={libraryPage}
+                state={drive?.state ?? "loading"}
+                data={drive?.data ?? null}
+                entries={libraryPage === "people" ? peopleEntries : labelEntries}
+                // The person card's own width at the album list's default size, and in step with it after.
+                cardSize={Math.round((albumCellSize * 140) / 190)}
+                onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: libraryPage })}
+                onRetry={() => loadDrive(true)}
+              />
+            ) : (
+              <>
+                {!albumOpen && !albumQuery && !sidebar && <LibraryTiles tiles={libraryTiles} />}
+                <Albums
+                  cellSize={cellSize}
+                  albumCellSize={albumCellSize}
+                  query={albumQuery}
+                  sort={albumSort}
+                  open={albumOpen}
+                  onOpenChange={(a) => {
+                    setAlbumOpen(a);
+                  }}
+                  localUids={localUids}
+                  offlineUids={offlineUids}
+                  reloadKey={reloadKey}
+                  initial={warm.albums}
+                  onChanged={bumpReload}
+                  onPhotoUids={setAlbumPhotoUids}
+                  onAlbumContext={(album, e) =>
+                    setAlbumMenu({ x: e.clientX, y: e.clientY, target: album })
+                  }
+                  favoriteUids={favoriteUids}
+                  onFavoriteChanged={handleFavoriteChanged}
+                  onData={warm.putAlbums}
+                />
+              </>
+            )}
           </>
         ) : view === "shared" ? (
           <>
@@ -1809,6 +2668,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               >
                 <button
                   className="g-heroact"
+                  title={t("selection.download")}
                   onClick={() => void downloadAlbumAll(sharedAlbumPhotoUids)}
                   disabled={downloading || sharedAlbumPhotoUids.length === 0}
                 >
@@ -1820,6 +2680,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 {sharedTab === "by" && (
                   <button
                     className="g-heroact"
+                    title={t("shared.manage")}
                     onClick={() =>
                       setAlbumShareTarget({
                         uid: sharedAlbumOpen.uid,
@@ -1847,6 +2708,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               onCount={setSharedCount}
               onData={(rows) => sharedTab === "by" && warm.putShared(rows)}
               onPhotoUids={setSharedAlbumPhotoUids}
+              invitations={invitations}
+              onInvitationAnswered={(uid) => {
+                setInvitations((list) => list.filter((i) => i.uid !== uid));
+                loadInvitations();
+              }}
             />
           </>
         ) : view === "trash" ? (
@@ -1862,9 +2728,40 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           <>
             {error && <div className="g-error">{error}</div>}
 
-            {loading && items.length === 0 && <PhotoGridSkeleton count={30} cellSize={cellSize} />}
+            {((loading && items.length === 0) || !hidingKnown) && <PhotoGridSkeleton count={30} cellSize={cellSize} />}
 
-            {!loading && filtered.length === 0 && !error && (
+            {albumMatches.length > 0 && (
+              <section className="g-sres">
+                <h3 className="g-sres-title">{t("nav.albums")}</h3>
+                <div className="g-sres-row">
+                  {albumMatches.map((a) => (
+                    <button
+                      key={a.uid}
+                      className="g-sres-album"
+                      onClick={() => {
+                        setQuery("");
+                        goToView("albums");
+                        setAlbumOpen(a);
+                      }}
+                    >
+                      <span className="g-sres-cover">
+                        {a.coverUid && albumMatchCovers[a.coverUid] ? (
+                          <img src={albumMatchCovers[a.coverUid]!} alt="" draggable={false} />
+                        ) : null}
+                      </span>
+                      <span className="g-sres-name">{a.name || t("albums.untitled")}</span>
+                      <span className="g-sres-count">
+                        {t(a.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+                          count: a.photoCount,
+                        })}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {!loading && hidingKnown && shown.length === 0 && albumMatches.length === 0 && !error && (
               <div className="g-empty">
                 <p className="g-empty-title">
                   {activeFilterCount > 0 || query_ ? t("photos.noMatches") : t("photos.noPhotos")}
@@ -1878,11 +2775,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               </div>
             )}
 
-            <VirtualSections
+            {hidingKnown && <VirtualSections
               scrollRef={scrollRef}
               sections={virtualSections}
               cellSize={cellSize}
-              header={(s) => (
+              header={timelineSort.by === "name" ? undefined : (s) => (
                 <div className="g-monthhdr">
                   <span className="g-monthtitle">{s.key}</span>
                   <span className="g-monthcount">
@@ -1904,28 +2801,50 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                   localUids={localUids}
                 />
               )}
-            />
+            />}
           </>
         )}
         </div>
+      </div>
+      {settingsOpen && (
+        <Settings
+          settings={settings}
+          onChange={updateSettings}
+          onClose={() => setSettingsOpen(false)}
+          drive={drive}
+          onDriveRefresh={() => loadDrive(true)}
+        />
+      )}
+      {uploadOpen && (
+        <Upload
+          status={uploads.status}
+          running={uploads.running}
+          error={uploads.error}
+          start={uploads.start}
+          startImport={uploads.startImport}
+          cancel={uploads.cancel}
+          clear={uploads.clear}
+          sync={syncInfo}
+          onClose={() => setUploadOpen(false)}
+        />
+      )}
       </div>
       </div>
 
       {!sidebar && (
         <div className="g-dock">
-          <button className={`g-tab ${view === "photos" ? "sel" : ""}`} onClick={() => setView("photos")}>
+          <button className={`g-tab ${view === "photos" ? "sel" : ""}`} onClick={() => goToView("photos")}>
             <NavPhotosIcon size={17} />
             <span>{t("nav.photos")}</span>
           </button>
-          <button className={`g-tab ${view === "albums" ? "sel" : ""}`} onClick={() => setView("albums")}>
+          <button
+            className={`g-tab ${view === "albums" || view === "shared" ? "sel" : ""}`}
+            onClick={() => goToView("albums")}
+          >
             <NavAlbumsIcon size={17} />
             <span>{t("nav.albums")}</span>
           </button>
-          <button className={`g-tab ${view === "shared" ? "sel" : ""}`} onClick={() => setView("shared")}>
-            <NavSharedIcon size={17} />
-            <span>{t("nav.shared")}</span>
-          </button>
-          <button className={`g-tab ${view === "trash" ? "sel" : ""}`} onClick={() => setView("trash")}>
+          <button className={`g-tab ${view === "trash" ? "sel" : ""}`} onClick={() => goToView("trash")}>
             <NavTrashIcon size={17} />
             <span>{t("nav.trash")}</span>
           </button>
@@ -1959,6 +2878,85 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             onTrash={() => setConfirmTrash(true)}
           />
         </>
+      )}
+
+      {toolMenu && (
+        <ContextMenu
+          x={toolMenu.x}
+          y={toolMenu.y}
+          align="end"
+          onClose={() => setToolMenu(null)}
+          actions={
+            toolMenu.kind === "sort"
+              ? [
+                  {
+                    key: "taken",
+                    label: t("sort.taken"),
+                    icon: <CalendarIcon size={17} />,
+                    checked: timelineSort.by === "taken",
+                    onSelect: () => setTimelineSort((s) => ({ ...s, by: "taken" })),
+                  },
+                  {
+                    key: "name",
+                    label: t("sort.name"),
+                    icon: <TextIcon size={17} />,
+                    checked: timelineSort.by === "name",
+                    onSelect: () => setTimelineSort((s) => ({ ...s, by: "name" })),
+                  },
+                  {
+                    key: "asc",
+                    label: t("sort.ascending"),
+                    icon: <ArrowUpIcon size={17} />,
+                    checked: timelineSort.asc,
+                    separator: true,
+                    onSelect: () => setTimelineSort((s) => ({ ...s, asc: true })),
+                  },
+                  {
+                    key: "desc",
+                    label: t("sort.descending"),
+                    icon: <ArrowDownIcon size={17} />,
+                    checked: !timelineSort.asc,
+                    onSelect: () => setTimelineSort((s) => ({ ...s, asc: false })),
+                  },
+                ]
+              : toolMenu.kind === "albumSort"
+                ? ALBUM_SORTS.map((s) => ({
+                    key: s.key,
+                    label: t(s.labelKey),
+                    checked: albumSort === s.key,
+                    onSelect: () => setAlbumSort(s.key),
+                  }))
+                : [
+                    ...(
+                      [
+                        ["all", "filter.mediaAll", <CollectionsIcon size={17} />],
+                        ["photo", "filter.mediaPhotos", <ImageIcon size={17} />],
+                        ["video", "filter.videos", <PlayArrowIcon size={17} />],
+                      ] as [MediaType, string, ReactNode][]
+                    ).map(([value, labelKey, icon]) => ({
+                      key: `type:${value}`,
+                      label: t(labelKey),
+                      icon,
+                      checked: mediaType === value,
+                      keepOpen: true,
+                      onSelect: () => setMediaType(value),
+                    })),
+                    // Videos are the type above already, so the category of the same name stays out.
+                    ...CATEGORIES.filter((c) => c.key !== "video").map((c, i) => ({
+                      key: `cat:${c.key}`,
+                      label: t(`category.${c.key}`),
+                      icon: CATEGORY_ICONS[c.key] ?? <ImageIcon size={17} />,
+                      checked: categories.has(c.key),
+                      keepOpen: true,
+                      separator: i === 0,
+                      onSelect: () => toggleCategory(c.key),
+                    })),
+                    ...(activeFilterCount > 0
+                      ? [{ key: "reset", label: t("filter.reset"), separator: true, onSelect: resetFilter }]
+                      : []),
+                  ]
+          }
+        />
       )}
 
       {albumSortAt && (
@@ -2199,10 +3197,10 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           kind={videoKind(current)}
           fallbackUrl={cachedThumbnail(current.uid) ?? thumbUrl(current.uid)}
           hasPrev={lightboxIdx! > 0}
-          hasNext={lightboxIdx! < filtered.length - 1}
+          hasNext={lightboxIdx! < shown.length - 1}
           onPrev={() => setLightboxIdx((i) => (i === null ? i : Math.max(0, i - 1)))}
           onNext={() =>
-            setLightboxIdx((i) => (i === null ? i : Math.min(filtered.length - 1, i + 1)))
+            setLightboxIdx((i) => (i === null ? i : Math.min(shown.length - 1, i + 1)))
           }
           items={viewerItems}
           index={lightboxIdx!}
@@ -2237,26 +3235,13 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         />
       )}
 
-      {uploadOpen && (
-        <Upload
-          status={uploads.status}
-          running={uploads.running}
-          error={uploads.error}
-          start={uploads.start}
-          startImport={uploads.startImport}
-          cancel={uploads.cancel}
-          clear={uploads.clear}
-          onClose={() => setUploadOpen(false)}
-        />
-      )}
-
       {uploads.review && (
         <ImportReview
           items={uploads.review}
           checks={uploads.checks}
           progress={uploads.status.importing}
           onConfirm={(exclude, albums) => {
-            setUploadOpen(true);
+            openUpload();
             void uploads.confirmImport(exclude, albums, true);
           }}
           onDiscard={() => void uploads.discardImport()}

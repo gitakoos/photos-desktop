@@ -114,3 +114,17 @@
 .cm-item:focus-visible .cm-icon {
   color: inherit;
 }
+
+/* A choice's mark: a dot before the one in force. Every row of a menu of choices keeps
+   its room, so the icons stand in one column. */
+.cm-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin: 0 -2px 0 -3px;
+  border-radius: 50%;
+}
+
+.cm-dot.on {
+  background: var(--fg-primary);
+}

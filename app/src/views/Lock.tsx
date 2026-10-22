@@ -23,6 +23,7 @@
 import { useState, type FormEvent } from "react";
 import { rpc } from "../lib/rpc";
 import { useT } from "../lib/i18n";
+import { SignOutConfirm } from "../components/SignOutConfirm";
 import "../styles/App.css";
 
 type UnlockResult =
@@ -30,6 +31,7 @@ type UnlockResult =
   | { status: "2fa" }
   | { status: "hv"; url: string }
   | { status: "relogin" }
+  | { status: "offline" }
   | { status: "error"; error: string };
 
 /**
@@ -50,6 +52,7 @@ export function Lock({
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
 
   async function onUnlock(e: FormEvent) {
     e.preventDefault();
@@ -109,13 +112,22 @@ export function Lock({
           <button type="submit" disabled={busy}>
             {busy ? t("lock.unlocking") : t("lock.unlock")}
           </button>
-          <button type="button" className="link" onClick={useDifferentAccount} disabled={busy}>
+          <button type="button" className="link" onClick={() => setConfirmSignOut(true)} disabled={busy}>
             {t("lock.differentAccount")}
           </button>
         </form>
 
         {status && <p className="login-status">{status}</p>}
       </div>
+      {confirmSignOut && (
+        <SignOutConfirm
+          onConfirm={() => {
+            setConfirmSignOut(false);
+            void useDifferentAccount();
+          }}
+          onCancel={() => setConfirmSignOut(false)}
+        />
+      )}
     </div>
   );
 }

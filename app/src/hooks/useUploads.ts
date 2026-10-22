@@ -27,7 +27,15 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { rpc } from "../lib/rpc";
 
 export type ItemStatus = "pending" | "uploading" | "done" | "skipped" | "failed";
-export type UploadItem = { name: string; album: string | null; status: ItemStatus; error?: string };
+export type UploadItem = {
+  name: string;
+  album: string | null;
+  status: ItemStatus;
+  error?: string;
+  /** While it uploads: the file's size, and how much of it has gone up. */
+  size?: number;
+  sent?: number;
+};
 /** An export being made ready before it is queued; see the sidecar's `ImportState`. */
 export type ImportState = {
   phase: "unpacking" | "ready" | "planning" | "review";

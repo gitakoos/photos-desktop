@@ -47,6 +47,7 @@
 
 .cf-msg {
   margin: 0 0 20px;
+  white-space: pre-line;
   font-size: 13px;
   line-height: 1.5;
   color: var(--fg-dim);
@@ -75,7 +76,7 @@
 .cf-btn.primary {
   border-color: transparent;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #fff;
+  color: var(--on-accent);
   font-weight: 600;
 }
 .cf-btn.danger {

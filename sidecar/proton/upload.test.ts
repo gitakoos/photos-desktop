@@ -32,6 +32,7 @@ import { ThumbnailType } from "@protontech/drive-sdk";
 import {
   clearFinishedUploads,
   displayDimensions,
+  failureText,
   frameKey,
   framesForFiles,
   getUploadStatus,
@@ -47,6 +48,7 @@ import {
   type UploadStatus,
 } from "./upload.ts";
 import { hydrateDir } from "./download.ts";
+import { reportSlowUpload } from "./api.ts";
 
 const work = mkdtempSync(join(tmpdir(), "pfp-upload-test-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
@@ -826,5 +828,131 @@ describe("the rows a status reading carries", () => {
     expect(rows.some((r) => r.name === "done-0")).toBe(false);
     // In the record's own order.
     expect(rows.map((r) => all.indexOf(r))).toEqual([...rows.map((r) => all.indexOf(r))].sort((a, b) => a - b));
+  });
+});
+
+describe("a failure on the way", () => {
+  /** Waits longer than `settle`: a retry rests three seconds before trying again. */
+  async function settleSlowly(): Promise<UploadStatus> {
+    for (let tick = 0; tick < 1500; tick++) {
+      const status = getUploadStatus();
+      if (status.total > 0 && !status.running && status.done + status.skipped + status.failed === status.total) {
+        return status;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("the upload never settled");
+  }
+
+  it("tries a file again when the network dropped, asking the library first", async () => {
+    const photo = await writeJpeg("retry.jpg", 120);
+    const { photos } = recordingPhotos();
+    const realUploader = photos.getFileUploader;
+    let tries = 0;
+    let asked = 0;
+    photos.findPhotoDuplicates = async () => {
+      asked++;
+      return [];
+    };
+    photos.getFileUploader = async (name: string, meta: UploadMetadata) => {
+      if (++tries === 1) throw Object.assign(new Error("connection reset"), { name: "ConnectionError" });
+      return realUploader(name, meta);
+    };
+
+    startUpload(photos, [photo]);
+    const status = await settleSlowly();
+
+    expect(status.done).toBe(1);
+    expect(status.failed).toBe(0);
+    expect(tries).toBe(2);
+    expect(asked).toBe(2);
+  }, 20_000);
+
+  it("does not try again a file the server refused", async () => {
+    const photo = await writeJpeg("refused.jpg", 140);
+    const { photos } = recordingPhotos();
+    let tries = 0;
+    photos.getFileUploader = async () => {
+      tries++;
+      throw Object.assign(new Error("the name is not allowed"), { name: "ValidationError" });
+    };
+
+    startUpload(photos, [photo]);
+    const status = await settleSlowly();
+
+    expect(status.failed).toBe(1);
+    expect(tries).toBe(1);
+    expect(status.items[0].error).toBe("the name is not allowed");
+  });
+
+  it("never reports a failure as an empty line", () => {
+    expect(failureText(Object.assign(new Error(""), { name: "ServerError", statusCode: 503 }))).toBe(
+      "Upload failed (ServerError 503)",
+    );
+    expect(failureText(new Error(""))).toBe("Upload failed");
+    expect(failureText(Object.assign(new Error(""), { name: "IntegrityError" }))).toBe("Upload failed (IntegrityError)");
+    expect(failureText(new Error("quota exceeded"))).toBe("quota exceeded");
+  });
+});
+
+describe("a slow line", () => {
+  it("goes on one file at a time once a block has been slow", async () => {
+    const files = await Promise.all(Array.from({ length: 8 }, (_, i) => writeJpeg(`slow-${i}.jpg`, 20 + i * 10)));
+    const { photos } = recordingPhotos();
+    let reported = false;
+    // The first file to reach the line reports it slow before any file has finished, so
+    // the first four (one per worker) are already under way and run on, and the last four
+    // are handed out afterwards: those must go one after another.
+    let later = 0;
+    let mostLater = 0;
+    photos.getFileUploader = async (name: string) => ({
+      uploadFromStream: async (stream: ReadableStream) => {
+        const reader = stream.getReader();
+        while (!(await reader.read()).done) {
+          /* discarded */
+        }
+        const isLater = Number(/slow-(\d)/.exec(name)?.[1]) >= 4;
+        if (isLater) mostLater = Math.max(mostLater, ++later);
+        if (!reported) {
+          reported = true;
+          reportSlowUpload();
+        }
+        await new Promise((r) => setTimeout(r, 30));
+        if (isLater) later--;
+        return { completion: async () => ({ nodeUid: `uid-${name}` }) };
+      },
+    });
+
+    startUpload(photos, files);
+    const status = await settle();
+
+    expect(status.done).toBe(8);
+    expect(mostLater).toBe(1);
+  });
+
+  it("says how much of each file has gone up", async () => {
+    const photo = await writeJpeg("progress.jpg", 200);
+    const { photos } = recordingPhotos();
+    photos.getFileUploader = async () => ({
+      uploadFromStream: async (stream: ReadableStream, _thumbs: unknown[], onProgress?: (sent: number) => void) => {
+        let sent = 0;
+        const reader = stream.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          sent += value.length;
+        }
+        // The SDK counts the thumbnails too, so it can say more than the file holds.
+        onProgress?.(sent + 5_000);
+        return { completion: async () => ({ nodeUid: "uid-progress" }) };
+      },
+    });
+
+    startUpload(photos, [photo]);
+    const status = await settle();
+
+    const item = status.items.find((i) => i.name === "progress.jpg")!;
+    expect(item.size).toBeGreaterThan(0);
+    expect(item.sent).toBe(item.size);
   });
 });

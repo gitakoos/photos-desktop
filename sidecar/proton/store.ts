@@ -44,6 +44,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import { guarded, writeChunk } from "./fileWrites.ts";
@@ -65,12 +66,54 @@ export const OFFLINE_LIST_FILE = "offline.enc";
  */
 export const SESSION_FILE = "session.enc";
 
+/**
+ * The photos filed in an album, as last read: the timeline hides them at once on the
+ * next start instead of showing them until the albums are walked again. Named here so
+ * `wipeCache` takes it with the account's other caches.
+ */
+export const ALBUM_MEMBERS_FILE = "album-members.enc";
+
+/** The phone's copies on Drive as last downloaded (people, labels, search), each under the
+ *  revision it was read at. The account's own data, so `wipeCache` takes it. */
+export const DRIVE_COPIES_DIR = "drive-copies";
+
 let dataDir: string | null = null;
 let dataKey: Buffer | null = null;
 
 export function initStore(dir: string): void {
   dataDir = dir;
   mkdirSync(thumbDir(), { recursive: true });
+  // A wipe the app quit in the middle of leaves its set-aside folders behind.
+  try {
+    for (const name of readdirSync(dir)) {
+      if (name.includes(DISCARD_MARK)) void rm(join(dir, name), { recursive: true, force: true }).catch(() => {});
+    }
+  } catch {
+    /* nothing to sweep */
+  }
+}
+
+/** Marks a folder set aside by `discardDir`, still being deleted. */
+const DISCARD_MARK = ".discard-";
+
+/**
+ * Empties a folder at once and deletes what was in it in the background. A cache can
+ * hold a file per photo, which on a large library is hundreds of thousands of files:
+ * deleting them where they are would stop the sidecar for as long as that takes. A
+ * rename is one step whatever the folder holds, so the folder is moved aside and the
+ * deletion runs behind. A folder that cannot be moved (a file in it is open) is
+ * deleted where it is, as before.
+ */
+function discardDir(path: string): void {
+  if (!existsSync(path)) return;
+  const aside = `${path}${DISCARD_MARK}${randomBytes(4).toString("hex")}`;
+  try {
+    renameSync(path, aside);
+  } catch {
+    rmSync(path, { recursive: true, force: true });
+    return;
+  }
+  void rm(aside, { recursive: true, force: true }).catch(() => {});
 }
 
 /** The vault sets the data key once it is derived from the password. */
@@ -123,12 +166,14 @@ function originalDir(): string {
 export function wipeCache(): void {
   if (!dataDir) return;
   try {
-    rmSync(thumbDir(), { recursive: true, force: true });
+    discardDir(thumbDir());
     mkdirSync(thumbDir(), { recursive: true });
-    rmSync(metaDir(), { recursive: true, force: true });
-    rmSync(originalDir(), { recursive: true, force: true });
+    discardDir(metaDir());
+    discardDir(originalDir());
     rmSync(join(dataDir, OFFLINE_LIST_FILE), { force: true });
     rmSync(join(dataDir, SESSION_FILE), { force: true });
+    rmSync(join(dataDir, ALBUM_MEMBERS_FILE), { force: true });
+    discardDir(join(dataDir, DRIVE_COPIES_DIR));
   } catch {
     /* best-effort */
   }
@@ -255,6 +300,9 @@ type NodeMetaBlob = {
   mediaType: string | null;
   size?: number;
   durationMs?: number;
+  /** Where it was taken, latitude then longitude; null when it carries no place. Absent on a
+   *  record written before places were kept, which is then read again once. */
+  geo?: [number, number] | null;
 };
 
 function metaPath(uid: string): string {

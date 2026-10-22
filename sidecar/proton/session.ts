@@ -24,10 +24,11 @@
 // client. Holds state across the login -> 2FA -> browse steps.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { MemoryCache, PhotoTag, ThumbnailType } from "@protontech/drive-sdk";
+import { PhotoTag, ProtonDriveClient, ThumbnailType } from "@protontech/drive-sdk";
 import { ProtonDrivePhotosClient } from "@protontech/drive-sdk/dist/protonDrivePhotosClient.js";
 
 import {
@@ -48,6 +49,8 @@ import {
   type Session,
 } from "./api.ts";
 import {
+  ALBUM_MEMBERS_FILE,
+  DRIVE_COPIES_DIR,
   SESSION_FILE,
   isReady,
   metaGet,
@@ -71,7 +74,17 @@ import {
   type VaultMode,
 } from "./vault.ts";
 import { BrowserSignIn, type ForkApi, type ForkedSession } from "./browserLogin.ts";
-import { nodeDurationMs, nodeName, toMillis } from "./nodes.ts";
+import { BoundedCache } from "./boundedCache.ts";
+import {
+  loadDriveData,
+  type CopyCache,
+  type DriveCollections,
+  type DriveKinds,
+  type SearchSnapshot,
+} from "./driveData.ts";
+import { encodeText, rank, SEARCH_MODEL_ID } from "./semantic.ts";
+import { isTransient, withRetry } from "./transient.ts";
+import { nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
 import {
@@ -135,12 +148,16 @@ import {
   type TrashResult,
 } from "./trash.ts";
 import {
+  acceptInvitation as runAcceptInvitation,
+  declineInvitation as runDeclineInvitation,
   getSharingInfo as readSharingInfo,
   invitePeople as runInvitePeople,
+  listInvitations as runListInvitations,
   removePerson as runRemovePerson,
   removePublicLink as runRemovePublicLink,
   setPublicLink as runSetPublicLink,
   stopSharing as runStopSharing,
+  type Invitation,
   type PublicLinkOptions,
   type SharingInfo,
 } from "./sharing.ts";
@@ -205,9 +222,27 @@ const toDataUrl = (bytes: Buffer): string => `data:image/jpeg;base64,${bytes.toS
 const THUMBNAIL_STALL_MS = 30_000;
 /** How many uncached grid thumbnails one call fetches; the rest are asked for again. */
 const THUMBNAIL_FETCH_PER_CALL = 8;
+/** The background warmer's share of one call: it must never hold the channel long
+ *  enough for a thumbnail on screen, or a page being opened, to wait on it. */
+const THUMBNAIL_WARM_PER_CALL = 2;
 
 /** How long a sign-in may wait on its 2FA code or captcha before the password goes. */
 const PENDING_SIGN_IN_MS = 10 * 60_000;
+
+/**
+ * How many entries the SDK may keep before its cache starts over: nodes as serialised
+ * text, and decrypted keys, which weigh more. Enough for the albums and the folders a
+ * session works in to stay warm; a walk over a whole large library starts the cache over
+ * now and then instead of holding every photo's key at once.
+ */
+const ENTITY_CACHE_LIMIT = 50_000;
+/** The pauses between asking again to resume a saved session over a network not yet up. */
+const RESUME_RETRY_MS = [2_000, 5_000];
+/** Nodes read per request while the map gathers places, so no one request grows unbounded. */
+const LOCATION_BATCH = 500;
+/** The most timeline items one answer carries. */
+const TIMELINE_CEILING = 1_000_000;
+const CRYPTO_CACHE_LIMIT = 20_000;
 
 /** The shortest password of the user's own that a browser sign-in may be sealed with. */
 const MIN_APP_PASSWORD = 8;
@@ -264,6 +299,10 @@ type SharedSummary = {
 
 type NodeMeta = { uid: string; name: string; mediaType: string | null; size?: number | null };
 
+type TimelineItem = { uid: string; captureTime: number; tags: number[] };
+type TimelineRun = { id: number; items: TimelineItem[]; done: boolean; error: string | null };
+type TimelinePage = { items: TimelineItem[]; done: boolean; error: string | null };
+
 type LoginResult =
   | { status: "ok"; email: string }
   | { status: "2fa" }
@@ -273,6 +312,8 @@ type LoginResult =
   | { status: "protect"; email: string }
   /** The vault opened, but its session is gone: a new sign-in, into the same vault. */
   | { status: "relogin" }
+  /** The saved session could not be checked because Proton could not be reached. */
+  | { status: "offline" }
   | { status: "error"; error: string };
 
 type BrowserLoginStatus = LoginResult | { status: "waiting" } | { status: "cancelled" };
@@ -325,6 +366,24 @@ export class ProtonSession {
   private browserFinish: Promise<LoginResult> | null = null;
   /** A browser sign-in is open but not yet saved: the user has not picked a protection. */
   private awaitingProtection = false;
+  /**
+   * The vault is open but its session could not be resumed for want of a network: the
+   * password that opened it, kept until `retryResume` gets through or the app locks.
+   */
+  private offlineResume: string | null = null;
+  /**
+   * The resume under way, if any. A second one would spend the same refresh token while
+   * the first is still using it, and Proton answers one of the two with a sign-in.
+   */
+  private resuming: Promise<LoginResult> | null = null;
+  /** What both Drive clients are built from, kept for the My files one built on first use. */
+  private sdkBase: Record<string, unknown> | null = null;
+  /** The client for My files, where the Android app keeps its copies of people and labels. */
+  private myFiles: any = null;
+  /** Those copies, read once a session and again only when asked, with the kinds they cover. */
+  private driveCollections: { kinds: string; run: Promise<DriveReply> } | null = null;
+  /** The search copies the last read brought, in the text encoder's space. */
+  private searchCopies: SearchSnapshot[] = [];
   private photos: any = null;
   /** Which sign-in a pending-step timer belongs to; a newer attempt disarms older ones. */
   private attempt = 0;
@@ -385,7 +444,7 @@ export class ProtonSession {
     this.keyPassword = forked.keyPassword;
     this.method = "browser";
     this.userKeyPassphrases = {};
-    const result = await this.finishLogin();
+    const result = await this.finishFreshLogin();
     this.browser = null;
     if (result.status !== "ok") {
       this.session = null;
@@ -491,7 +550,7 @@ export class ProtonSession {
       this.expirePendingSignIn();
       return { status: "2fa" };
     }
-    return this.finishLogin();
+    return this.finishFreshLogin();
   }
 
   /** Replay the sign-in with the token the embedded captcha page produced. */
@@ -503,7 +562,7 @@ export class ProtonSession {
   async submit2fa(code: string): Promise<LoginResult> {
     if (!this.session) return { status: "error", error: "No session in progress" };
     await ProtonApi.auth2fa(this.session, code);
-    return this.finishLogin();
+    return this.finishFreshLogin();
   }
 
   /**
@@ -571,8 +630,66 @@ export class ProtonSession {
     return this.resumeSaved(password);
   }
 
+  /**
+   * The people, labels and search index the Android app saved to Drive, as far as `kinds`
+   * asks: people and labels as one list each, with photos named by their link id, and how
+   * many photos the search can reach. Read once a session; `refresh` looks again, and only a
+   * copy whose revision changed on Drive is downloaded again.
+   */
+  getDriveCollections(refresh: boolean, kinds: DriveKinds): Promise<DriveReply> {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    if (!this.myFiles) {
+      this.myFiles = new ProtonDriveClient({
+        ...this.sdkBase,
+        entitiesCache: new BoundedCache(ENTITY_CACHE_LIMIT),
+        cryptoCache: new BoundedCache(CRYPTO_CACHE_LIMIT),
+      } as any);
+    }
+    const key = `${kinds.faces}:${kinds.labels}:${kinds.search}`;
+    if (refresh || !this.driveCollections || this.driveCollections.kinds !== key) {
+      const run = loadDriveData(this.myFiles, this.sdkBase.account, kinds, driveCopyCache(), SEARCH_MODEL_ID).then(
+        (data) => {
+          this.searchCopies = data.search;
+          const { search, searchOtherModel, ...collections } = data;
+          return {
+            ...collections,
+            searchPhotos: new Set(search.flatMap((copy) => copy.keys)).size,
+            searchOtherModel,
+          };
+        },
+      );
+      const entry = { kinds: key, run };
+      // A failed read is not kept, so the next ask tries again.
+      run.catch(() => {
+        if (this.driveCollections === entry) this.driveCollections = null;
+      });
+      this.driveCollections = entry;
+    }
+    return this.driveCollections.run;
+  }
+
+  /**
+   * The photos that look most like `query` describes, best first, by the search index the
+   * phone saved to Drive: their link ids and scores. Empty without the text model or an index.
+   */
+  async semanticSearch(query: string, limit?: number): Promise<{ key: string; score: number }[]> {
+    if (!query.trim() || this.searchCopies.length === 0) return [];
+    const vector = await encodeText(query);
+    if (!vector) return [];
+    return rank(this.searchCopies, vector, limit);
+  }
+
+  /** Tries again to resume a session that `offline` left waiting for the network. */
+  async retryResume(): Promise<LoginResult> {
+    if (!isReady() || this.offlineResume === null) {
+      return { status: "error", error: "Nothing is waiting to be resumed" };
+    }
+    return this.resumeSaved(this.offlineResume);
+  }
+
   /** Cold start of a vault that needs no password: this Windows account opens it. */
   async unlockDevice(): Promise<LoginResult> {
+    if (this.resuming) return this.resuming;
     if (vaultMode() !== "device" || !unlockDeviceVault()) {
       return { status: "error", error: "No saved account" };
     }
@@ -583,7 +700,17 @@ export class ProtonSession {
    * The saved session, resumed in a vault that has just opened. `password` is the one
    * that opened it, which is the account password only for a password sign-in.
    */
-  private async resumeSaved(password: string): Promise<LoginResult> {
+  private resumeSaved(password: string): Promise<LoginResult> {
+    if (!this.resuming) {
+      this.resuming = this.resumeOnce(password).finally(() => {
+        this.resuming = null;
+      });
+    }
+    return this.resuming;
+  }
+
+  private async resumeOnce(password: string): Promise<LoginResult> {
+    this.offlineResume = null;
     try {
       // A blob that will not open is no more recoverable than one that is not there, so
       // it is answered the same way: the password has just been proved correct, and this
@@ -606,6 +733,13 @@ export class ProtonSession {
         return { status: "error", error: "No saved session" };
       }
       let result = await this.resumeSession(blob, password);
+      if (result.status === "offline") {
+        // Nothing says the session is gone, only that it could not be asked about: the
+        // vault stays open and the window tries again, instead of a full sign-in that
+        // would ask for the password and the second factor all over.
+        this.offlineResume = password;
+        return result;
+      }
       if (result.status !== "ok" && (blob.method === "browser" || !password)) {
         // No account password to sign in again with: Proton's page has to do it, and
         // the vault stays open so the new session lands in it with the cache intact.
@@ -640,12 +774,18 @@ export class ProtonSession {
     void stopThumbServer();
     this.thumbWaiting.clear();
     lockVault();
+    this.offlineResume = null;
+    this.timelineRun = null;
     this.browser?.cancel();
     this.browser = null;
     this.browserFinish = null;
     this.awaitingProtection = false;
     this.session = null;
     this.photos = null;
+    this.sdkBase = null;
+    this.myFiles = null;
+    this.driveCollections = null;
+    this.searchCopies = [];
     this.email = "";
     this.password = "";
     this.keyPassword = "";
@@ -720,7 +860,9 @@ export class ProtonSession {
   private async resumeSession(blob: PersistableSession, password: string): Promise<LoginResult> {
     initCrypto();
     try {
-      const fresh = await refreshSession(blob.uid, blob.refreshToken);
+      // A network that is still coming up (the app starts with Windows, a VPN is
+      // connecting) is asked again a few times before the session is given up on.
+      const fresh = await withRetry(() => refreshSession(blob.uid, blob.refreshToken), RESUME_RETRY_MS);
       this.session = fresh;
       this.username = blob.username;
       this.method = blob.method ?? "password";
@@ -733,8 +875,13 @@ export class ProtonSession {
       } else {
         this.password = password;
       }
+      // The refresh has just spent the saved refresh token. Saved straight away: an app
+      // stopped while the account is being built would otherwise leave only the spent
+      // one on disk, and the next start would have to sign in again.
+      this.persistSession();
       return this.finishLogin();
     } catch (e) {
+      if (isTransient(e)) return { status: "offline" };
       return { status: "error", error: `resume failed: ${(e as Error).message}` };
     }
   }
@@ -758,16 +905,24 @@ export class ProtonSession {
     };
   }
 
+  /**
+   * A new sign-in has no saved session to come back to, so a network that drops at its
+   * last step is reported as an error to try again, not as a session left waiting.
+   */
+  private async finishFreshLogin(): Promise<LoginResult> {
+    const result = await this.finishLogin();
+    if (result.status !== "offline") return result;
+    return { status: "error", error: "Proton could not be reached. Please try again." };
+  }
+
   private async finishLogin(): Promise<LoginResult> {
     // Capture the password before `buildAccount` clears it: a fresh sign-in needs
     // it to derive the vault key. Resume/unlock arrive with the vault already open.
     const password = this.password;
     try {
       const account = await this.buildAccount();
-      this.photos = new ProtonDrivePhotosClient({
+      const sdkBase = {
         httpClient: makeSdkHttpClient(this.session!, () => this.persistSession()),
-        entitiesCache: new MemoryCache(),
-        cryptoCache: new MemoryCache(),
         account,
         openPGPCryptoModule: makeOpenPGPCryptoModule(),
         // Read per call, so a token refresh (which rewrites the session in
@@ -783,7 +938,13 @@ export class ProtonSession {
           getLogger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
           recordMetric: () => {},
         },
+      };
+      this.photos = new ProtonDrivePhotosClient({
+        ...sdkBase,
+        entitiesCache: new BoundedCache(ENTITY_CACHE_LIMIT),
+        cryptoCache: new BoundedCache(CRYPTO_CACHE_LIMIT),
       } as any);
+      this.sdkBase = sdkBase;
       const primary = await account.getOwnPrimaryAddress();
       this.email = primary.email;
       // Fresh sign-in: derive the vault key from the just-verified password. It
@@ -794,6 +955,7 @@ export class ProtonSession {
       if (isReady()) this.persistSession();
       return { status: "ok", email: primary.email };
     } catch (e) {
+      if (isTransient(e)) return { status: "offline" };
       return { status: "error", error: (e as Error).message };
     }
   }
@@ -941,48 +1103,79 @@ export class ProtonSession {
     };
   }
 
-  async getTimeline(): Promise<{ uid: string; captureTime: number; tags: number[] }[]> {
-    // Verbose timeline tracing is disabled: it kept node UIDs (e.g. the photos
-    // root id) in sidecar.log. Flip to stderr.write only for local debugging.
-    const log = (_m: string) => {};
-    log(`photos ${this.photos ? "set" : "NULL"}`);
-    if (!this.photos) throw new Error("Not signed in");
-    const out: { uid: string; captureTime: number; tags: number[] }[] = [];
-    try {
-      log("raw photos-share API check ...");
-      const rawShare = await ProtonApi.photosShare(this.session!).catch((e: Error) => {
-        log(`raw photos-share FAILED: ${e.message}`);
-        return null;
-      });
-      if (rawShare) log(`raw photos-share ok: keys=${Object.keys(rawShare).join(",")}`);
-      log("resolving photos root (SDK) ...");
-      const root = await this.photos.getMyPhotosRootFolder();
-      log(`photos root ok: ${(root as any)?.uid ?? "?"}`);
-      log("starting timeline iteration ...");
-      for await (const item of withStallGuard(
-        this.photos.iterateTimeline(),
-        SDK_STALL_MS,
-        "iterateTimeline(getTimeline)",
-      )) {
-        if (out.length === 0) log("first timeline item received");
-        const uid = (item as any).uid ?? (item as any).nodeUid;
-        const ct = (item as any).captureTime;
-        const captureTime = ct instanceof Date ? ct.getTime() : Number(ct) * 1000;
-        out.push({ uid, captureTime, tags: ((item as any).tags ?? []) as number[] });
-        // Sanity ceiling only, to bound one runaway response; realistic libraries
-        // stay well under it. Reaching it is logged, so it can never be a silent
-        // truncation like the old 3000 cap.
-        if (out.length >= 200000) {
-          log("WARNING: timeline hit the 200000 ceiling, truncating");
-          break;
-        }
-      }
-      log(`done, ${out.length} items`);
-    } catch (e) {
-      log(`ERROR: ${(e as Error).stack ?? String(e)}`);
-      throw e;
-    }
+  /** The whole timeline in one answer, for callers that need it complete. */
+  async getTimeline(): Promise<TimelineItem[]> {
+    const out: TimelineItem[] = [];
+    for await (const item of this.timelineItems()) out.push(item);
     return out;
+  }
+
+  /**
+   * The timeline, newest first, one item at a time as the SDK pages it in. Stops at a
+   * sanity ceiling far past any personal library, and says so in the log, with the
+   * count and nothing else.
+   */
+  private async *timelineItems(): AsyncGenerator<TimelineItem> {
+    if (!this.photos) throw new Error("Not signed in");
+    // Resolving the root first is what surfaces a missing photos volume as an error
+    // here, rather than as an empty timeline.
+    await this.photos.getMyPhotosRootFolder();
+    let count = 0;
+    for await (const item of withStallGuard(
+      this.photos.iterateTimeline(),
+      SDK_STALL_MS,
+      "iterateTimeline(getTimeline)",
+    )) {
+      const uid = (item as any).uid ?? (item as any).nodeUid;
+      const ct = (item as any).captureTime;
+      const captureTime = ct instanceof Date ? ct.getTime() : Number(ct) * 1000;
+      yield { uid, captureTime, tags: ((item as any).tags ?? []) as number[] };
+      if (++count >= TIMELINE_CEILING) {
+        process.stderr.write(`[sidecar] timeline reached ${TIMELINE_CEILING} items, the rest is not shown\n`);
+        return;
+      }
+    }
+  }
+
+  /** The timeline read in progress, which `timelinePage` answers from. */
+  private timelineRun: TimelineRun | null = null;
+  private timelineRuns = 0;
+
+  /**
+   * Starts reading the timeline in the background and returns at once. The window
+   * then asks for it page by page with `timelinePage`, so a large library paints its
+   * first screen while the rest is still arriving, and no single answer has to carry
+   * all of it. A new start replaces the run before it.
+   */
+  startTimeline(): { run: number } {
+    if (!this.photos) throw new Error("Not signed in");
+    const run: TimelineRun = { id: ++this.timelineRuns, items: [], done: false, error: null };
+    this.timelineRun = run;
+    void (async () => {
+      try {
+        for await (const item of this.timelineItems()) {
+          if (this.timelineRun !== run) return;
+          run.items.push(item);
+        }
+      } catch (e) {
+        run.error = (e as Error).message;
+      }
+      run.done = true;
+    })();
+    return { run: run.id };
+  }
+
+  /**
+   * What has arrived of a timeline read from `offset` on, at most `limit` items.
+   * `done` once the read has finished and this page reaches its end; `error` then says
+   * why it stopped early, if it did.
+   */
+  timelinePage(runId: number, offset: number, limit: number): TimelinePage {
+    const run = this.timelineRun;
+    if (!run || run.id !== runId) throw new Error("This timeline read was replaced");
+    const items = run.items.slice(offset, offset + Math.max(1, limit));
+    const done = run.done && offset + items.length >= run.items.length;
+    return { items, done, error: done ? run.error : null };
   }
 
   /** Uncached thumbnails asked for over the thumbnail server, gathered into one fetch. */
@@ -1072,7 +1265,10 @@ export class ProtonSession {
    * must never wait behind a long one. The rest come back with no entry, which the grid
    * reads as "ask again", so a screen of cached tiles costs one call instead of several.
    */
-  async getThumbnails(uids: string[]): Promise<{ uid: string; dataUrl: string | null }[]> {
+  async getThumbnails(
+    uids: string[],
+    fetchLimit = THUMBNAIL_FETCH_PER_CALL,
+  ): Promise<{ uid: string; dataUrl: string | null }[]> {
     if (!this.photos) throw new Error("Not signed in");
     const out: { uid: string; dataUrl: string | null }[] = [];
     const missing: string[] = [];
@@ -1080,7 +1276,7 @@ export class ProtonSession {
     for (const uid of uids) {
       const cached = thumbGet(uid, ThumbnailType.Type1);
       if (cached) out.push({ uid, dataUrl: toDataUrl(cached) });
-      else if (missing.length < THUMBNAIL_FETCH_PER_CALL) missing.push(uid);
+      else if (missing.length < fetchLimit) missing.push(uid);
     }
     if (missing.length === 0) return out;
 
@@ -1111,6 +1307,16 @@ export class ProtonSession {
       process.stderr.write(`[sidecar] getThumbnails stalled after ${out.length}/${uids.length}\n`);
     }
     return out;
+  }
+
+  /**
+   * Fills the thumbnail cache ahead of the grid, a couple of downloads at a time, and
+   * answers only how many are now there: the warmer never draws them, so nothing is
+   * worth sending back over the channel.
+   */
+  async warmThumbnails(uids: string[]): Promise<{ ready: number }> {
+    const rows = await this.getThumbnails(uids, THUMBNAIL_WARM_PER_CALL);
+    return { ready: rows.length };
   }
 
   /** HD preview (Type2 thumbnail) for the image viewer / lightbox. */
@@ -1303,7 +1509,28 @@ export class ProtonSession {
 
   async getAlbumPhotoUids(): Promise<string[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return readAlbumPhotoUids(this.photos);
+    const uids = await readAlbumPhotoUids(this.photos);
+    // Kept for the next start; a cache that cannot be written only costs that start the wait.
+    try {
+      if (isReady()) writeSealedAtomic(join(storeDir(), ALBUM_MEMBERS_FILE), Buffer.from(JSON.stringify(uids)));
+    } catch {
+      /* best-effort */
+    }
+    return uids;
+  }
+
+  /** The album members as last read, or null before they ever were: answered from disk at
+   *  once, so the timeline can hide them before the albums are walked again. */
+  cachedAlbumPhotoUids(): string[] | null {
+    if (!isReady()) return null;
+    const raw = readSealedOrDiscard(join(storeDir(), ALBUM_MEMBERS_FILE));
+    if (!raw) return null;
+    try {
+      const uids = JSON.parse(raw.toString("utf8"));
+      return Array.isArray(uids) ? uids.filter((u): u is string => typeof u === "string") : null;
+    } catch {
+      return null;
+    }
   }
 
   async getAlbumPhotos(uid: string): Promise<AlbumPhoto[]> {
@@ -1377,6 +1604,23 @@ export class ProtonSession {
     return out;
   }
 
+  // ---- Invitations to someone else's photos (SDK: iterateInvitations / accept / reject) ----
+
+  async listInvitations(): Promise<Invitation[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runListInvitations(this.photos, (walk) => withStallGuard(walk, SDK_STALL_MS, "iterateInvitations"));
+  }
+
+  async acceptInvitation(uid: string): Promise<void> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runAcceptInvitation(this.photos, uid);
+  }
+
+  async declineInvitation(uid: string): Promise<void> {
+    if (!this.photos) throw new Error("Not signed in");
+    return runDeclineInvitation(this.photos, uid);
+  }
+
   // ---- Sharing a node out (SDK: getSharingInfo / shareNode / unshareNode) ----
 
   async getSharingInfo(uid: string): Promise<SharingInfo> {
@@ -1447,11 +1691,45 @@ export class ProtonSession {
       const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
       const size = Number(revision?.claimedSize ?? 0);
       const durationMs = nodeDurationMs(n) ?? 0;
-      metaPut(n.uid, size > 0 ? { ...meta, size, durationMs } : { ...meta, durationMs });
+      const geo = nodeLocation(n);
+      metaPut(n.uid, size > 0 ? { ...meta, size, durationMs, geo } : { ...meta, durationMs, geo });
       // The size travels with the name because the viewer's contents list shows both,
       // and it is already in hand here: fetching it separately would mean a second
       // decrypt of a revision this loop has already opened.
       out.push({ uid: n.uid, name: meta.name, mediaType: meta.mediaType, size: size > 0 ? size : null });
+    }
+    return out;
+  }
+
+  /**
+   * Where each photo was taken, for the map: only the photos that carry a place come back.
+   * Cache-first, so a library read once answers from disk; the rest are read once, in
+   * batches, and kept, with the name and the rest of the record beside the place.
+   */
+  async getLocations(uids: string[]): Promise<{ uid: string; lat: number; lon: number }[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    const out: { uid: string; lat: number; lon: number }[] = [];
+    const missing: string[] = [];
+    for (const uid of uids) {
+      const cached = metaGet(uid);
+      if (cached && cached.geo !== undefined) {
+        if (cached.geo) out.push({ uid, lat: cached.geo[0], lon: cached.geo[1] });
+      } else {
+        missing.push(uid);
+      }
+    }
+    for (let at = 0; at < missing.length; at += LOCATION_BATCH) {
+      const batch = missing.slice(at, at + LOCATION_BATCH);
+      for await (const node of withStallGuard(this.photos.iterateNodes(batch), SDK_STALL_MS, "iterateNodes")) {
+        const n = node as any;
+        if (n.missingUid) continue;
+        const geo = nodeLocation(n);
+        const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+        const size = Number(revision?.claimedSize ?? 0);
+        const meta = { name: nodeName(n), mediaType: n.mediaType ?? null, durationMs: nodeDurationMs(n) ?? 0, geo };
+        metaPut(n.uid, size > 0 ? { ...meta, size } : meta);
+        if (geo) out.push({ uid: n.uid, lat: geo[0], lon: geo[1] });
+      }
     }
     return out;
   }
@@ -1605,7 +1883,13 @@ export class ProtonSession {
   async renamePhoto(uid: string, newName: string): Promise<{ uid: string; name: string }> {
     if (!this.photos) throw new Error("Not signed in");
     const n: any = await this.photos.renameNode(uid, newName);
-    return { uid: n.uid, name: nodeName(n) };
+    const name = nodeName(n) || newName;
+    // The cached name is what the Explorer folder and the search index list a photo
+    // under. Left as it was, the folder would bring the old name back at its next fill
+    // and clear away the renamed copy as one the library no longer has.
+    const cached = metaGet(uid);
+    if (cached) metaPut(uid, { ...cached, name });
+    return { uid: n.uid ?? uid, name };
   }
 
   /** Moves photos to the trash. The SDK reports per-node results. */
@@ -1678,3 +1962,48 @@ export class ProtonSession {
 }
 
 export const session = new ProtonSession();
+
+/** What a read of the phone's copies answers: the people and labels, and how many photos the
+ *  search reaches (its vectors stay here). */
+export type DriveReply = DriveCollections & { searchPhotos: number; searchOtherModel: number };
+
+/**
+ * The phone's copies as last downloaded, sealed in the account's store, one file per copy and
+ * named by a digest so no Drive id is on disk in the clear. A copy is reused only while its
+ * Drive revision is the one it was read at.
+ */
+function driveCopyCache(): CopyCache | null {
+  if (!isReady()) return null;
+  const dir = join(storeDir(), DRIVE_COPIES_DIR);
+  const fileOf = (uid: string) => join(dir, `${createHash("sha256").update(uid).digest("hex")}.bin`);
+  const revisionOf = (uid: string) => join(dir, `${createHash("sha256").update(uid).digest("hex")}.rev`);
+  return {
+    get(uid, revision) {
+      const stored = readSealedOrDiscard(revisionOf(uid));
+      if (!stored || stored.toString("utf8") !== revision) return null;
+      return readSealedOrDiscard(fileOf(uid));
+    },
+    put(uid, revision, bytes) {
+      try {
+        mkdirSync(dir, { recursive: true });
+        writeSealedAtomic(fileOf(uid), bytes);
+        writeSealedAtomic(revisionOf(uid), Buffer.from(revision, "utf8"));
+      } catch {
+        /* best-effort: the next read downloads it again */
+      }
+    },
+    keepOnly(uids) {
+      const keep = new Set<string>();
+      for (const uid of uids) {
+        const name = createHash("sha256").update(uid).digest("hex");
+        keep.add(`${name}.bin`);
+        keep.add(`${name}.rev`);
+      }
+      try {
+        for (const name of readdirSync(dir)) if (!keep.has(name)) rmSync(join(dir, name), { force: true });
+      } catch {
+        /* nothing cached yet */
+      }
+    },
+  };
+}

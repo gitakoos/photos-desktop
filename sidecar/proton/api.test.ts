@@ -20,11 +20,20 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { isApiUrl, makeSdkHttpClient, userAgentFor } from "./api.ts";
+import {
+  ProtonApi,
+  SLOW_BLOCK_MS,
+  STORAGE_AGENT_OPTIONS,
+  isApiUrl,
+  makeSdkHttpClient,
+  refreshSession,
+  userAgentFor,
+  watchSlowUploads,
+} from "./api.ts";
 
 describe("isApiUrl", () => {
   it("takes the API origin, any path on it", () => {
@@ -191,5 +200,98 @@ describe("SDK http client: request timeout", () => {
     });
 
     expect(res.status).toBe(200);
+  });
+});
+
+// The module's own requests (sign-in, the account and its keys, the token refresh)
+// once had no limit at all: one that never answered was ended only by the host giving
+// up on the whole sidecar, which signed the user out.
+describe("own requests: timeout", () => {
+  /** A network that accepts every request and never answers, until it is aborted. */
+  function silentNetwork() {
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const asked: number[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      asked.push(ms);
+      return realTimeout(20);
+    });
+    vi.stubGlobal(
+      "fetch",
+      (_url: string, init?: RequestInit) =>
+        new Promise((_, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+        }),
+    );
+    return asked;
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("gives up on an account request that never answers", async () => {
+    const asked = silentNetwork();
+
+    const err = await rejection(ProtonApi.getUser({ uid: "u", accessToken: "t" }));
+
+    expect(err.message).toBe("Proton did not answer in time");
+    expect(asked).toEqual([30_000]);
+  });
+
+  it("gives the token refresh longer, and still gives up", async () => {
+    const asked = silentNetwork();
+
+    const err = await rejection(refreshSession("u", "r"));
+
+    expect(err.name).toBe("TimeoutError");
+    expect(asked).toEqual([60_000]);
+  });
+});
+
+// Node's own fetch cuts a request whose answer has not begun 300 s after it was sent,
+// even while its body is still going up: on a slow uplink every 4 MB block failed that
+// way, as "fetch failed", and was sent again at the same pace.
+describe("file content on a slow line", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    watchSlowUploads(null);
+  });
+
+  it("travels through a pool with no limit on waiting for the answer", async () => {
+    let init: (RequestInit & { dispatcher?: unknown }) | undefined;
+    vi.stubGlobal("fetch", async (_url: string, given: RequestInit) => {
+      init = given;
+      return new Response("ok");
+    });
+
+    await client().fetchBlob({ url: `${base}/block`, method: "POST", headers: new Headers(), timeoutMs: 600_000, body: "x" });
+
+    expect(STORAGE_AGENT_OPTIONS.headersTimeout).toBe(0);
+    expect(init?.dispatcher).toBeDefined();
+    // The SDK's own limit still applies to it.
+    expect(init?.signal).toBeDefined();
+  });
+
+  it("says when a block took long enough that the line sets the pace", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let slow = 0;
+    watchSlowUploads(() => slow++);
+    let took = 0;
+    vi.stubGlobal("fetch", async () => {
+      vi.setSystemTime(Date.now() + took);
+      return new Response("ok");
+    });
+    const upload = () =>
+      client().fetchBlob({ url: `${base}/block`, method: "POST", headers: new Headers(), timeoutMs: 600_000, body: "x" });
+
+    took = 5_000;
+    await upload();
+    expect(slow).toBe(0);
+
+    took = SLOW_BLOCK_MS;
+    await upload();
+    expect(slow).toBe(1);
   });
 });

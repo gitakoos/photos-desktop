@@ -28,6 +28,9 @@
 // so that uninstalling takes the Run entry with it.
 pub mod autostart;
 mod cloud_mount;
+mod explorer_rules;
+#[cfg(windows)]
+mod explorer_sync;
 // Public because the installer compiles this same file (see its header), and a
 // module the app itself never reads would otherwise read as dead code.
 pub mod data_format;
@@ -36,11 +39,13 @@ pub mod data_format;
 pub mod file_assoc;
 #[cfg(not(windows))]
 mod files_drive;
+mod notices;
 mod local_file;
 mod local_folder;
 mod photo_edit;
 mod secure_store;
 mod upload_frame;
+mod window_place;
 
 use std::collections::BinaryHeap;
 use std::io::{BufRead, BufReader, Write};
@@ -133,7 +138,8 @@ fn priority_for(method: &str) -> Priority {
         // Session lifecycle: must never sit behind a warm.
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
-        | "protectSession" => Priority::Interactive,
+        | "protectSession" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
+        | "semanticSearch" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
         // even though the user is looking at that photo: the transfer itself runs inside
@@ -154,13 +160,18 @@ fn priority_for(method: &str) -> Priority {
         // Whole-library name/size enumeration: the slowest sweeps, and the only ones
         // that decrypt a node per photo on a cold run. Below warming so a cold first
         // run fills the grid from thumbnails while these enumerate the mount behind it.
-        "listForMount" | "getMetadata" => Priority::Enumerate,
+        "listForMount" | "getMetadata" | "getLocations" => Priority::Enumerate,
 
         // Warming and mount bookkeeping: whole-library sweeps that must yield.
-        "getThumbnails" | "listAlbumsForMount" | "listExtrasForMount"
-        | "getAlbums" | "getAlbumPhotos" | "getAlbumPhotoUids" | "heapStats"
-        | "whoami" | "getAccountInfo" | "getShared" | "getSharingInfo"
-        | "checkUpdate" | "downloadUpdate" => Priority::Background,
+        "warmThumbnails" | "listAlbumsForMount" | "listExtrasForMount"
+        | "getAlbumPhotoUids" | "heapStats"
+        | "whoami" | "getAccountInfo" | "getSharingInfo" | "listInvitations"
+        | "checkUpdate" | "downloadUpdate" | "getDriveCollections" => Priority::Background,
+
+        // What a page on screen is drawing: its thumbnails and its lists. These fall
+        // through to `UserAction` below, named here so no one moves them back under the
+        // warmer, behind which a page stayed empty for as long as a cold batch took.
+        "getThumbnails" | "getAlbums" | "getAlbumPhotos" | "getShared" => Priority::UserAction,
 
         // Everything else: user-driven mutations and any method not named above.
         _ => Priority::UserAction,
@@ -544,6 +555,15 @@ impl SidecarGate {
             if guard.is_none() {
                 let generation = self.next_generation();
                 *guard = Some(spawn_sidecar(app, generation)?);
+                // Any spawn after the first replaces one that held the signed-in session,
+                // which went with it. The window is told, so it can unlock again or show
+                // the lock screen instead of failing every call as if still signed in.
+                if generation > 0 {
+                    use tauri::Emitter;
+                    note(app, "[host] sidecar replaced, session lost");
+                    wake_to_restore(app);
+                    let _ = app.emit("sidecar-restarted", generation);
+                }
             }
             let sc = guard.as_mut().unwrap();
             let generation = sc.generation;
@@ -1102,6 +1122,14 @@ fn deadline_for(method: &str) -> Duration {
         // The whole-library sweeps, named by their priority tier so the two lists
         // cannot drift apart.
         _ if priority_for(method) == Priority::Enumerate => TRANSFER,
+        // Walks over the whole timeline, an album or the trash, which grow with the
+        // library: on a large one over a slow link they outlast five minutes while
+        // making steady progress. Each walk is stopped inside the sidecar as soon as
+        // the SDK goes a minute without an answer, so a long ceiling here never lets a
+        // stuck one hang; a short one would throw away the signed-in session mid-walk.
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        // The people and labels the phone saved to Drive: whole files, read over the network.
+        "getDriveCollections" => TRANSFER,
         _ => REPLY,
     }
 }
@@ -1267,13 +1295,32 @@ async fn rpc(
     if let Some(id) = call_id {
         shared.track(id);
     }
-    #[cfg(not(windows))]
     let called = method.clone();
+    #[cfg(windows)]
+    let app_after = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         rpc_blocking(&app, &shared, method, params, call_id)
     })
     .await
     .map_err(|e| format!("sidecar task failed: {e}"))?;
+    // The Explorer folder held the account that just signed out: its placeholders go.
+    #[cfg(windows)]
+    if called == "signOut" && result.is_ok() {
+        let app = app_after.clone();
+        std::thread::spawn(move || cloud_mount::clear_after_sign_out(&app));
+    }
+    // A change made in the app shows in the Explorer folder too, quietly and soon.
+    #[cfg(windows)]
+    if result.as_ref().is_ok_and(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+        && matches!(
+            called.as_str(),
+            "trashPhotos" | "restorePhotos" | "deletePhotosForever" | "emptyTrash" | "renamePhoto"
+                | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
+                | "removePhotosFromAlbum" | "setFavorite" | "saveCloudEdit"
+        )
+    {
+        crate::explorer_sync::request_refresh(&app_after);
+    }
     #[cfg(not(windows))]
     if result.as_ref().is_ok_and(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true)) {
         match called.as_str() {
@@ -1768,6 +1815,63 @@ fn background_launch() -> bool {
     BACKGROUND_LAUNCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the main window's page has done what it does by itself at startup: put the
+/// saved session back, or found it needs the user (a sign-in, the lock screen), and when
+/// signed in, read the timeline and started the Explorer fill. Until then the page must
+/// not be suspended: a suspended page runs nothing, so a start in the tray, or a window
+/// closed while it was still restoring, left the session unrestored and the Explorer
+/// folder empty until the window was opened again.
+static PAGE_SETTLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A suspend asked for before the page settled, carried out once it has.
+static SUSPEND_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What a request to suspend the main window's page does.
+#[derive(Debug, PartialEq, Eq)]
+enum SuspendNow {
+    /// On screen: never.
+    No,
+    /// Hidden and settled.
+    Now,
+    /// Hidden, still at its startup work: once it settles.
+    Later,
+}
+
+fn suspend_decision(visible: bool, settled: bool) -> SuspendNow {
+    match (visible, settled) {
+        (true, _) => SuspendNow::No,
+        (false, true) => SuspendNow::Now,
+        (false, false) => SuspendNow::Later,
+    }
+}
+
+/// The session went with a replaced sidecar, and only the page puts it back. A page
+/// suspended in the tray would not hear of it, so it is woken, kept off screen, and
+/// suspended again once it has settled.
+fn wake_to_restore(app: &AppHandle) {
+    PAGE_SETTLED.store(false, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(windows)]
+    if let Some(w) = app.get_webview_window(MAIN_WINDOW) {
+        if !w.is_visible().unwrap_or(false) {
+            SUSPEND_WAITING.store(true, std::sync::atomic::Ordering::Relaxed);
+            webview_power::resume(app);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
+/// The page has settled (see `PAGE_SETTLED`). A suspend that waited for it runs now.
+#[tauri::command]
+fn page_settled(app: AppHandle) {
+    PAGE_SETTLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(windows)]
+    if SUSPEND_WAITING.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        webview_power::suspend(&app);
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+}
+
 /// A line from the page, which until now could not reach the log at all.
 ///
 /// The frontend's only trace was accidental: an RPC that happened to take over a
@@ -1839,6 +1943,7 @@ fn reveal_window(window: tauri::WebviewWindow) {
 fn show_main_or_viewer(window: &tauri::WebviewWindow) {
     #[cfg(windows)]
     if window.label() == MAIN_WINDOW {
+        SUSPEND_WAITING.store(false, std::sync::atomic::Ordering::Relaxed);
         webview_power::resume(window.app_handle());
     }
     let _ = window.show();
@@ -1863,18 +1968,42 @@ fn reveal_safety_net(window: tauri::WebviewWindow) {
     });
 }
 
+/// The frame of the app's own windows. On Windows they are opaque, and the system rounds
+/// their corners and draws their shadow: a transparent window is left see-through for a
+/// frame wherever a resize uncovers it, before the page catches up, which is the flicker
+/// a drag on its edge showed. The colour fills that strip instead, the dark frame the page
+/// paints (the page sets it to its theme's as soon as it runs). Elsewhere the page draws
+/// the rounded window itself on a transparent one.
+fn framed<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'a, R, M>,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    #[cfg(windows)]
+    {
+        builder
+            .transparent(false)
+            .shadow(true)
+            .background_color(tauri::window::Color(25, 25, 27, 255))
+    }
+    #[cfg(not(windows))]
+    {
+        builder.transparent(true)
+    }
+}
+
 /// The app's own window. Built rather than declared so it exists only once the app
 /// itself has been asked for.
 fn build_main_window(app: &AppHandle) -> tauri::Result<()> {
-    let main = tauri::WebviewWindowBuilder::new(app, MAIN_WINDOW, tauri::WebviewUrl::default())
-        .title(APP_TITLE)
-        .inner_size(1100.0, 720.0)
-        .min_inner_size(720.0, 500.0)
-        .decorations(false)
-        .transparent(true)
-        .resizable(true)
-        .visible(false)
-        .build()?;
+    let main = framed(
+        tauri::WebviewWindowBuilder::new(app, MAIN_WINDOW, tauri::WebviewUrl::default())
+            .title(APP_TITLE)
+            .inner_size(1100.0, 720.0)
+            .min_inner_size(720.0, 500.0)
+            .decorations(false)
+            .resizable(true)
+            .visible(false),
+    )
+    .build()?;
+    window_place::apply(app, &main, (1100.0, 720.0));
     // A stale Windows icon cache could otherwise leave the old taskbar icon.
     if let Some(icon) = app.default_window_icon().cloned() {
         let _ = main.set_icon(icon);
@@ -1899,16 +2028,17 @@ pub(crate) fn show_viewer_window(app: &AppHandle) {
         force_foreground(&existing);
         return;
     }
-    let built = tauri::WebviewWindowBuilder::new(app, VIEWER_WINDOW, tauri::WebviewUrl::default())
-        .title(APP_TITLE)
-        .inner_size(1000.0, 700.0)
-        .min_inner_size(480.0, 360.0)
-        .decorations(false)
-        .transparent(true)
-        .resizable(true)
-        .visible(false)
-        .center()
-        .build();
+    let built = framed(
+        tauri::WebviewWindowBuilder::new(app, VIEWER_WINDOW, tauri::WebviewUrl::default())
+            .title(APP_TITLE)
+            .inner_size(1000.0, 700.0)
+            .min_inner_size(480.0, 360.0)
+            .decorations(false)
+            .resizable(true)
+            .visible(false)
+            .center(),
+    )
+    .build();
     match built {
         Ok(viewer) => {
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -1984,8 +2114,15 @@ mod webview_power {
         // The check lives here rather than at each caller because it has to hold for
         // all of them at once. Both callers decide to suspend on a timer, and the
         // window can be asked for in the moment between that decision and this call.
-        if w.is_visible().unwrap_or(false) {
-            return;
+        let settled = super::PAGE_SETTLED.load(std::sync::atomic::Ordering::Relaxed);
+        match super::suspend_decision(w.is_visible().unwrap_or(false), settled) {
+            super::SuspendNow::No => return,
+            super::SuspendNow::Later => {
+                super::SUSPEND_WAITING.store(true, std::sync::atomic::Ordering::Relaxed);
+                super::note(app, "[host] page suspend held until it settles");
+                return;
+            }
+            super::SuspendNow::Now => super::note(app, "[host] page suspended in the tray"),
         }
         let _ = w.with_webview(|webview| unsafe {
             let controller = webview.controller();
@@ -2632,6 +2769,7 @@ pub fn run() {
             restart_app,
             enter_app,
             reveal_window,
+            page_settled,
             log_note,
             launch_at_login,
             set_launch_at_login,
@@ -2652,11 +2790,14 @@ pub fn run() {
             cloud_mount::set_show_in_explorer,
             cloud_mount::auto_download,
             cloud_mount::set_auto_download,
+            cloud_mount::explorer_edits,
+            cloud_mount::set_explorer_edits,
             cloud_mount::synced_albums,
             cloud_mount::set_album_synced,
             cloud_mount::album_local_count,
             cloud_mount::free_up_album,
             cloud_mount::sync_busy,
+            cloud_mount::mount_activity,
             file_association_enabled,
             set_file_association,
             open_default_apps,
@@ -2855,6 +2996,15 @@ mod gate_tests {
     // (a) Highest priority first, and FIFO within one priority — shown on the foreground
     // lane. The background lane runs the identical code, and (b) proves the two are
     // independent, so one lane's ordering stands for both.
+    #[test]
+    fn a_hidden_page_is_suspended_only_once_it_has_settled() {
+        use crate::{suspend_decision, SuspendNow};
+        assert_eq!(suspend_decision(true, true), SuspendNow::No);
+        assert_eq!(suspend_decision(true, false), SuspendNow::No);
+        assert_eq!(suspend_decision(false, true), SuspendNow::Now);
+        assert_eq!(suspend_decision(false, false), SuspendNow::Later);
+    }
+
     #[test]
     fn admits_by_priority_then_fifo() {
         with_watchdog(10, || {
@@ -3158,11 +3308,23 @@ mod log_tests {
     #[test]
     fn only_the_slow_calls_get_the_long_deadline() {
         let long = deadline_for("hydrateFile");
+        assert_eq!(deadline_for("getTimeline"), long, "a large library's timeline must not cost the session");
         assert_eq!(deadline_for("getOriginal"), long, "a whole-file transfer must not be cut short");
         // The whole-library sweeps come in by priority tier, not by a second list.
         assert_eq!(priority_for("listForMount"), Priority::Enumerate);
         assert_eq!(deadline_for("listForMount"), long);
         assert!(deadline_for("getPreview") < long);
         assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
+    }
+
+    #[test]
+    fn what_a_page_draws_goes_before_the_warmer() {
+        for on_screen in ["getThumbnails", "getAlbums", "getAlbumPhotos", "getShared"] {
+            assert!(
+                priority_for(on_screen) > priority_for("warmThumbnails"),
+                "{on_screen} would wait behind a warm batch"
+            );
+        }
+        assert_eq!(priority_for("warmThumbnails"), Priority::Background);
     }
 }

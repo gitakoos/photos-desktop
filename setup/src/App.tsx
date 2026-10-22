@@ -26,7 +26,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import logo from "./assets/logo.png";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const APP_NAME = "Photos for Proton";
 
 // Each of these is allow-listed in src-tauri/capabilities/default.json; the opener
@@ -36,7 +36,7 @@ const LINKS = {
   website: "https://www.photosforproton.eu",
   source: "https://github.com/gitakoos/photos-desktop",
   issues: "https://github.com/gitakoos/photos-desktop/issues",
-  contact: "mailto:github@akoos.eu",
+  contact: "mailto:support@photosforproton.eu",
 };
 
 function Link({ href, children }: { href: string; children: string }) {
@@ -65,18 +65,19 @@ function About() {
         <Link href={LINKS.source}>Source</Link> &middot; <Link href={LINKS.issues}>Issues</Link>
       </p>
       <p className="about-links">
-        Contact <Link href={LINKS.contact}>github@akoos.eu</Link>
+        Contact <Link href={LINKS.contact}>support@photosforproton.eu</Link>
       </p>
     </div>
   );
 }
 
-// How this exe was launched: as the installer, or as the installed uninstall.exe.
-type Mode = "install" | "uninstall";
+// How this exe was launched: as the installer, as the installed uninstall.exe, or by
+// the running app's own updater.
+type Mode = "install" | "uninstall" | "update";
 // What the user asked for. Running the installer over an install that is already
 // there offers all three, so this is not the same thing as the launch mode.
 type Action = "install" | "upgrade" | "uninstall";
-type Step = "welcome" | "options" | "remove" | "working" | "done" | "error";
+type Step = "welcome" | "options" | "remove" | "working" | "done" | "error" | "updating" | "updated";
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("install");
@@ -97,7 +98,11 @@ export default function App() {
     (async () => {
       const m = await invoke<Mode>("mode").catch(() => "install" as Mode);
       setMode(m);
-      if (m === "install") {
+      if (m === "update") {
+        // The update is already running from the Rust side; this window only follows it.
+        setAction("upgrade");
+        setStep("updating");
+      } else if (m === "install") {
         setDir(await invoke<string>("default_dir").catch(() => "C:\\Users\\...\\Photos for Proton"));
         setExisting(await invoke<string | null>("existing_install").catch(() => null));
       } else {
@@ -120,6 +125,24 @@ export default function App() {
   }, []);
 
   const close = () => getCurrentWindow().close().catch(() => {});
+
+  // An update launched by the app: follow it until the app is back up, then go.
+  useEffect(() => {
+    if (step !== "updating") return;
+    const id = setInterval(async () => {
+      const state = await invoke<string>("update_state").catch(() => "running");
+      if (state === "done") {
+        clearInterval(id);
+        setStep("updated");
+        setTimeout(() => close(), 1400);
+      } else if (state.startsWith("failed")) {
+        clearInterval(id);
+        setError(state.replace(/^failed: /, ""));
+        setStep("error");
+      }
+    }, 300);
+    return () => clearInterval(id);
+  }, [step]);
 
   // After a successful uninstall, close automatically: the detached folder cleanup
   // waits for this window to exit before it can remove the install directory.
@@ -224,7 +247,6 @@ export default function App() {
             <button className="btn primary wide" onClick={() => setStep("options")}>
               Install
             </button>
-            <p className="hint">Choose your shortcuts on the next step.</p>
             <About />
           </div>
         )}
@@ -232,71 +254,80 @@ export default function App() {
         {mode === "install" && step === "options" && (
           <div className="step">
             <h2 className="h2">Install {APP_NAME}</h2>
-            <p className="sub-left">Installs to your account folder. Choose your shortcuts:</p>
+            <p className="sub-left">Installs to your user folder. No administrator rights needed.</p>
 
-            <span className="field-label">Shortcuts</span>
-            <label className="opt">
-              <span className="opt-label">Desktop</span>
-              <input
-                className="opt-switch"
-                type="checkbox"
-                checked={desktop}
-                onChange={(e) => setDesktop(e.currentTarget.checked)}
-              />
-            </label>
-            <label className="opt">
-              <span className="opt-label">Start menu</span>
-              <input
-                className="opt-switch"
-                type="checkbox"
-                checked={startMenu}
-                onChange={(e) => setStartMenu(e.currentTarget.checked)}
-              />
-            </label>
+            <span className="group-label">Shortcuts</span>
+            <div className="rows">
+              <label className="opt">
+                <span className="opt-text">
+                  <span className="opt-label">Desktop</span>
+                </span>
+                <input
+                  className="opt-switch"
+                  type="checkbox"
+                  checked={desktop}
+                  onChange={(e) => setDesktop(e.currentTarget.checked)}
+                />
+              </label>
+              <label className="opt">
+                <span className="opt-text">
+                  <span className="opt-label">Start menu</span>
+                </span>
+                <input
+                  className="opt-switch"
+                  type="checkbox"
+                  checked={startMenu}
+                  onChange={(e) => setStartMenu(e.currentTarget.checked)}
+                />
+              </label>
+            </div>
 
-            <span className="field-label mt">File Explorer</span>
-            {/* The note is described-by rather than wrapped in the label, so a screen
-                reader announces the switch by its short name and then the note. */}
-            <label className="opt">
-              <span className="opt-label">Show "Proton Photos" in the sidebar</span>
-              <input
-                className="opt-switch"
-                type="checkbox"
-                aria-describedby="explorer-note"
-                checked={networkDrive}
-                onChange={(e) => setNetworkDrive(e.currentTarget.checked)}
-              />
-            </label>
-            {/* Hydration is not user-initiated: the app registers a full hydration
-                policy, so a read by anything at all pulls the photo down. Saying "what
-                you open" would describe a policy this app does not use. */}
-            <p className="opt-desc" id="explorer-note">
-              Every photo is listed by name and date, and album names become folder names. Any program that reads
-              the folder downloads the full photo, so an antivirus scan or a backup tool can pull the whole library
-              onto this computer as ordinary files. Explorer keeps its own thumbnail cache, which survives freeing
-              up space and uninstalling. The contents are marked as not indexed, so Windows Search does not lift
-              dates or locations out of your photos.
-            </p>
+            <span className="group-label">File Explorer</span>
+            <div className="rows">
+              {/* The note is described-by rather than wrapped in the label's name, so a
+                  screen reader announces the switch by its short name and then the note. */}
+              <label className="opt">
+                <span className="opt-text">
+                  <span className="opt-label">Show "Proton Photos" in File Explorer</span>
+                  {/* Hydration is not user-initiated: the app registers a full hydration
+                      policy, so a read by anything at all pulls the photo down. */}
+                  <span className="opt-desc" id="explorer-note">
+                    Your photos, favourites and albums as folders. Copy photos in to upload them, rename, or delete
+                    to the Proton trash. A photo downloads when any program opens it, a backup tool or an antivirus
+                    scan included. Windows Search leaves the folder out.
+                  </span>
+                </span>
+                <input
+                  className="opt-switch"
+                  type="checkbox"
+                  aria-describedby="explorer-note"
+                  checked={networkDrive}
+                  onChange={(e) => setNetworkDrive(e.currentTarget.checked)}
+                />
+              </label>
+            </div>
 
-            <span className="field-label mt">File types</span>
-            <label className="opt">
-              <span className="opt-label">Add to the "Open with" list</span>
-              <input
-                className="opt-switch"
-                type="checkbox"
-                aria-describedby="filetypes-note"
-                checked={fileTypes}
-                onChange={(e) => setFileTypes(e.currentTarget.checked)}
-              />
-            </label>
-            {/* Honest about the ceiling: Windows protects the default handler behind a
-                hash of its own, so no installer can set one, and this does not try. */}
-            <p className="opt-desc" id="filetypes-note">
-              Lists {APP_NAME} in the Windows "Open with" menu for JPEG, PNG, GIF, WebP, AVIF, BMP, TIFF and
-              HEIC photos, and for MP4, MOV, M4V and WebM video. Nothing becomes the default this way: Windows
-              accepts that choice only from you, under Open with &gt; Choose another app. Uninstalling takes the
-              entries back out.
-            </p>
+            <span className="group-label">File types</span>
+            <div className="rows">
+              <label className="opt">
+                <span className="opt-text">
+                  <span className="opt-label">Add to the "Open with" list</span>
+                  {/* Honest about the ceiling: Windows protects the default handler behind
+                      a hash of its own, so no installer can set one, and this does not try. */}
+                  <span className="opt-desc" id="filetypes-note">
+                    For common photo and video files. Nothing becomes the default: Windows takes that choice only
+                    from you.
+                  </span>
+                </span>
+                <input
+                  className="opt-switch"
+                  type="checkbox"
+                  aria-describedby="filetypes-note"
+                  checked={fileTypes}
+                  onChange={(e) => setFileTypes(e.currentTarget.checked)}
+                />
+              </label>
+            </div>
 
             <div className="footer">
               <button className="btn ghost" onClick={() => setStep("welcome")}>
@@ -309,9 +340,30 @@ export default function App() {
           </div>
         )}
 
+        {step === "updating" && (
+          <div className="step center">
+            <img className="logo small" src={logo} alt="" />
+            <h2 className="h2 tight">Updating {APP_NAME}</h2>
+            <p className="working-text">Installing {VERSION}. The app opens again by itself.</p>
+            <div className="bar">
+              <div className="bar-fill" />
+            </div>
+          </div>
+        )}
+
+        {step === "updated" && (
+          <div className="step center">
+            <div className="checkmark" aria-hidden>
+              &#x2713;
+            </div>
+            <h2 className="h2 tight">Updated to {VERSION}</h2>
+            <p className="working-text">Opening {APP_NAME}...</p>
+          </div>
+        )}
+
         {step === "working" && (
           <div className="step center">
-            <div className="spinner" />
+            <img className="logo small" src={logo} alt="" />
             <p className="working-text">
               {action === "uninstall" ? "Removing..." : action === "upgrade" ? "Upgrading..." : "Installing..."}
             </p>
@@ -323,7 +375,7 @@ export default function App() {
 
         {action === "install" && step === "done" && (
           <div className="step center">
-            <div className="checkmark">&#x2713;</div>
+            <div className="checkmark" aria-hidden>&#x2713;</div>
             <h2 className="h2">{APP_NAME} is installed</h2>
             <p className="sub">Ready to go.</p>
             <div className="footer center-footer">
@@ -339,7 +391,7 @@ export default function App() {
 
         {action === "upgrade" && step === "done" && (
           <div className="step center">
-            <div className="checkmark">&#x2713;</div>
+            <div className="checkmark" aria-hidden>&#x2713;</div>
             {/* Not "up to date": nothing compares versions, and running an older
                 installer over a newer install ends up on this screen too. */}
             <h2 className="h2">
@@ -389,7 +441,7 @@ export default function App() {
 
         {action === "uninstall" && step === "done" && (
           <div className="step center">
-            <div className="checkmark">&#x2713;</div>
+            <div className="checkmark" aria-hidden>&#x2713;</div>
             <h2 className="h2">{APP_NAME} has been removed</h2>
             <div className="footer center-footer">
               <button className="btn primary" onClick={close}>

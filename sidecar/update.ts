@@ -26,7 +26,7 @@
 // full list is read and the newest release that ships an .exe wins.
 
 import { createHash } from "node:crypto";
-import { createWriteStream, rmSync } from "node:fs";
+import { createWriteStream, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -91,7 +91,7 @@ export function updatePath(): string {
  * says can point the updater at another host or suppress the hash check. Fails
  * closed: no digest means no install.
  */
-export async function downloadUpdate(): Promise<string> {
+export async function downloadUpdate(onProgress?: (received: number, total: number) => void): Promise<string> {
   const info = await checkUpdate();
   if (!info) throw new Error("NO_UPDATE");
   // The digest is the only thing standing between us and running a foreign binary,
@@ -110,27 +110,69 @@ export async function downloadUpdate(): Promise<string> {
   const res = await fetch(info.url, { headers: UA, redirect: "follow" });
   if (!res.ok || !res.body) throw new Error(`download ${res.status}`);
 
-  // Hash while streaming: the installer is ~57 MB and never needs to sit in memory.
+  // Hash while streaming: the installer is ~70 MB and never needs to sit in memory.
+  // It is written beside the launch path and only moved onto it once verified, so the
+  // path the host executes never holds a partial or unchecked file.
   const hash = createHash("sha256");
   const dest = updatePath();
-  await pipeline(
-    Readable.fromWeb(res.body as any),
-    async function* (source: AsyncIterable<Buffer>) {
-      for await (const chunk of source) {
-        hash.update(chunk);
-        yield chunk;
-      }
-    },
-    createWriteStream(dest),
-  );
-
-  if (hash.digest("hex").toLowerCase() !== info.sha256.toLowerCase()) {
-    try {
-      rmSync(dest, { force: true });
-    } catch {
-      /* ignore */
-    }
-    throw new Error("HASH_MISMATCH");
+  const part = `${dest}.part`;
+  const total = Number(res.headers.get("content-length")) || info.size || 0;
+  let received = 0;
+  rmSync(dest, { force: true });
+  try {
+    await pipeline(
+      Readable.fromWeb(res.body as any),
+      async function* (source: AsyncIterable<Buffer>) {
+        for await (const chunk of source) {
+          hash.update(chunk);
+          received += chunk.length;
+          onProgress?.(received, total);
+          yield chunk;
+        }
+      },
+      createWriteStream(part),
+    );
+    if (hash.digest("hex").toLowerCase() !== info.sha256.toLowerCase()) throw new Error("HASH_MISMATCH");
+    renameSync(part, dest);
+  } finally {
+    rmSync(part, { force: true });
   }
   return dest;
+}
+
+/** Where a download started by `startUpdateDownload` stands, for the window to draw. */
+export type UpdateJob = {
+  phase: "idle" | "downloading" | "ready" | "failed";
+  received: number;
+  total: number;
+  error: string;
+};
+
+let job: UpdateJob = { phase: "idle", received: 0, total: 0, error: "" };
+
+/**
+ * Starts the download and answers at once. The transfer runs inside this process and
+ * off the host's single channel, so the app keeps working while it comes down; the
+ * window follows it through `updateStatus`.
+ */
+export function startUpdateDownload(): UpdateJob {
+  if (job.phase === "downloading") return job;
+  job = { phase: "downloading", received: 0, total: 0, error: "" };
+  downloadUpdate((received, total) => {
+    job.received = received;
+    job.total = total;
+  }).then(
+    () => {
+      job.phase = "ready";
+    },
+    (e) => {
+      job.phase = "failed";
+      job.error = (e as Error).message;
+    },
+  );
+  return job;
+}
+
+export function updateStatus(): UpdateJob {
+  return job;
 }

@@ -34,6 +34,7 @@ import { DownloadIcon, ShareIcon } from "../components/icons";
 import { useT } from "../lib/i18n";
 import { prefetchAfter } from "../lib/previewStore";
 import type { AlbumPhoto } from "./Albums";
+import "../styles/Shared.css";
 
 export type SharedItem = {
   uid: string;
@@ -50,6 +51,18 @@ export type SharedItem = {
 };
 
 export type Tab = "by" | "with";
+
+/** An invitation to someone else's photo or album, as the sidecar reads it. */
+export type Invitation = {
+  uid: string;
+  from: string;
+  /** False when the sender's signature does not hold: the address is only what it claims. */
+  verified: boolean;
+  name: string;
+  type: string;
+  role: string;
+  time: number;
+};
 
 /**
  * Sharing, served entirely by the SDK (`iterateSharedNodes` / `...WithMe`).
@@ -72,6 +85,8 @@ export function Shared({
   initial,
   onCount,
   onData,
+  invitations = [],
+  onInvitationAnswered,
 }: {
   cellSize: number;
   tab: Tab;
@@ -85,6 +100,9 @@ export function Shared({
   onCount?: (n: number | null) => void;
   /** The fresh read, so the shell's snapshot keeps up with this view. */
   onData?: (rows: SharedItem[]) => void;
+  /** Invitations waiting for an answer, shown over what is shared with the reader. */
+  invitations?: Invitation[];
+  onInvitationAnswered?: (uid: string) => void;
 }) {
   const t = useT();
   const [items, setItems] = useState<SharedItem[]>(initial ?? []);
@@ -100,6 +118,8 @@ export function Shared({
   // result line. The album cards keep the manage/stop menu above; this is for photos.
   const [photoMenu, setPhotoMenu] = useState<MenuAt<string> | null>(null);
   const [busy, setBusy] = useState(false);
+  // The invitation being answered, so its two buttons cannot be pressed again meanwhile.
+  const [answering, setAnswering] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   // Revoking the last share drops the node off this list, so it is re-read rather
   // than patched: only the server knows what is still shared.
@@ -319,6 +339,22 @@ export function Shared({
     : [];
 
   const current = lightboxIdx !== null ? photos[lightboxIdx] : null;
+  const pending = tab === "with" ? invitations : [];
+
+  /** Accepting puts the album among the ones shared with the reader, so the list is read again. */
+  async function answer(invitation: Invitation, accept: boolean) {
+    if (answering) return;
+    setAnswering(invitation.uid);
+    try {
+      await rpc(accept ? "acceptInvitation" : "declineInvitation", { uid: invitation.uid });
+      onInvitationAnswered?.(invitation.uid);
+      if (accept) reload();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAnswering(null);
+    }
+  }
 
   return (
     <>
@@ -356,7 +392,44 @@ export function Shared({
         <>
           {loading && <PhotoGridSkeleton count={12} cellSize={cellSize} />}
 
-          {!loading && items.length === 0 && !error && (
+          {pending.length > 0 && (
+            <section className="inv-box">
+              <div className="inv-head">{t("shared.pendingInvitations")}</div>
+              {pending.map((inv) => (
+                <div className="inv-row" key={inv.uid}>
+                  <span className="inv-avatar" aria-hidden>
+                    {(inv.from || "?").charAt(0).toUpperCase()}
+                  </span>
+                  <span className="inv-text">
+                    <span className="inv-from">{inv.from || "?"}</span>
+                    <span className="inv-what">
+                      {t(inv.type === "photo" ? "shared.invitedToPhoto" : "shared.invitedToAlbum")}
+                      {inv.name && <b>{inv.name}</b>}
+                    </span>
+                    {!inv.verified && <span className="inv-warn">{t("shared.senderUnverified")}</span>}
+                  </span>
+                  <span className="inv-actions">
+                    <button
+                      className="cf-btn inv-decline"
+                      disabled={answering !== null}
+                      onClick={() => void answer(inv, false)}
+                    >
+                      {t("shared.decline")}
+                    </button>
+                    <button
+                      className="cf-btn primary"
+                      disabled={answering !== null}
+                      onClick={() => void answer(inv, true)}
+                    >
+                      {t("shared.accept")}
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </section>
+          )}
+
+          {!loading && items.length === 0 && pending.length === 0 && !error && (
             <div className="g-empty">
               <p className="g-empty-title">
                 {tab === "by" ? t("shared.emptyByTitle") : t("shared.emptyWithTitle")}

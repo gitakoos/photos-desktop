@@ -60,6 +60,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager};
+
+use crate::notices::{notice_text, Notice};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 /// The sidebar entry's name, and the mark that tells our bookmark from the user's own.
@@ -2625,138 +2627,6 @@ fn answer(d: &Arc<Drive>, request: &mut Request) -> Answer {
 
 // ---- Saying what a delete did ----
 
-/// What a delete in the file manager actually did to the library. The file manager itself
-/// says it deletes "permanently", which is never true here, so the app says what was.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-enum Notice {
-    Trashed,
-    LeftAlbum(String),
-    Unfavorited,
-    AlbumDeleted(String),
-    /// Dragged out of `Trash/` back onto the timeline or into an album.
-    Restored,
-    /// A delete in `Trash/`, refused: it stays in the Proton trash.
-    TrashKept,
-    /// Something dropped into `Shared/` or `Trash/`, which take nothing.
-    ReadOnly,
-}
-
-/// The notice's title and text, in the app's language: `{n}` is how many photos, `{album}`
-/// the album's name.
-fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'static str) {
-    let i = match notice {
-        Notice::Trashed => 0,
-        Notice::LeftAlbum(_) => 1,
-        Notice::Unfavorited => 2,
-        Notice::AlbumDeleted(_) => 3,
-        Notice::Restored => 4,
-        Notice::TrashKept => 5,
-        Notice::ReadOnly => 6,
-    };
-    let table: [(&str, &str); 7] = match lang {
-        "hu" => [
-            ("A Proton kukájába került ({n})", "Ha tévedés volt, 30 napon belül visszaállíthatod a Trash mappából."),
-            ("Kikerült a(z) „{album}” albumból ({n})", "Csak az albumból: a fotók a Photos mappában megvannak."),
-            ("Kikerült a kedvencek közül ({n})", "A fotók a Photos mappában megvannak."),
-            ("A(z) „{album}” album törölve", "A fotói a Photos mappában megvannak."),
-            ("Visszaállítva a kukából ({n})", "A fotók újra a Photos mappában vannak."),
-            ("A Proton kukájában maradt ({n})", "A Trash mappából a Fájlokban semmi nem törlődik. Visszaállításhoz húzd a Photos mappába, a kukát az appban ürítheted."),
-            ("Ide nem lehet feltölteni ({n})", "A Shared és a Trash mappa csak olvasható. A fotókat a Photos mappába vagy egy albummappába húzd."),
-        ],
-        "de" => [
-            ("In den Proton-Papierkorb verschoben ({n})", "Falls das ein Versehen war: innerhalb von 30 Tagen aus Trash wiederherstellen."),
-            ("Aus „{album}“ entfernt ({n})", "Nur aus dem Album: die Fotos sind weiterhin in Photos."),
-            ("Aus den Favoriten entfernt ({n})", "Die Fotos sind weiterhin in Photos."),
-            ("Album „{album}“ gelöscht", "Seine Fotos sind weiterhin in Photos."),
-            ("Aus dem Papierkorb wiederhergestellt ({n})", "Die Fotos sind wieder in Photos."),
-            ("Im Proton-Papierkorb behalten ({n})", "Aus Trash wird in Dateien nichts gelöscht. Zum Wiederherstellen nach Photos ziehen; geleert wird der Papierkorb in der App."),
-            ("Hier kann nichts hinzugefügt werden ({n})", "Shared und Trash sind schreibgeschützt. Fotos nach Photos oder in einen Albumordner ziehen."),
-        ],
-        "es" => [
-            ("Movido a la papelera de Proton ({n})", "Si fue un error, restáuralo desde Trash en 30 días."),
-            ("Quitado de «{album}» ({n})", "Solo del álbum: las fotos siguen en Photos."),
-            ("Quitado de Favoritos ({n})", "Las fotos siguen en Photos."),
-            ("Álbum «{album}» eliminado", "Sus fotos siguen en Photos."),
-            ("Restaurado de la papelera ({n})", "Las fotos vuelven a estar en Photos."),
-            ("Se queda en la papelera de Proton ({n})", "Desde Archivos no se elimina nada de Trash. Para restaurar, arrastra a Photos; la papelera se vacía en la app."),
-            ("Aquí no se puede añadir nada ({n})", "Shared y Trash son de solo lectura. Suelta las fotos en Photos o en la carpeta de un álbum."),
-        ],
-        "fr" => [
-            ("Placé dans la corbeille Proton ({n})", "En cas d'erreur, restaurez depuis Trash sous 30 jours."),
-            ("Retiré de « {album} » ({n})", "Seulement de l'album : les photos restent dans Photos."),
-            ("Retiré des favoris ({n})", "Les photos restent dans Photos."),
-            ("Album « {album} » supprimé", "Ses photos restent dans Photos."),
-            ("Restauré depuis la corbeille ({n})", "Les photos sont de retour dans Photos."),
-            ("Conservé dans la corbeille Proton ({n})", "Rien n'est supprimé de Trash depuis Fichiers. Pour restaurer, faites glisser vers Photos ; la corbeille se vide dans l'app."),
-            ("Rien ne peut être ajouté ici ({n})", "Shared et Trash sont en lecture seule. Déposez les photos dans Photos ou dans le dossier d'un album."),
-        ],
-        "it" => [
-            ("Spostato nel cestino di Proton ({n})", "Se è stato un errore, ripristina da Trash entro 30 giorni."),
-            ("Rimosso da «{album}» ({n})", "Solo dall'album: le foto sono ancora in Photos."),
-            ("Rimosso dai preferiti ({n})", "Le foto sono ancora in Photos."),
-            ("Album «{album}» eliminato", "Le sue foto sono ancora in Photos."),
-            ("Ripristinato dal cestino ({n})", "Le foto sono di nuovo in Photos."),
-            ("Rimasto nel cestino di Proton ({n})", "Da File non si elimina nulla da Trash. Per ripristinare trascina in Photos; il cestino si svuota nell'app."),
-            ("Qui non si può aggiungere nulla ({n})", "Shared e Trash sono di sola lettura. Trascina le foto in Photos o nella cartella di un album."),
-        ],
-        "nl" => [
-            ("Naar de Proton-prullenbak verplaatst ({n})", "Was dat een vergissing? Herstel binnen 30 dagen vanuit Trash."),
-            ("Uit ‘{album}’ gehaald ({n})", "Alleen uit het album: de foto's staan nog in Photos."),
-            ("Uit favorieten gehaald ({n})", "De foto's staan nog in Photos."),
-            ("Album ‘{album}’ verwijderd", "De foto's staan nog in Photos."),
-            ("Hersteld uit de prullenbak ({n})", "De foto's staan weer in Photos."),
-            ("In de Proton-prullenbak gebleven ({n})", "Uit Trash wordt in Bestanden niets verwijderd. Sleep naar Photos om te herstellen; legen doe je in de app."),
-            ("Hier kan niets worden toegevoegd ({n})", "Shared en Trash zijn alleen-lezen. Zet foto's in Photos of in een albummap."),
-        ],
-        "pl" => [
-            ("Przeniesiono do kosza Proton ({n})", "Jeśli to pomyłka, przywróć z Trash w ciągu 30 dni."),
-            ("Usunięto z albumu „{album}” ({n})", "Tylko z albumu: zdjęcia nadal są w Photos."),
-            ("Usunięto z ulubionych ({n})", "Zdjęcia nadal są w Photos."),
-            ("Usunięto album „{album}”", "Jego zdjęcia nadal są w Photos."),
-            ("Przywrócono z kosza ({n})", "Zdjęcia znów są w Photos."),
-            ("Pozostało w koszu Proton ({n})", "W Plikach nic nie jest usuwane z Trash. Aby przywrócić, przeciągnij do Photos; kosz opróżnisz w aplikacji."),
-            ("Tu nie można nic dodać ({n})", "Shared i Trash są tylko do odczytu. Upuść zdjęcia w Photos lub w folderze albumu."),
-        ],
-        "cs" => [
-            ("Přesunuto do koše Proton ({n})", "Pokud to byla chyba, obnovte je z Trash do 30 dní."),
-            ("Odebráno z alba „{album}“ ({n})", "Jen z alba: fotky jsou dál v Photos."),
-            ("Odebráno z oblíbených ({n})", "Fotky jsou dál v Photos."),
-            ("Album „{album}“ smazáno", "Jeho fotky jsou dál v Photos."),
-            ("Obnoveno z koše ({n})", "Fotky jsou zpět v Photos."),
-            ("Zůstalo v koši Proton ({n})", "Ze složky Trash se v Souborech nic nemaže. Pro obnovení přetáhněte do Photos; koš vyprázdníte v aplikaci."),
-            ("Sem nelze nic přidat ({n})", "Shared a Trash jsou jen pro čtení. Fotky přetáhněte do Photos nebo do složky alba."),
-        ],
-        "sk" => [
-            ("Presunuté do koša Proton ({n})", "Ak to bola chyba, obnovte ich z Trash do 30 dní."),
-            ("Odobraté z albumu „{album}“ ({n})", "Len z albumu: fotky sú ďalej v Photos."),
-            ("Odobraté z obľúbených ({n})", "Fotky sú ďalej v Photos."),
-            ("Album „{album}“ vymazaný", "Jeho fotky sú ďalej v Photos."),
-            ("Obnovené z koša ({n})", "Fotky sú späť v Photos."),
-            ("Zostalo v koši Proton ({n})", "Z priečinka Trash sa v Súboroch nič nemaže. Na obnovenie potiahnite do Photos; kôš vyprázdnite v aplikácii."),
-            ("Sem nemožno nič pridať ({n})", "Shared a Trash sú len na čítanie. Fotky potiahnite do Photos alebo do priečinka albumu."),
-        ],
-        "sl" => [
-            ("Premaknjeno v Protonov koš ({n})", "Če je bila pomota, jih v 30 dneh obnovite iz Trash."),
-            ("Odstranjeno iz albuma »{album}« ({n})", "Samo iz albuma: fotografije so še vedno v Photos."),
-            ("Odstranjeno iz priljubljenih ({n})", "Fotografije so še vedno v Photos."),
-            ("Album »{album}« izbrisan", "Njegove fotografije so še vedno v Photos."),
-            ("Obnovljeno iz koša ({n})", "Fotografije so spet v Photos."),
-            ("Ostalo v Protonovem košu ({n})", "Iz mape Trash se v Datotekah nič ne izbriše. Za obnovitev povlecite v Photos; koš izpraznite v aplikaciji."),
-            ("Sem ni mogoče ničesar dodati ({n})", "Shared in Trash sta samo za branje. Fotografije spustite v Photos ali v mapo albuma."),
-        ],
-        _ => [
-            ("Moved to the Proton trash ({n})", "If that was a mistake, restore from Trash within 30 days."),
-            ("Removed from “{album}” ({n})", "Only from the album: the photos are still in Photos."),
-            ("Removed from Favorites ({n})", "The photos are still in Photos."),
-            ("Album “{album}” deleted", "Its photos are still in Photos."),
-            ("Restored from the trash ({n})", "The photos are back in Photos."),
-            ("Kept in the Proton trash ({n})", "Nothing is deleted from Trash in Files. To restore, drag into Photos; empty the trash in the app."),
-            ("Nothing can be added here ({n})", "Shared and Trash are read-only. Drop photos into Photos or an album's folder."),
-        ],
-    };
-    table[i]
-}
-
 /// The app's language: the one chosen in its settings, else the system's, else English.
 pub(crate) fn app_language(app: &AppHandle) -> String {
     crate::page_setting(app, "lang")
@@ -3438,31 +3308,6 @@ mod tests {
         }
         assert_eq!(*order.lock().unwrap(), vec![1, 0]);
         assert_eq!(slots.0.state.lock().unwrap().running, 0);
-    }
-
-    #[test]
-    fn every_language_says_what_a_delete_did() {
-        let notices = [
-            Notice::Trashed,
-            Notice::LeftAlbum("a".into()),
-            Notice::Unfavorited,
-            Notice::AlbumDeleted("a".into()),
-            Notice::Restored,
-            Notice::TrashKept,
-            Notice::ReadOnly,
-        ];
-        for lang in ["en", "hu", "de", "es", "fr", "it", "nl", "pl", "cs", "sk", "sl", "xx"] {
-            for notice in &notices {
-                let (title, body) = notice_text(lang, notice);
-                assert!(!title.is_empty() && !body.is_empty(), "{lang} {notice:?}");
-                let counted = !matches!(notice, Notice::AlbumDeleted(_));
-                assert_eq!(title.contains("{n}"), counted, "{lang} {notice:?}");
-                let named = matches!(notice, Notice::LeftAlbum(_) | Notice::AlbumDeleted(_));
-                assert_eq!(title.contains("{album}"), named, "{lang} {notice:?}");
-            }
-        }
-        // An unknown language reads English.
-        assert_eq!(notice_text("xx", &Notice::Trashed), notice_text("en", &Notice::Trashed));
     }
 
     #[test]

@@ -42,7 +42,7 @@
 }
 .ir-day {
   padding: 0 5px;
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 .ir-day.none {
@@ -51,13 +51,15 @@
 }
 .ir-already {
   padding: 0 5px;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--status-synced);
 }
 
 /* The album switch and the hint share the picker's footer with its two buttons. */
 .ir-foot {
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 .ir-option {
   display: inline-flex;
@@ -68,7 +70,7 @@
   cursor: pointer;
 }
 .ir-hint {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--fg-mute);
   margin-right: 6px;
 }

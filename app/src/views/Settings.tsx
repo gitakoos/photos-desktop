@@ -20,19 +20,49 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { rpc } from "../lib/rpc";
-import { isNewer } from "../components/UpdateBanner";
+import { isNewer } from "../lib/version";
+import { START_UPDATE_EVENT } from "../components/UpdateOverlay";
 import { isWindows } from "../lib/platform";
 import { Confirm } from "../components/Confirm";
-import { CloseIcon, OpenInNewIcon } from "../components/icons";
+import {
+  BrushIcon,
+  CalendarIcon,
+  CloudIcon,
+  DownloadIcon,
+  FaceIcon,
+  FolderOpenIcon,
+  GearIcon,
+  HeartIcon,
+  ImageIcon,
+  InfoIcon,
+  LabelIcon,
+  ListIcon,
+  LockIcon,
+  NavAlbumsIcon,
+  NavSharedIcon,
+  OpenInNewIcon,
+  OpenWindowIcon,
+  PaletteIcon,
+  PencilIcon,
+  PersonAddIcon,
+  PhoneIcon,
+  PowerIcon,
+  RefreshIcon,
+  SearchIcon,
+  TextIcon,
+  TrashIcon,
+  TuneIcon,
+} from "../components/icons";
+import type { DriveCollections } from "../components/Library";
 import { formatBytes } from "../components/ProfileMenu";
 import { unpinAllOffline, watchOffline, type OfflineStatus } from "../lib/offline";
-import { applyTheme, PALETTES, resolvedMode, type PaletteKey, type ThemeMode } from "../lib/theme";
+import { applyTheme, PICKABLE_PALETTES, resolvedMode, type PaletteKey, type ThemeMode } from "../lib/theme";
 import { BROWSER_LANG, LANGS, useLang, useT, type Lang } from "../lib/i18n";
 import "../styles/Settings.css";
 
@@ -55,14 +85,22 @@ export type AppSettings = {
   zoom: number;
   /** Album-list zoom step, an index into the album card-size ladder (0 = smallest, the default). */
   albumZoom: number;
-  /** Opt-in desktop layout: a collapsible left sidebar in place of the bottom dock. Off by default. */
+  /** The desktop layout: the collapsible left sidebar and the top strip. Always on; the earlier
+   *  bottom dock layout is no longer offered. */
   sidebarLayout: boolean;
   /** Whether that sidebar is collapsed to an icon rail. Persisted so it reopens as it was left. */
   sidebarCollapsed: boolean;
-  /** Album UIDs pinned to the top of the sidebar's Albums list, in pin order. Capped at five. */
-  pinnedAlbums: string[];
-  /** Album UIDs in most-recently-opened order, so the sidebar can surface the latest below the pins. */
-  recentAlbums: string[];
+  /** Pure black behind everything in dark mode, beside whichever palette. */
+  amoled: boolean;
+  /** Read the people the phone saved to Drive. */
+  driveFaces: boolean;
+  /** Read the labels the phone saved to Drive. */
+  driveLabels: boolean;
+  /** Search by what a photo shows, from the index the phone saved to Drive. Off until asked for:
+   *  it downloads the text model. */
+  semanticSearch: boolean;
+  /** Which "what's new" this reader has closed, so it shows once per version that has one. */
+  whatsNewSeen: string;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -74,10 +112,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   lang: BROWSER_LANG,
   zoom: 1,
   albumZoom: 0,
-  sidebarLayout: false,
+  sidebarLayout: true,
   sidebarCollapsed: false,
-  pinnedAlbums: [],
-  recentAlbums: [],
+  amoled: false,
+  driveFaces: true,
+  driveLabels: true,
+  semanticSearch: false,
+  whatsNewSeen: "",
 };
 
 const THEMES: { value: ThemeMode; labelKey: string }[] = [
@@ -88,6 +129,7 @@ const THEMES: { value: ThemeMode; labelKey: string }[] = [
 
 type Category =
   | "general"
+  | "phone"
   | "appearance"
   | "storage"
   | "explorer"
@@ -102,6 +144,7 @@ type Category =
  */
 const CATEGORIES: { key: Category; labelKey: string }[] = [
   { key: "general", labelKey: "settings.general" },
+  { key: "phone", labelKey: "settings.phone" },
   { key: "appearance", labelKey: "settings.appearance" },
   { key: "storage", labelKey: "settings.storage" },
   ...(isWindows
@@ -116,6 +159,18 @@ const CATEGORIES: { key: Category; labelKey: string }[] = [
   { key: "security", labelKey: "settings.security" },
   { key: "about", labelKey: "settings.about" },
 ];
+
+/** Each category's mark in the rail, drawn like the sidebar's destinations. */
+const CATEGORY_ICONS: Record<Category, ReactNode> = {
+  general: <GearIcon size={17} />,
+  phone: <PhoneIcon size={17} />,
+  appearance: <PaletteIcon size={17} />,
+  storage: <CloudIcon size={17} />,
+  explorer: <FolderOpenIcon size={17} />,
+  fileTypes: <ImageIcon size={17} />,
+  security: <LockIcon size={17} />,
+  about: <InfoIcon size={17} />,
+};
 
 type Usage = { bytes: number; photos: number };
 
@@ -344,6 +399,9 @@ function StoragePane({
           {/* Automatic downloads run through the Explorer mount, so with the mount off
               the switch says why instead of sitting there doing nothing when flipped. */}
           <label className={`st-row${explorer ? "" : " off"}`}>
+            <span className="st-row-ico" aria-hidden>
+              <DownloadIcon size={18} />
+            </span>
             <div className="st-text">
               <div className="st-label">{t("settings.autoDownload")}</div>
               <div className="st-desc">
@@ -434,6 +492,9 @@ function FileTypesPane() {
   return (
     <div className="st-rows">
       <label className="st-row">
+        <span className="st-row-ico" aria-hidden>
+          <OpenWindowIcon size={18} />
+        </span>
         <div className="st-text">
           <div className="st-label">{t("settings.openWith")}</div>
           <div className="st-desc">{t("settings.openWithDesc")}</div>
@@ -452,6 +513,9 @@ function FileTypesPane() {
           choice from the user alone, so this is a way to the page that owns it
           rather than a control that could make it. */}
       <div className="st-row">
+        <span className="st-row-ico" aria-hidden>
+          <ImageIcon size={18} />
+        </span>
         <div className="st-text">
           <div className="st-label">{t("settings.defaultApp")}</div>
           <div className="st-desc">{t("settings.defaultAppDesc")}</div>
@@ -568,6 +632,9 @@ function FilesDrivePane() {
   return (
     <div className="st-rows">
       <label className="st-row">
+        <span className="st-row-ico" aria-hidden>
+          <FolderOpenIcon size={18} />
+        </span>
         <div className="st-text">
           <div className="st-label">{t("settings.filesDriveShow")}</div>
           <div className="st-desc">{t("settings.filesDriveShowDesc")}</div>
@@ -582,6 +649,9 @@ function FilesDrivePane() {
       </label>
       {drive?.enabled && (
         <label className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <PencilIcon size={18} />
+          </span>
           <div className="st-text">
             <div className="st-label">{t("settings.filesDriveEdits")}</div>
             <div className="st-desc">{t("settings.filesDriveEditsDesc")}</div>
@@ -599,6 +669,9 @@ function FilesDrivePane() {
       )}
       {drive?.enabled && (
         <label className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <CalendarIcon size={18} />
+          </span>
           <div className="st-text">
             <div className="st-label">{t("settings.filesDriveByDate")}</div>
             <div className="st-desc">{t("settings.filesDriveByDateDesc")}</div>
@@ -616,6 +689,9 @@ function FilesDrivePane() {
       )}
       {drive?.enabled && (
         <div className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <CloudIcon size={18} />
+          </span>
           <div className="st-text">
             <div className="st-label">{t("settings.filesDriveServer")}</div>
             <div className="st-desc">{t("settings.filesDriveServerDesc")}</div>
@@ -664,6 +740,9 @@ function FilesDrivePane() {
       )}
       {drive?.enabled && drive.address && (
         <div className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <FolderOpenIcon size={18} />
+          </span>
           <div className="st-text">
             <div className="st-label">{t("settings.filesDriveAddress")}</div>
             <div className="st-desc">{t("settings.filesDriveAddressDesc")}</div>
@@ -682,14 +761,18 @@ export function Settings({
   settings,
   onChange,
   onClose,
+  drive,
+  onDriveRefresh,
 }: {
   settings: AppSettings;
   onChange: (next: AppSettings) => void;
   onClose: () => void;
+  /** What was last read from the phone's copies on Drive, and when. */
+  drive?: { state: "loading" | "failed" | "ready"; data: DriveCollections | null; at: number } | null;
+  onDriveRefresh?: () => void;
 }) {
   const t = useT();
   const { setLang } = useLang();
-  const [category, setCategory] = useState<Category>("general");
   const [langOpen, setLangOpen] = useState(false);
   const [version, setVersion] = useState("");
   // A vault this Windows account opens has no password, so there is nothing to lock behind.
@@ -724,14 +807,10 @@ export function Settings({
     }
   }
 
-  async function installUpdate() {
-    setCheckState("installing");
-    try {
-      await rpc<string>("downloadUpdate");
-      await invoke("run_updater"); // the app exits here; the installer takes over
-    } catch {
-      setCheckState("error");
-    }
+  // The update itself runs on the window's own card, the same one a start shows.
+  function installUpdate() {
+    window.dispatchEvent(new Event(START_UPDATE_EVENT));
+    onClose();
   }
 
   // The "show in File Explorer" preference lives outside the (vault-encrypted)
@@ -740,6 +819,7 @@ export function Settings({
   // its switch at the default and then flips it.
   const [showExplorer, setShowExplorer] = useState(true);
   const [autoDownload, setAutoDownload] = useState(false);
+  const [explorerEdits, setExplorerEdits] = useState(true);
   // Starting with Windows is a registry entry rather than a stored setting, for the
   // same reason: Windows has to be able to read it with nobody signed in.
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
@@ -749,6 +829,7 @@ export function Settings({
   useEffect(() => {
     void invoke<boolean>("show_in_explorer").then(setShowExplorer).catch(() => {});
     void invoke<boolean>("auto_download").then(setAutoDownload).catch(() => {});
+    void invoke<boolean>("explorer_edits").then(setExplorerEdits).catch(() => {});
     void invoke<boolean>("launch_at_login").then(setLaunchAtLogin).catch(() => {});
     void invoke<boolean>("keep_running").then(setKeepRunning).catch(() => {});
   }, []);
@@ -762,13 +843,18 @@ export function Settings({
   }, [onClose]);
 
   function pickTheme(theme: ThemeMode) {
-    applyTheme(theme, settings.palette); // repaint immediately, before the write round-trips
+    applyTheme(theme, settings.palette, settings.amoled); // repaint immediately, before the write round-trips
     onChange({ ...settings, theme });
   }
 
   function pickPalette(palette: PaletteKey) {
-    applyTheme(settings.theme, palette); // repaint immediately, before the write round-trips
+    applyTheme(settings.theme, palette, settings.amoled); // repaint immediately, before the write round-trips
     onChange({ ...settings, palette });
+  }
+
+  function pickAmoled(on: boolean) {
+    applyTheme(settings.theme, settings.palette, on);
+    onChange({ ...settings, amoled: on });
   }
 
   // Swatch fill reflects what the palette looks like in the active mode; AMOLED
@@ -781,37 +867,31 @@ export function Settings({
   }
 
   return (
-    <div className="st-backdrop" onClick={onClose}>
-      <div className="st-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="st-head">
-          <h2 className="st-title">{t("settings.title")}</h2>
-          <button className="st-x" onClick={onClose} title={t("common.close")}>
-            <CloseIcon size={15} />
-          </button>
-        </div>
+    <section className="st-page" aria-label={t("settings.title")}>
+      <header className="st-page-head">
+        <span className="st-page-ico" aria-hidden>
+          <GearIcon size={22} />
+        </span>
+        <h2 className="st-page-title">{t("settings.title")}</h2>
+      </header>
 
-        <div className="st-body">
-          <nav className="st-nav" aria-label={t("settings.title")}>
-            {CATEGORIES.map((c) => (
-              <button
-                key={c.key}
-                className={`st-nav-item${category === c.key ? " on" : ""}`}
-                aria-current={category === c.key ? "page" : undefined}
-                onClick={() => setCategory(c.key)}
-              >
-                {t(c.labelKey)}
-              </button>
-            ))}
-          </nav>
-
-          <div className="st-content">
-            <h3 className="st-pane-title">
-              {t(CATEGORIES.find((c) => c.key === category)!.labelKey)}
+      <div className="st-page-body">
+        {/* One page, every part under its own heading, the way the system settings read. */}
+        {CATEGORIES.map(({ key: category, labelKey }) => (
+          <section className="st-section" key={category}>
+            <h3 className="st-section-title">
+              <span className="st-section-ico" aria-hidden>
+                {CATEGORY_ICONS[category]}
+              </span>
+              {t(labelKey)}
             </h3>
 
             {category === "appearance" && (
               <div className="st-rows">
                 <div className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <BrushIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.theme")}</div>
                     <div className="st-desc">{t("settings.themeDesc")}</div>
@@ -831,25 +911,20 @@ export function Settings({
                 </div>
 
                 <div className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <PaletteIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.palette")}</div>
                     <div className="st-desc">{t("settings.paletteDesc")}</div>
                   </div>
                   <div className="st-swatches" role="group" aria-label={t("settings.palette")}>
-                    {PALETTES.map((p) => (
+                    {PICKABLE_PALETTES.map((p) => (
                       <button
                         key={p.key}
                         type="button"
                         className={`st-swatch${settings.palette === p.key ? " on" : ""}`}
-                        style={
-                          {
-                            "--sw": p.surfaces
-                              ? p.surfaces.bg0
-                              : light
-                                ? p.light.accent
-                                : p.dark.accent,
-                          } as CSSProperties
-                        }
+                        style={{ "--sw": light ? p.light.accent : p.dark.accent } as CSSProperties}
                         aria-pressed={settings.palette === p.key}
                         aria-label={t(p.labelKey)}
                         title={t(p.labelKey)}
@@ -859,7 +934,27 @@ export function Settings({
                   </div>
                 </div>
 
+                <label className={`st-row${light ? " off" : ""}`}>
+                  <span className="st-row-ico" aria-hidden>
+                    <TuneIcon size={18} />
+                  </span>
+                  <div className="st-text">
+                    <div className="st-label">{t("settings.palette.amoled")}</div>
+                    <div className="st-desc">{t("settings.amoledDesc")}</div>
+                  </div>
+                  <input
+                    className="st-switch"
+                    type="checkbox"
+                    checked={settings.amoled}
+                    disabled={light}
+                    onChange={(e) => pickAmoled(e.currentTarget.checked)}
+                  />
+                </label>
+
                 <div className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <TextIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.language")}</div>
                     <div className="st-desc">{t("settings.languageDesc")}</div>
@@ -909,22 +1004,6 @@ export function Settings({
                     )}
                   </div>
                 </div>
-
-                {/* Disabled for now: the sidebar layout is still being reworked, so users
-                    cannot switch to it yet. Marked in-progress until it is ready. */}
-                <label className="st-row" style={{ opacity: 0.55 }}>
-                  <div className="st-text">
-                    <div className="st-label">{t("settings.sidebarLayout")} (in progress)</div>
-                    <div className="st-desc">{t("settings.sidebarLayoutDesc")}</div>
-                  </div>
-                  <input
-                    className="st-switch"
-                    type="checkbox"
-                    checked={settings.sidebarLayout}
-                    disabled
-                    onChange={(e) => onChange({ ...settings, sidebarLayout: e.currentTarget.checked })}
-                  />
-                </label>
               </div>
             )}
 
@@ -939,11 +1018,18 @@ export function Settings({
               />
             )}
 
+            {category === "phone" && (
+              <PhonePane settings={settings} onChange={onChange} drive={drive ?? null} onRefresh={onDriveRefresh} />
+            )}
+
             {category === "general" && (
               <div className="st-rows">
                 {/* Starting at sign-in. Windows starts in the tray; Linux has no tray,
                     so there it opens the window, and the text says which. */}
                 <label className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <PowerIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">
                       {t(isWindows ? "settings.launchAtLogin" : "settings.launchAtLoginLinux")}
@@ -971,6 +1057,9 @@ export function Settings({
                 {/* Linux only: Windows always keeps running in the tray. */}
                 {!isWindows && (
                   <label className="st-row">
+                    <span className="st-row-ico" aria-hidden>
+                      <PowerIcon size={18} />
+                    </span>
                     <div className="st-text">
                       <div className="st-label">{t("settings.keepRunning")}</div>
                       <div className="st-desc">{t("settings.keepRunningDesc")}</div>
@@ -990,6 +1079,9 @@ export function Settings({
                   </label>
                 )}
                 <label className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <NavAlbumsIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.hideAlbum")}</div>
                     <div className="st-desc">{t("settings.hideAlbumDesc")}</div>
@@ -1011,6 +1103,9 @@ export function Settings({
             {category === "explorer" && isWindows && (
               <div className="st-rows">
                 <label className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <FolderOpenIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.showInExplorer")}</div>
                     <div className="st-desc">{t("settings.showInExplorerDesc")}</div>
@@ -1028,6 +1123,28 @@ export function Settings({
                   />
                 </label>
 
+                {showExplorer && (
+                  <label className="st-row">
+                    <span className="st-row-ico" aria-hidden>
+                      <PencilIcon size={18} />
+                    </span>
+                    <div className="st-text">
+                      <div className="st-label">{t("settings.filesDriveEdits")}</div>
+                      <div className="st-desc">{t("settings.explorerEditsDesc")}</div>
+                    </div>
+                    <input
+                      className="st-switch"
+                      type="checkbox"
+                      checked={explorerEdits}
+                      onChange={(e) => {
+                        const on = e.currentTarget.checked;
+                        setExplorerEdits(on);
+                        void invoke("set_explorer_edits", { enabled: on }).catch(() => {});
+                      }}
+                    />
+                  </label>
+                )}
+
                 {restartNeeded && (
                   <div className="st-restart">
                     <span>{t("settings.restartNeeded")}</span>
@@ -1044,6 +1161,9 @@ export function Settings({
             {category === "security" && vaultMode === "device" && (
               <div className="st-rows">
                 <div className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <LockIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.deviceProtected")}</div>
                     <div className="st-desc">{t("settings.deviceProtectedDesc")}</div>
@@ -1055,6 +1175,9 @@ export function Settings({
             {category === "security" && vaultMode !== "device" && (
               <div className="st-rows">
                 <label className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <LockIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.lockOnHide")}</div>
                     <div className="st-desc">{t("settings.lockOnHideDesc")}</div>
@@ -1081,6 +1204,9 @@ export function Settings({
                       build updates through Flatpak, so it offers no in-app update. */}
                   {isWindows && (
                     <div className="st-row">
+                      <span className="st-row-ico" aria-hidden>
+                        <RefreshIcon size={18} />
+                      </span>
                       <div className="st-text">
                         <div className="st-label">{t("settings.checkUpdates")}</div>
                         <div className="st-desc">
@@ -1117,6 +1243,9 @@ export function Settings({
                   className="st-row st-row-link"
                   onClick={() => void openUrl("https://akoos.eu")}
                 >
+                  <span className="st-row-ico" aria-hidden>
+                    <PersonAddIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">Akoos</div>
                     <div className="st-desc">{t("settings.authorRole")}</div>
@@ -1128,6 +1257,9 @@ export function Settings({
                   className="st-row st-row-link"
                   onClick={() => void openUrl("https://www.buymeacoffee.com/akoos")}
                 >
+                  <span className="st-row-ico" aria-hidden>
+                    <HeartIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.support")}</div>
                     <div className="st-desc">{t("settings.supportDesc")}</div>
@@ -1139,6 +1271,9 @@ export function Settings({
                   className="st-row st-row-link"
                   onClick={() => void openUrl("https://www.photosforproton.eu")}
                 >
+                  <span className="st-row-ico" aria-hidden>
+                    <NavSharedIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.website")}</div>
                     <div className="st-desc st-mono">www.photosforproton.eu</div>
@@ -1150,6 +1285,9 @@ export function Settings({
                   className="st-row st-row-link"
                   onClick={() => void openUrl("https://github.com/gitakoos/photos-desktop")}
                 >
+                  <span className="st-row-ico" aria-hidden>
+                    <ListIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.sourceCode")}</div>
                     <div className="st-desc st-mono">github.com/gitakoos/photos-desktop</div>
@@ -1158,6 +1296,9 @@ export function Settings({
                 </button>
 
                 <label className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <InfoIcon size={18} />
+                  </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.debug")}</div>
                     <div className="st-desc">{t("settings.debugDesc")}</div>
@@ -1172,9 +1313,215 @@ export function Settings({
                 </div>
               </>
             )}
+          </section>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type ModelStatus =
+  | { state: "absent" }
+  | { state: "downloading"; done: number; total: number }
+  | { state: "ready" }
+  | { state: "failed"; error: string };
+
+const megabytes = (bytes: number) => `${Math.round(bytes / 1_000_000)} MB`;
+
+/**
+ * What this computer takes from the copies the phone saves to Proton Drive: the people, the
+ * labels, and the index for searching by what a photo shows, each on its own switch. The search
+ * needs the text model the phone's index was made for, fetched when the switch is turned on.
+ */
+function PhonePane({
+  settings,
+  onChange,
+  drive,
+  onRefresh,
+}: {
+  settings: AppSettings;
+  onChange: (next: AppSettings) => void;
+  drive: { state: "loading" | "failed" | "ready"; data: DriveCollections | null; at: number } | null;
+  onRefresh?: () => void;
+}) {
+  const t = useT();
+  const { lang } = useLang();
+  const [model, setModel] = useState<ModelStatus | null>(null);
+
+  // Read now, and every moment while it downloads.
+  useEffect(() => {
+    let live = true;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const status = await rpc<ModelStatus>("semanticModelStatus");
+        if (!live) return;
+        setModel(status);
+        if (status.state === "downloading") timer = window.setTimeout(poll, 600);
+      } catch {
+        /* the pane shows nothing about the model */
+      }
+    };
+    void poll();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [model?.state === "downloading"]);
+
+  async function startDownload() {
+    try {
+      setModel(await rpc<ModelStatus>("semanticModelDownload"));
+    } catch (e) {
+      setModel({ state: "failed", error: String(e) });
+    }
+  }
+
+  function setSearch(on: boolean) {
+    onChange({ ...settings, semanticSearch: on });
+    if (on && model?.state !== "ready" && model?.state !== "downloading") void startDownload();
+  }
+
+  async function removeModel() {
+    try {
+      setModel(await rpc<ModelStatus>("semanticModelRemove"));
+    } catch {
+      /* stays as it was */
+    }
+  }
+
+  const data = drive?.data ?? null;
+  const date = new Intl.DateTimeFormat(lang, { dateStyle: "medium", timeStyle: "short" });
+  const kindName = (kind: "faces" | "labels" | "search") =>
+    t(kind === "faces" ? "library.people" : kind === "labels" ? "library.labels" : "settings.kindSearch");
+
+  let searchLine = "";
+  if (settings.semanticSearch) {
+    if (model?.state === "downloading") {
+      searchLine = t("settings.semanticDownloading", { done: megabytes(model.done), total: megabytes(model.total) });
+    } else if (model?.state === "failed") {
+      searchLine = t("settings.semanticFailed");
+    } else if (model?.state === "ready" && data) {
+      searchLine = data.searchPhotos
+        ? t("settings.semanticReady", { count: data.searchPhotos.toLocaleString(lang) })
+        : data.searchOtherModel
+          ? t("settings.semanticOtherModel")
+          : t("settings.semanticNoIndex");
+    }
+  }
+
+  return (
+    <>
+      <p className="st-intro">{t("settings.phoneIntro")}</p>
+      <div className="st-rows">
+        <label className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <FaceIcon size={18} />
+          </span>
+          <div className="st-text">
+            <div className="st-label">{t("settings.drivePeople")}</div>
+            <div className="st-desc">{t("settings.drivePeopleDesc")}</div>
           </div>
+          <input
+            className="st-switch"
+            type="checkbox"
+            checked={settings.driveFaces}
+            onChange={(e) => onChange({ ...settings, driveFaces: e.currentTarget.checked })}
+          />
+        </label>
+        <label className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <LabelIcon size={18} />
+          </span>
+          <div className="st-text">
+            <div className="st-label">{t("settings.driveLabels")}</div>
+            <div className="st-desc">{t("settings.driveLabelsDesc")}</div>
+          </div>
+          <input
+            className="st-switch"
+            type="checkbox"
+            checked={settings.driveLabels}
+            onChange={(e) => onChange({ ...settings, driveLabels: e.currentTarget.checked })}
+          />
+        </label>
+        <label className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <SearchIcon size={18} />
+          </span>
+          <div className="st-text">
+            <div className="st-label">{t("settings.semantic")}</div>
+            <div className="st-desc">{t("settings.semanticDesc")}</div>
+            {searchLine && <div className="st-desc st-status">{searchLine}</div>}
+            {settings.semanticSearch && model?.state === "downloading" && (
+              <div className="st-progress">
+                <div style={{ width: `${Math.round((model.done / Math.max(1, model.total)) * 100)}%` }} />
+              </div>
+            )}
+          </div>
+          <input
+            className="st-switch"
+            type="checkbox"
+            checked={settings.semanticSearch}
+            onChange={(e) => setSearch(e.currentTarget.checked)}
+          />
+        </label>
+        {settings.semanticSearch && model?.state === "failed" && (
+          <div className="st-row off">
+            <div className="st-text">
+              <div className="st-desc">{t("settings.semanticFailed")}</div>
+            </div>
+            <button className="st-row-btn" onClick={() => void startDownload()}>
+              {t("settings.semanticRetry")}
+            </button>
+          </div>
+        )}
+        {!settings.semanticSearch && model?.state === "ready" && (
+          <div className="st-row off">
+            <span className="st-row-ico" aria-hidden>
+              <TrashIcon size={18} />
+            </span>
+            <div className="st-text">
+              <div className="st-label">{t("settings.semanticRemove")}</div>
+              <div className="st-desc">{t("settings.semanticRemoveDesc")}</div>
+            </div>
+            <button className="st-row-btn" onClick={() => void removeModel()}>
+              {t("settings.semanticRemoveAction")}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="st-rows st-rows-gap">
+        <div className="st-row off">
+          <span className="st-row-ico" aria-hidden>
+            <CloudIcon size={18} />
+          </span>
+          <div className="st-text">
+            <div className="st-label">{t("settings.phoneSources")}</div>
+            {data && data.sources.length > 0 ? (
+              data.sources.map((source, i) => (
+                <div className="st-desc" key={`${source.kind}-${source.device}-${i}`}>
+                  {t("settings.phoneSaved", {
+                    kind: kindName(source.kind),
+                    device: source.device,
+                    date: date.format(new Date(source.savedAt)),
+                  })}
+                </div>
+              ))
+            ) : (
+              <div className="st-desc">
+                {drive?.state === "loading" ? t("settings.phoneChecking") : t("settings.phoneNothing")}
+              </div>
+            )}
+            {drive?.at ? (
+              <div className="st-desc st-status">{t("settings.phoneChecked", { date: date.format(new Date(drive.at)) })}</div>
+            ) : null}
+          </div>
+          <button className="st-row-btn" disabled={drive?.state === "loading"} onClick={() => onRefresh?.()}>
+            {drive?.state === "loading" ? t("settings.phoneChecking") : t("settings.phoneCheck")}
+          </button>
         </div>
       </div>
-    </div>
+    </>
   );
 }

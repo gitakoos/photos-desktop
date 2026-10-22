@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.0.0"
+version = "1.1.0"
 description = "Photos for Proton, desktop"
 authors = ["Akoos"]
 edition = "2021"
@@ -119,6 +119,13 @@ windows = { version = "0.61", features = [
   # IShellItemImageFactory::GetImage returns its picture as an HBITMAP, and the
   # windows crate gates that one method behind the GDI feature that names the type.
   "Win32_Graphics_Gdi",
+  # The user's display language, for a notification sent before the window has said
+  # which language it is in.
+  "Win32_Globalization",
+  # The notification that says what a delete in File Explorer did: Explorer itself says
+  # "permanently", and the photo went to the Proton trash.
+  "UI_Notifications",
+  "Data_Xml_Dom",
 ] }
 # Registers the "Proton Photos" folder as a Windows Cloud Filter sync root so it
 # shows in the Explorer navigation pane (files-on-demand comes later).

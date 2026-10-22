@@ -20,17 +20,18 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+/* The app's own dark surfaces and default accent, so the installer reads as part of it. */
 :root {
+  --frame-bg: #19191b;
   --page-bg: #0e0e0f;
   --surface: #1c1c1e;
-  --surface-2: #262629;
+  --surface-2: #3a3a3c;
   --border: #2c2c2e;
-  --line: rgba(255, 255, 255, 0.08);
   --fg: #ecebf3;
   --fg-dim: #a4a1b4;
   --fg-mute: #6b6880;
   --accent: #8b7cff;
-  --accent-2: #6957d7;
+  --accent-wash: rgba(139, 124, 255, 0.18);
   --danger: #ff6b5e;
 }
 
@@ -46,7 +47,7 @@ body,
 }
 
 body {
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   background: transparent;
   color: var(--fg);
   user-select: none;
@@ -57,29 +58,32 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: radial-gradient(120% 100% at 50% 0%, #16131f 0%, var(--page-bg) 60%);
+  background: var(--frame-bg);
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
 }
 
 .titlebar {
-  height: 36px;
+  height: 38px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding: 0 10px;
+  padding: 0 8px;
 }
 .tb-close {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border: none;
   background: transparent;
   color: var(--fg-dim);
-  border-radius: 7px;
+  border-radius: 8px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
 }
 .tb-close:hover {
   background: rgba(255, 255, 255, 0.08);
@@ -89,9 +93,9 @@ body {
 .body {
   flex: 1;
   display: flex;
-  padding: 8px 34px 16px;
+  padding: 4px 32px 10px;
   /* The window is a fixed size and cannot be resized, so anything that does not fit
-     used to be cut off in silence. Scrolling is the honest failure. */
+     scrolls rather than being cut off. */
   overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
@@ -106,37 +110,50 @@ body {
      that drops the keyword. */
   justify-content: center;
   justify-content: safe center;
+  animation: rise 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .step.center {
   align-items: center;
   text-align: center;
 }
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
 
 .logo {
-  width: 108px;
-  height: 108px;
+  width: 84px;
+  height: 84px;
+}
+.logo.small {
+  width: 56px;
+  height: 56px;
 }
 .title {
-  margin-top: 14px;
-  font-size: 27px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  margin-top: 16px;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 .sub {
-  margin-top: 8px;
+  margin-top: 6px;
   max-width: 380px;
   font-size: 14px;
   line-height: 1.5;
   color: var(--fg-dim);
 }
 .sub-left {
-  margin: -8px 0 22px;
+  margin: -10px 0 18px;
   font-size: 13px;
   color: var(--fg-dim);
 }
 .hint {
   margin-top: 10px;
-  font-size: 12px;
+  max-width: 360px;
+  font-size: 12.5px;
+  line-height: 1.45;
   color: var(--fg-mute);
 }
 .path {
@@ -150,42 +167,52 @@ body {
 }
 .h2 {
   font-size: 20px;
-  font-weight: 650;
-  margin-bottom: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 18px;
 }
 
 .btn {
-  height: 40px;
-  padding: 0 20px;
-  border-radius: 9px;
+  height: 38px;
+  padding: 0 22px;
+  border-radius: 999px;
   border: 1px solid transparent;
+  font: inherit;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: filter 0.12s, background 0.12s;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    filter 0.15s ease,
+    transform 0.12s ease;
+}
+.btn:not(:disabled):active {
+  transform: scale(0.97);
 }
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
 }
 .btn.primary {
-  background: var(--accent-2);
+  background: var(--accent);
   color: #fff;
 }
 .btn.primary:not(:disabled):hover {
-  background: var(--accent);
+  filter: brightness(1.08);
 }
 .btn.wide {
-  margin-top: 20px;
-  min-width: 200px;
+  margin-top: 22px;
+  min-width: 180px;
 }
 .btn.ghost {
   background: var(--surface);
-  border-color: var(--line);
+  border-color: var(--border);
   color: var(--fg);
 }
 .btn.ghost:hover {
-  background: var(--surface-2);
+  border-color: rgba(139, 124, 255, 0.5);
+  background: rgba(139, 124, 255, 0.07);
 }
 .btn.danger {
   background: var(--danger);
@@ -194,40 +221,58 @@ body {
 .btn.danger:hover {
   filter: brightness(1.06);
 }
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
-.field-label {
-  font-size: 12px;
-  color: var(--fg-mute);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-bottom: 8px;
+/* ---- Options: grouped rows, as in the app's settings ---- */
+.group-label {
   display: block;
+  margin: 16px 0 8px 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-dim);
 }
-.field-label.mt {
-  margin-top: 16px;
+.sub-left + .group-label {
+  margin-top: 0;
 }
-
-/* ---- Options ---- */
+.rows {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--page-bg);
+}
 .opt {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
-  padding: 6px 0;
+  gap: 16px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
   cursor: pointer;
+}
+.rows > .opt:first-child {
+  border-top: none;
+}
+.opt-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 .opt-label {
   font-size: 14px;
   line-height: 24px; /* the switch height, so the two align */
 }
 .opt-desc {
-  padding-right: 56px; /* clear of the switch above it */
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.45;
   color: var(--fg-dim);
 }
 
-/* A real checkbox, restyled as a switch (same idea as the app's .st-switch). */
+/* A real checkbox, restyled as a switch (same as the app's .st-switch). */
 .opt-switch {
   flex: 0 0 auto;
   appearance: none;
@@ -235,10 +280,12 @@ body {
   width: 42px;
   height: 24px;
   border-radius: 999px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   background: var(--surface-2);
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
 }
 .opt-switch::after {
   content: "";
@@ -248,19 +295,18 @@ body {
   width: 16px;
   height: 16px;
   border-radius: 999px;
-  background: var(--fg-mute);
-  transition: transform 0.15s ease, background 0.15s ease;
+  background: var(--fg-dim);
+  transition:
+    transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 0.15s ease;
 }
 .opt-switch:checked {
-  background: var(--accent-2);
-  border-color: var(--accent-2);
+  background: var(--accent);
+  border-color: var(--accent);
 }
 .opt-switch:checked::after {
   transform: translateX(18px);
   background: #fff;
-}
-.opt:hover .opt-switch:not(:checked) {
-  background: var(--border);
 }
 .opt-switch:focus-visible {
   outline: 2px solid var(--accent);
@@ -269,31 +315,28 @@ body {
 
 /* ---- About ---- */
 .about {
-  margin-top: 14px;
-  padding-top: 13px;
-  border-top: 1px solid var(--line);
+  margin-top: 22px;
   max-width: 430px;
 }
 .about-what {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--fg-dim);
 }
 .about-links {
-  margin-top: 5px;
-  font-size: 12px;
+  margin-top: 4px;
+  font-size: 12.5px;
   color: var(--fg-mute);
 }
 /* Shown on every screen, so it sits in the window's chrome rather than in a step.
-   --fg-mute would land it at 3.4:1 on this background, under the 4.5:1 floor; this
-   clears the floor while staying a step below body text, which is where fine print
-   belongs. */
+   --fg-mute would land under the 4.5:1 contrast floor here; this clears it while
+   staying a step below body text. */
 .legal {
   flex: 0 0 auto;
   padding: 0 40px 14px;
   font-size: 11px;
   line-height: 1.5;
   text-align: center;
-  color: #837f95;
+  color: #8a869b;
 }
 
 .link {
@@ -315,52 +358,36 @@ body {
 
 .footer {
   margin-top: auto;
-  padding-top: 26px;
+  padding-top: 18px;
   display: flex;
   justify-content: space-between;
   gap: 10px;
 }
 .center-footer {
   /* Only to override .footer's margin-top:auto, which would push the footer to the
-     bottom of the window: a centred screen wants it with the content. The gap above
-     it is .footer's own padding-top, and doubling that with a margin here cost 26px
-     on every centred screen, which the window, fixed and not resizable, has none of
-     to spare. */
+     bottom of the window: a centred screen wants it with the content. */
   margin-top: 0;
   justify-content: center;
 }
 
-.spinner {
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  border: 3px solid rgba(139, 124, 255, 0.22);
-  border-top-color: var(--accent);
-  animation: spin 0.8s linear infinite;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
 .working-text {
-  margin-top: 18px;
-  font-size: 15px;
+  margin-top: 16px;
+  font-size: 14px;
   color: var(--fg-dim);
 }
 .bar {
-  margin-top: 16px;
-  width: 260px;
-  height: 5px;
-  border-radius: 3px;
+  margin-top: 14px;
+  width: 240px;
+  height: 4px;
+  border-radius: 999px;
   background: var(--surface);
   overflow: hidden;
 }
 .bar-fill {
   height: 100%;
   width: 40%;
-  border-radius: 3px;
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  border-radius: 999px;
+  background: var(--accent);
   animation: slide 1.1s ease-in-out infinite;
 }
 @keyframes slide {
@@ -373,20 +400,19 @@ body {
 }
 
 .checkmark {
-  width: 62px;
-  height: 62px;
+  width: 56px;
+  height: 56px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 30px;
-  color: #fff;
-  background: var(--accent-2);
-  margin-bottom: 18px;
+  font-size: 26px;
+  color: var(--accent);
+  background: var(--accent-wash);
+  margin-bottom: 16px;
 }
 .checkmark.err {
-  background: var(--danger);
-  color: #2a0d0a;
-  box-shadow: none;
+  color: var(--danger);
+  background: rgba(255, 107, 94, 0.14);
 }
 .err-text {
   max-width: 400px;
@@ -395,4 +421,15 @@ body {
   font-family: ui-monospace, Consolas, monospace;
   user-select: text;
   word-break: break-word;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step,
+  .bar-fill {
+    animation: none;
+  }
+}
+
+.h2.tight {
+  margin: 14px 0 0;
 }

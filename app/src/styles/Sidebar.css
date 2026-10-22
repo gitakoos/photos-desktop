@@ -20,19 +20,16 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* The opt-in left navigation: a full-height rail, flush to the window edge, that
-   collapses to an icon-only strip. The floating-card look it started as read as a
-   widget dropped onto the page; sitting flush against the content is what makes it
-   read as the window's own chrome, the way the Proton Drive desktop rail does. */
+/* The left navigation: part of the window's frame, the same colour as the title strip
+   above it, with the page's panel beside it. It collapses to an icon-only strip. */
 .g-sidebar {
   flex: 0 0 auto;
   width: 232px;
   display: flex;
   flex-direction: column;
-  padding: 14px 12px 12px;
-  background: var(--surface-deep);
-  border-right: 1px solid var(--border);
-  transition: width 0.18s ease;
+  padding: 2px 12px 12px;
+  background: transparent;
+  transition: width 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
   overflow: hidden;
 }
 
@@ -40,187 +37,16 @@
   width: 68px;
 }
 
-/* ---- Head: the brand and the collapse toggle ----
-   In this layout the rail carries the wordmark and the title bar drops its own copy
-   (see App.css), so this is the only brand on screen. The head also drags the window,
-   since the title bar shrinks to the three window buttons in the corner. */
-.g-sb-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  height: 34px;
-  padding: 0 4px;
-  margin-bottom: 16px;
+/* ---- The menu button that folds the rail, then the destinations ---- */
+.g-sb-menu {
+  margin-bottom: 6px;
+  color: var(--fg-dim);
 }
 
-.g-sidebar.collapsed .g-sb-head {
-  justify-content: center;
-  padding: 0;
-}
-
-.g-sb-logo {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  flex: 0 0 auto;
-}
-
-.g-sb-brand {
-  flex: 1;
-  min-width: 0;
-  font-size: 14.5px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--fg-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.g-sidebar.collapsed .g-sb-logo,
-.g-sidebar.collapsed .g-sb-brand {
-  display: none;
-}
-
-.g-sb-toggle {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--fg-mute);
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-
-.g-sb-toggle:hover {
-  background: var(--line-06);
-  color: var(--fg-primary);
-}
-
-/* The double chevron points left to fold the rail; when the rail is a strip it turns
-   round to point back out, so the one control reads as both collapse and expand. */
-.g-sb-toggle svg {
-  transition: transform 0.18s ease;
-}
-
-.g-sidebar.collapsed .g-sb-toggle svg {
-  transform: rotate(180deg);
-}
-
-/* ---- Upload: the primary action and the activity readout at once ----
-   Moved here from the top bar in this layout. It carries the transfer/index/sync status
-   that used to ride on the account avatar, so a glance at the one bright control says both
-   "start an upload" and "here is what is moving". A drag over the window turns it into a
-   drop target. The lift and coloured glow are what set it apart as the primary action. */
-/* Laid out exactly like a nav row below it (same height, gap, padding, radius and a
-   left-aligned label), just filled with the accent so it still reads as the one action
-   among the destinations. */
-.g-sb-upload {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 13px;
-  height: 40px;
-  margin-bottom: 12px;
-  padding: 0 12px;
-  border: none;
-  border-radius: 10px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
-  text-align: left;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  transition: background 0.12s ease;
-}
-
-.g-sb-upload:hover {
-  background: var(--accent-2);
-}
-
-.g-sb-upload .g-sb-ico {
-  color: #fff;
-}
-
-/* A transfer keeps its arrow and pulses; a background job (index, sync) spins its ring. */
-.g-sb-upload.busy .g-sb-ico {
-  animation: g-uploadpulse 1.1s ease-in-out infinite;
-}
-
-.g-sb-upload.spin .g-sb-ico {
-  animation: g-spin 0.9s linear infinite;
-}
-
-/* An indeterminate sliver along the foot, so "working" reads even when the count holds
-   still for a moment. */
-.g-sb-progress {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.18);
-}
-
-.g-sb-progress::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 40%;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.92);
-  animation: g-sb-indeterminate 1.15s ease-in-out infinite;
-}
-
-/* Dragging a file over the window: the button says where it can land, without covering
-   its own label, so the invitation stays legible on the gradient. */
-.g-sb-upload.drop {
-  outline: 2px dashed rgba(255, 255, 255, 0.9);
-  outline-offset: -4px;
-  filter: brightness(1.1);
-}
-
-@keyframes g-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes g-sb-indeterminate {
-  0% {
-    left: -42%;
-  }
-  100% {
-    left: 100%;
-  }
-}
-
-.g-sidebar.collapsed .g-sb-upload {
-  justify-content: center;
-  padding: 0;
-  gap: 0;
-}
-
-.g-sidebar.collapsed .g-sb-upload .g-sb-label {
-  display: none;
-}
-
-/* The one line that tells a first-time user files can be dropped, not only picked. It
-   sits just under the button in the open rail and steps out while anything is moving. */
-.g-sb-drophint {
-  margin: -7px 6px 13px;
-  font-size: 11px;
-  line-height: 1.3;
-  color: var(--fg-mute);
-  text-align: center;
+.g-sb-split {
+  height: 1px;
+  margin: 6px 10px;
+  background: var(--line);
 }
 
 /* ---- Navigation ---- */
@@ -254,10 +80,25 @@
   color: var(--fg-primary);
 }
 
+.g-sb-item {
+  position: relative;
+}
+
 .g-sb-item.sel {
-  background: var(--accent-wash);
-  color: var(--accent);
+  background: var(--line-hover);
+  color: var(--fg-primary);
   font-weight: 600;
+}
+
+.g-sb-item.sel::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 11px;
+  bottom: 11px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .g-sb-ico {
@@ -270,190 +111,40 @@
 
 .g-sb-label {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.g-sidebar.collapsed .g-sb-item {
-  justify-content: center;
-  padding: 0;
-  gap: 0;
-}
-
-.g-sidebar.collapsed .g-sb-label {
-  display: none;
-}
-
-/* ---- Albums row: folds the album list out in place ---- */
-.g-sb-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.g-sb-caret {
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  margin-right: -4px;
-  border-radius: 6px;
-  color: var(--fg-mute);
-  cursor: pointer;
-}
-
-.g-sb-caret:hover {
-  background: var(--line-06);
-  color: var(--fg-primary);
-}
-
-.g-sb-caret svg {
-  transition: transform 0.16s ease;
-}
-
-.g-sb-caret.open svg {
-  transform: rotate(90deg);
-}
-
-/* The list hangs off the Albums row with a hairline guide, like a small tree. */
-.g-sb-sublist {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin: 3px 0 4px 9px;
-  padding-left: 8px;
-  border-left: 1px solid var(--border);
-  max-height: 320px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
-}
-
-.g-sb-subitem {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 5px 8px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--fg-dim);
-  font-size: 13px;
-  font-weight: 500;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-
-.g-sb-subitem:hover {
-  background: var(--line-06);
-  color: var(--fg-primary);
-}
-
-.g-sb-subitem.sel {
-  background: var(--accent-wash);
-  color: var(--accent);
-}
-
-/* The cover, shown as a small square before the name so the list reads like the grid. */
-.g-sb-subthumb {
-  flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  overflow: hidden;
-  background: var(--bg2);
-  display: grid;
-  place-items: center;
-}
-
-.g-sb-subthumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.g-sb-subname {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The "new album" row leads the list; its thumb slot is a dashed plus, not a cover. */
-.g-sb-subnewbox {
-  background: transparent;
-  border: 1px dashed var(--border);
-  color: var(--fg-mute);
-}
-
-.g-sb-subnew:hover .g-sb-subnewbox {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.g-sb-subhint {
-  padding: 6px 10px;
-  font-size: 12px;
-  color: var(--fg-mute);
-}
-
-/* Each album row pairs its open-button with a pin toggle that rides at the right edge,
-   shown on hover and kept lit for a pinned album. The button reserves room on its right
-   so a long name never runs under the pin. */
-.g-sb-subrow {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-
-.g-sb-subrow .g-sb-subitem {
-  flex: 1 1 auto;
   min-width: 0;
-  padding-right: 26px;
+  overflow: hidden;
+  text-overflow: clip;
+  transition: opacity 0.14s ease;
 }
 
-.g-sb-pin {
-  position: absolute;
-  right: 4px;
-  top: 50%;
-  transform: translateY(-50%);
+/* Folding keeps every icon where it is (a row's padding puts it in the strip's middle at
+   either width) and only fades the words, so nothing jumps while the width moves. */
+.g-sidebar.collapsed .g-sb-label,
+.g-sidebar.collapsed .g-sb-id,
+.g-sidebar.collapsed .g-sb-acctcaret {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* A shortcut's tile icon, and the dot over Shared while an invitation waits. */
+.g-sb-libico {
+  position: relative;
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  color: var(--fg-mute);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
 }
 
-.g-sb-subrow:hover .g-sb-pin {
-  opacity: 0.6;
+.g-sb-dot {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--frame-bg);
 }
 
-.g-sb-pin:hover {
-  opacity: 1;
-  color: var(--accent);
-  background: var(--line-06);
-}
-
-.g-sb-pin.on {
-  opacity: 1;
-  color: var(--accent);
-}
-
-/* A hairline between the pinned group and the recently opened one. */
-.g-sb-subdiv {
-  height: 1px;
-  margin: 5px 10px;
-  background: var(--line-06);
-}
-
-/* ---- Foot: the account ---- */
+/* ---- Foot: the account, opening in place ---- */
 .g-sb-grow {
   flex: 1 1 auto;
   min-height: 12px;
@@ -461,15 +152,46 @@
 
 .g-sb-foot {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 2px 2px;
-  border-top: 1px solid var(--line-06);
+  flex-direction: column;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 
-.g-sidebar.collapsed .g-sb-foot {
-  justify-content: center;
-  padding: 10px 0 2px;
+.g-sb-account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 52px;
+  padding: 0 10px 0 6px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.g-sb-account:hover {
+  background: var(--line-06);
+}
+
+/* Its middle on the icons' column above it, at either width. */
+.g-sb-avatar {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-wash-strong);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .g-sb-id {
@@ -478,19 +200,11 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.g-sidebar.collapsed .g-sb-id {
-  display: none;
+  transition: opacity 0.14s ease;
 }
 
 .g-sb-name {
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--fg-primary);
   white-space: nowrap;
@@ -499,9 +213,119 @@
 }
 
 .g-sb-mail {
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--fg-mute);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Points up while closed (it opens upwards), down once open. */
+.g-sb-acctcaret {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: var(--fg-mute);
+  transform: rotate(-90deg);
+  transition: transform 0.2s ease, opacity 0.14s ease;
+}
+
+.g-sb-foot.open .g-sb-acctcaret {
+  transform: rotate(90deg);
+}
+
+/* The room under the account grows from nothing, which lifts the account as it opens. */
+.g-sb-acctbody {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.g-sb-foot.open .g-sb-acctbody {
+  grid-template-rows: 1fr;
+}
+
+.g-sb-acctinner {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.g-sb-storage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 10px;
+}
+
+.g-sb-storagerow {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+  white-space: nowrap;
+}
+
+.g-sb-storagerow:first-child {
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+
+.g-sb-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-hover);
+  overflow: hidden;
+}
+
+.g-sb-barfill {
+  height: 100%;
+  border-radius: 2px;
+}
+
+.g-sb-acctitem {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  height: 38px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.g-sb-acctitem:hover {
+  background: var(--line-06);
+  color: var(--fg-primary);
+}
+
+.g-sb-acctitem.danger {
+  color: var(--error);
+}
+
+.g-sb-acctitem.danger:hover {
+  background: rgba(var(--error-rgb), 0.12);
+  color: var(--error);
+}
+
+/* Light mode: the words a shade darker and the pick a clear step, so the frame does not
+   read washed out on a white page. */
+:root[data-theme="light"] .g-sb-item {
+  color: var(--fg-soft);
+}
+:root[data-theme="light"] .g-sb-item.sel {
+  background: rgba(0, 0, 0, 0.075);
+  color: var(--fg-primary);
+}
+:root[data-theme="light"] .g-sb-item:hover:not(.sel) {
+  background: rgba(0, 0, 0, 0.045);
 }

@@ -1,0 +1,99 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* Invitations to someone else's photos, over what is already shared with the reader:
+   a box of rows, each with who sent it, what it is for, and the two answers. */
+.inv-box {
+  margin: 4px 0 18px;
+  border: 0.5px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.inv-head {
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  border-bottom: 0.5px solid var(--border);
+}
+.inv-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  padding: 12px 16px;
+}
+.inv-row + .inv-row {
+  border-top: 0.5px solid var(--border);
+}
+.inv-avatar {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 600;
+}
+.inv-text {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.inv-from {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  overflow-wrap: anywhere;
+}
+.inv-what {
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.inv-what b {
+  margin-left: 6px;
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+.inv-warn {
+  font-size: 12.5px;
+  color: var(--status-pending);
+}
+.inv-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+.cf-btn.inv-decline {
+  color: var(--status-error);
+}
+.inv-actions .cf-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
