@@ -82,9 +82,6 @@ const UPLOADABLE: &[&str] = &[
     "mov", "m4v", "webm", "mkv", "3gp",
 ];
 
-/// Photos per listing request. Small, because the enumeration shares the sidecar's
-/// background lane with the thumbnails the open window is waiting on.
-const PAGE: u64 = 8;
 /// A listing older than this is rebuilt in the background when the file manager next
 /// looks, which is what picks up changes made on other devices.
 const STALE_AFTER: Duration = Duration::from_secs(5 * 60);
@@ -872,13 +869,20 @@ fn build(d: &Drive) {
     // shows photos while a large library is still being read. A later rebuild is made on
     // the side and swapped in whole, so nothing a user is looking at blinks out meanwhile.
     let first = d.index.read().unwrap().photos.is_empty();
+    // The first listing is what the file manager waits on, so the window says it is under
+    // way; a later rebuild is a quiet check and names nothing.
+    let _doing = first.then(|| crate::cloud_mount::Doing::new(&d.app, "fill", None, None));
     let mut fresh = Index::default();
     let mut offset = 0u64;
+    // Sized the way the Explorer folder's fill is: a cold page resolves every photo in it
+    // over the network and starts small, one answered from cache costs milliseconds.
+    let mut size = crate::cloud_mount::POPULATE_PAGE_MIN;
     loop {
+        let asked = Instant::now();
         let page = match crate::sidecar_rpc(
             &d.app,
             "listForMount",
-            serde_json::json!({ "offset": offset, "limit": PAGE }),
+            serde_json::json!({ "offset": offset, "limit": size }),
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -914,15 +918,19 @@ fn build(d: &Drive) {
         } else {
             fill(&mut fresh);
         }
-        offset += PAGE;
+        offset += size;
+        if first {
+            crate::cloud_mount::fill_progress(&d.app, offset.min(total), total);
+        }
         if total == 0 || offset >= total {
             break;
         }
         if d.session.load(Ordering::SeqCst) != session {
             return;
         }
-        // Room for the window's own requests between pages.
-        std::thread::sleep(Duration::from_millis(100));
+        let (next, rest) = crate::cloud_mount::next_populate_page(size, asked.elapsed());
+        size = next;
+        std::thread::sleep(rest);
     }
 
     let albums = match crate::sidecar_rpc(&d.app, "listAlbumsForMount", serde_json::json!({})) {
@@ -1138,7 +1146,7 @@ fn sweep_hydrated(d: &Drive, all: bool) {
 /// The photo's bytes as they download through the sidecar, or reused from a moment ago.
 /// `size` is the size listed for it, which is how its download is known to be complete
 /// without asking.
-fn hydrated_file(d: &Drive, uid: &str, size: u64) -> Result<Growing, String> {
+fn hydrated_file(d: &Drive, uid: &str, name: &str, size: u64) -> Result<Growing, String> {
     // One download per photo at a time: a player's run of ranged requests all share it.
     let gate = d.hydrating.lock().unwrap().entry(uid.to_string()).or_default().clone();
     let _held = gate.lock().unwrap();
@@ -1188,8 +1196,11 @@ fn hydrated_file(d: &Drive, uid: &str, size: u64) -> Result<Growing, String> {
     let watched = progress.clone();
     let watch_path = path.clone();
     let app = d.app.clone();
+    let name = name.to_string();
     std::thread::spawn(move || {
         let _slot = slot;
+        // The window says what is downloading for the file manager, as it does for Explorer.
+        let _doing = crate::cloud_mount::Doing::new(&app, "open", Some(name), None);
         let path_text = watch_path.to_string_lossy().into_owned();
         loop {
             std::thread::sleep(Duration::from_millis(300));
@@ -2007,7 +2018,7 @@ fn get(d: &Drive, request: &Request, segs: &[String], head: bool) -> Answer {
                 let r = with(r, "Accept-Ranges", "bytes");
                 return with(r, "ETag", &etag_of(&uid, size));
             }
-            match hydrated_file(d, &uid, size) {
+            match hydrated_file(d, &uid, &name, size) {
                 Ok(file) => send_file(request, file, size, &name, time_ms, etag_of(&uid, size)),
                 Err(_) => text(503, "Photos for Proton could not download this photo"),
             }

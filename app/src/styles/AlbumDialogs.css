@@ -48,80 +48,217 @@
   justify-content: flex-end;
 }
 
-.ad-list {
-  max-height: 260px;
-  margin: 10px 0 20px;
-  overflow-y: auto;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-}
-
-.ad-row {
+/* ---- The album picker: a wider panel of cover cards under a search ---- */
+.cf-panel.ad-picker {
+  width: min(760px, 92vw);
+  height: min(80vh, 760px);
   display: flex;
-  width: 100%;
-  align-items: center;
+  flex-direction: column;
+  padding: 22px 24px 24px;
+}
+.ad-picker .cf-title {
+  font-size: 18px;
+}
+.ad-picker .cf-msg {
+  font-size: 13.5px;
+}
+.ad-picker-head {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 12px;
+}
+.ad-picker-titles {
+  min-width: 0;
+}
+.ad-close {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  margin: -4px -6px 0 0;
   border: 0;
-  border-bottom: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.ad-close:hover {
+  background: var(--line-soft);
+  color: var(--fg-primary);
+}
+
+.ad-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  margin: 4px 0 18px;
+  padding: 0 8px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--page-bg);
+  color: var(--fg-dim);
+}
+.ad-search:focus-within {
+  border-color: var(--accent);
+}
+.ad-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border: 0;
   background: transparent;
   color: var(--fg-primary);
-  font-size: 13px;
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.ad-search-clear {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.ad-search-clear:hover {
+  background: var(--line-soft);
+  color: var(--fg-primary);
+}
+
+.ad-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(156px, 1fr));
+  align-content: start;
+  gap: 20px 14px;
+  margin: 0 -4px;
+  padding: 0 4px 4px;
+  scrollbar-width: thin;
+}
+.ad-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-primary);
   text-align: left;
   cursor: pointer;
 }
-.ad-row:last-child {
-  border-bottom: 0;
-}
-.ad-row:hover:not(:disabled) {
-  background: var(--line-soft);
-}
-.ad-row:disabled {
+.ad-card:disabled {
   opacity: 0.5;
   cursor: default;
 }
-
-.ad-row-name {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.ad-row-count {
-  flex: none;
-  color: var(--fg-dim);
-  font-size: 12.5px;
-}
-
-.ad-new {
-  display: flex;
+.ad-cover {
+  position: relative;
+  display: grid;
+  place-items: center;
   width: 100%;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  margin: 4px 0 0;
-  padding: 0 12px;
-  border-radius: 10px;
-  border: 1px dashed var(--border);
-  background: transparent;
-  color: var(--fg-primary);
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
+  aspect-ratio: 1 / 1;
+  margin-bottom: 6px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--bg2);
 }
-.ad-new:hover:not(:disabled) {
+/* The hover ring is drawn inside the cover, so the scroller never clips it and nothing
+   is scaled (a scaled cover blurs). */
+.ad-cover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 2px transparent;
+  transition: box-shadow 0.15s ease;
+  pointer-events: none;
+}
+.ad-card:hover:not(:disabled) .ad-cover::after {
+  box-shadow: inset 0 0 0 2.5px var(--accent);
+}
+.ad-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  animation: ad-fade 0.25s ease-out both;
+}
+@keyframes ad-fade {
+  from {
+    opacity: 0;
+  }
+}
+/* While the albums load: cards of the final size, so nothing moves when they arrive. */
+.ad-card.skeleton {
+  pointer-events: none;
+}
+.ad-card.skeleton .ad-cover,
+.ad-skel-line {
+  background-image: linear-gradient(90deg, var(--bg2) 25%, var(--line-06) 37%, var(--bg2) 63%);
+  background-size: 400% 100%;
+  animation: ad-shimmer 1.4s ease infinite;
+}
+.ad-skel-line {
+  display: block;
+  height: 12px;
+  margin: 3px 0 4px;
+  border-radius: 6px;
+}
+.ad-skel-line.short {
+  width: 45%;
+  height: 10px;
+}
+@keyframes ad-shimmer {
+  from {
+    background-position: 100% 50%;
+  }
+  to {
+    background-position: 0 50%;
+  }
+}
+.ad-card.new .ad-cover {
+  border: 1.5px dashed var(--fg-dim);
+  background: transparent;
+  color: var(--fg-dim);
+}
+/* An album with no cover yet: a quiet photo mark instead of an empty square. */
+.ad-cover-empty {
+  color: var(--fg-dim);
+  opacity: 0.6;
+}
+.ad-card.new .ad-cover::after {
+  display: none;
+}
+.ad-card.new:hover:not(:disabled) .ad-cover {
   border-color: var(--accent);
   color: var(--accent);
 }
-.ad-new:disabled {
-  opacity: 0.5;
-  cursor: default;
+.ad-card.new:hover:not(:disabled) .ad-card-name {
+  color: var(--accent);
 }
-
 .ad-new-plus {
-  font-size: 15px;
+  font-size: 34px;
+  font-weight: 300;
   line-height: 1;
+}
+.ad-card-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  font-weight: 600;
+}
+.ad-card-count {
+  color: var(--fg-dim);
+  font-size: 12.5px;
 }
 
 .ad-hint {

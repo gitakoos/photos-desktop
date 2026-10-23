@@ -27,6 +27,7 @@ import { rpc } from "../lib/rpc";
 import { useT } from "../lib/i18n";
 import { isWindows } from "../lib/platform";
 import { isNewer } from "../lib/version";
+import { autoUpdateOn } from "../lib/updatePrefs";
 import logo from "../assets/applogo.png";
 import "../styles/UpdateOverlay.css";
 
@@ -37,6 +38,8 @@ type Job = { phase: "idle" | "downloading" | "ready" | "failed"; received: numbe
 type Step = "none" | "downloading" | "waiting" | "installing" | "failed";
 
 const LAST_VERSION_KEY = "pfp.lastVersion";
+/** How long a check stands before the window coming back asks again. */
+const RECHECK_MS = 6 * 60 * 60 * 1000;
 
 function megabytes(bytes: number): string {
   return (bytes / (1024 * 1024)).toFixed(0);
@@ -54,6 +57,8 @@ export function UpdateOverlay() {
   const [version, setVersion] = useState("");
   const [job, setJob] = useState<Job | null>(null);
   const [updated, setUpdated] = useState("");
+  // The host refused the staged installer: its signature or its version did not hold.
+  const [refused, setRefused] = useState(false);
   const running = useRef(false);
   // Which run is current: "Later" or a new run makes an older one stop where it is.
   const generation = useRef(0);
@@ -61,6 +66,7 @@ export function UpdateOverlay() {
   const run = useCallback(async () => {
     if (running.current) return;
     running.current = true;
+    setRefused(false);
     const mine = ++generation.current;
     const stale = () => generation.current !== mine;
     let latest: { version: string } | null = null;
@@ -99,7 +105,11 @@ export function UpdateOverlay() {
       if (stale()) return;
       setStep("installing");
       await new Promise((r) => setTimeout(r, 700));
-      await invoke("run_updater"); // the app exits here; the installer takes over
+      // The app exits here and the installer takes over, unless the host refuses it.
+      await invoke("run_updater").catch((e) => {
+        setRefused(true);
+        throw e;
+      });
     } catch {
       if (stale()) return;
       setStep("failed");
@@ -108,13 +118,22 @@ export function UpdateOverlay() {
   }, []);
 
   // Checked once the window is actually on screen: a start into the tray waits until
-  // it is opened, so nobody is updated out from under a window they cannot see.
+  // it is opened, so nobody is updated out from under a window they cannot see. An app
+  // kept in the tray for days checks again when its window comes back, at most every
+  // RECHECK_MS. With automatic updates off, only Settings starts one.
   useEffect(() => {
     if (!isWindows) return;
     let timer: number | undefined;
+    let checked = 0;
     const go = () => {
+      if (!autoUpdateOn()) return;
       if (document.visibilityState !== "visible" || timer !== undefined) return;
-      timer = window.setTimeout(() => void run(), 2500);
+      if (checked && Date.now() - checked < RECHECK_MS) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        checked = Date.now();
+        void run();
+      }, 2500);
     };
     go();
     document.addEventListener("visibilitychange", go);
@@ -153,7 +172,9 @@ export function UpdateOverlay() {
   }
 
   const fraction = job && job.total > 0 ? Math.min(1, job.received / job.total) : 0;
-  const hashFailed = job?.error === "HASH_MISMATCH" || job?.error === "NO_DIGEST" || job?.error === "BAD_ORIGIN";
+  const hashFailed =
+    refused ||
+    ["HASH_MISMATCH", "NO_DIGEST", "BAD_ORIGIN", "NO_SIGNATURE", "BAD_SIGNATURE"].includes(job?.error ?? "");
 
   return (
     <div className="uo-backdrop">

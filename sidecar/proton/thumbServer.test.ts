@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { request } from "node:http";
 
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
@@ -99,6 +99,26 @@ describe("the loopback thumbnail server", () => {
     expect((await get(base + encodeURIComponent(UID), { method: "POST" })).status).toBe(405);
     expect((await get(base + "..%2F..%2Fsecret")).status).toBe(404);
     expect((await get(base + encodeURIComponent("unknown~uid"))).status).toBe(404);
+  });
+
+  it("tells the source when the webview stops waiting, so a tile scrolled away is not fetched", async () => {
+    let seen: AbortSignal | null = null;
+    const base = await startThumbServer(
+      (_uid, gone) =>
+        new Promise((resolve) => {
+          seen = gone;
+          gone.addEventListener("abort", () => resolve(null));
+        }),
+    );
+    const target = new URL(base + encodeURIComponent(UID));
+    const req = request({ hostname: target.hostname, port: target.port, path: target.pathname });
+    req.on("error", () => {});
+    req.end();
+    await vi.waitFor(() => expect(seen).not.toBeNull());
+
+    req.destroy();
+
+    await vi.waitFor(() => expect(seen!.aborted).toBe(true));
   });
 
   it("stops answering at lock", async () => {

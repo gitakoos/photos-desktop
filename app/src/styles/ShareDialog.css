@@ -25,40 +25,56 @@
    and a list of people do not fit a confirmation's column. */
 
 .sh-panel {
-  width: min(460px, 88vw);
+  width: min(520px, 90vw);
+  padding: 22px 24px 24px;
 }
 
 .sh-head {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  align-items: center;
   gap: 12px;
+  margin-bottom: 4px;
 }
-
+.sh-headicon {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.16);
+  color: var(--accent);
+}
+.sh-headtext {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .sh-title {
   margin: 0 0 2px;
+  font-size: 18px;
 }
 
 /* The name of what is being shared: needed for certainty, never wide enough to
    push the dialog around. */
 .sh-subtitle {
   margin: 0;
-  max-width: 320px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  color: var(--fg-dim);
-  font-size: 12.5px;
+  color: var(--fg-mute);
+  font-size: 13px;
 }
 
 .sh-close {
   flex: none;
+  align-self: flex-start;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
+  margin: -4px -6px 0 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 999px;
   background: transparent;
   color: var(--fg-dim);
   cursor: pointer;
@@ -68,31 +84,55 @@
   color: var(--fg-primary);
 }
 
+/* Each part of the share is a card of its own. */
 .sh-section {
-  margin-top: 18px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border);
+  margin-top: 16px;
+  padding: 16px 16px 18px;
+  border: 0.5px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg2);
+}
+.sh-skel {
+  height: 132px;
+  background-image: linear-gradient(90deg, var(--bg2) 25%, var(--line-06) 37%, var(--bg2) 63%);
+  background-size: 400% 100%;
+  animation: sh-shimmer 1.4s ease infinite;
+}
+.sh-skel.short {
+  height: 118px;
+}
+@keyframes sh-shimmer {
+  from {
+    background-position: 100% 50%;
+  }
+  to {
+    background-position: 0 50%;
+  }
 }
 
 .sh-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0 0 10px;
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--fg-dim);
+  color: var(--fg-primary);
+}
+.sh-heading svg {
+  color: var(--accent);
 }
 
 .sh-note {
-  margin: 0 0 12px;
-  color: var(--fg-dim);
-  font-size: 12.5px;
+  margin: 0 0 14px;
+  color: var(--fg-mute);
+  font-size: 13px;
   line-height: 1.5;
 }
 
 .sh-dim {
   color: var(--fg-dim);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -107,9 +147,9 @@
 .sh-url {
   flex: 1;
   min-width: 0;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 8px;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--page-bg);
   color: var(--fg-primary);
@@ -125,21 +165,23 @@
    what it is set to now, and what may be done about it. The line becomes its
    own editor in place, so the section keeps its height either way. */
 .sh-settings {
-  margin: 0 0 14px;
+  margin: 0 0 12px;
+  border-top: 0.5px solid var(--border);
 }
 
 .sh-setting {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 32px;
-  font-size: 12.5px;
+  min-height: 42px;
+  border-bottom: 0.5px solid var(--border);
+  font-size: 13px;
 }
 
 .sh-setting-name {
   flex: none;
-  width: 76px;
-  color: var(--fg-dim);
+  width: 90px;
+  color: var(--fg-mute);
 }
 
 .sh-setting-value {
@@ -155,14 +197,15 @@
 .sh-date {
   flex: 1;
   min-width: 0;
-  height: 28px;
-  padding: 0 8px;
-  border-radius: 7px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--page-bg);
   color: var(--fg-primary);
-  font-size: 12.5px;
+  font-size: 13px;
   outline: none;
+  color-scheme: dark light;
 }
 .sh-secret:focus,
 .sh-date:focus {
@@ -173,17 +216,19 @@
    button beside it turns red. */
 .sh-mini {
   flex: none;
-  height: 26px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--page-bg);
+  height: 30px;
+  padding: 0 12px;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--pill-bg);
   color: var(--fg-primary);
   font-size: 12.5px;
+  font-weight: 500;
   cursor: pointer;
 }
 .sh-mini:hover:not(:disabled) {
   border-color: var(--accent);
+  color: var(--accent);
 }
 .sh-mini:disabled {
   opacity: 0.5;
@@ -197,11 +242,11 @@
   background: transparent;
   color: var(--fg-dim);
   font-size: 12.5px;
-  text-decoration: underline;
   cursor: pointer;
 }
 .sh-linkbtn:hover:not(:disabled) {
   color: var(--status-error);
+  text-decoration: underline;
 }
 .sh-linkbtn:disabled {
   opacity: 0.5;
@@ -216,47 +261,70 @@
 .sh-email {
   flex: 1;
   min-width: 0;
-  height: 34px;
-  padding: 0 10px;
-  border-radius: 8px;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--page-bg);
   color: var(--fg-primary);
-  font-size: 13px;
+  font-size: 13.5px;
   outline: none;
 }
 .sh-email:focus {
   border-color: var(--accent);
 }
 
-.sh-role {
-  flex: none;
-  height: 34px;
-  padding: 0 6px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--page-bg);
-  color: var(--fg-primary);
-  font-size: 12.5px;
-  outline: none;
-  cursor: pointer;
-}
-
 .sh-add {
   flex: none;
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 14px;
   border: 0;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-radius: 10px;
+  background: var(--accent);
   color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
+}
+.sh-add:hover:not(:disabled) {
+  filter: brightness(1.08);
 }
 .sh-add:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* Viewer or editor, as two halves of one pill. */
+.sh-seg {
+  display: inline-grid;
+  grid-auto-flow: column;
+  gap: 2px;
+  margin-top: 10px;
+  padding: 3px;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--page-bg);
+}
+.sh-seg button {
+  height: 28px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.sh-seg button:hover:not(.sel):not(:disabled) {
+  color: var(--fg-primary);
+}
+.sh-seg button.sel {
+  background: rgba(var(--accent-rgb), 0.22);
+  color: var(--accent);
 }
 
 .sh-nobody {
@@ -264,48 +332,71 @@
 }
 
 .sh-people {
-  max-height: 168px;
+  max-height: 200px;
   margin: 12px 0 0;
   padding: 0;
   overflow-y: auto;
   list-style: none;
+  scrollbar-width: thin;
 }
 
 .sh-person {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--border);
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 0.5px solid var(--border);
   font-size: 13px;
 }
-.sh-person:last-child {
-  border-bottom: 0;
+.sh-avatar {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+.sh-persontext {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .sh-email-text {
-  flex: 1;
-  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   color: var(--fg-primary);
+  font-size: 13.5px;
 }
 
 .sh-state {
-  flex: none;
-  color: var(--fg-dim);
-  font-size: 12.5px;
+  color: var(--fg-mute);
+  font-size: 12px;
 }
 
-.sh-stop {
+/* Ending every share is reachable but not shouting: an outline until it is pointed at. */
+.cf-btn.danger.sh-stop {
   width: 100%;
-  margin-top: 18px;
+  margin-top: 16px;
+  border: 1px solid rgba(var(--error-rgb), 0.55);
+  background: transparent;
+  color: var(--status-error);
+}
+.cf-btn.danger.sh-stop:hover:not(:disabled) {
+  background: var(--status-error);
+  color: #fff;
 }
 
 .sh-error {
   margin: 14px 0 0;
   color: var(--status-error);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.4;
 }

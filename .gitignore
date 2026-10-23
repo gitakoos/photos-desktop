@@ -19,6 +19,7 @@ app/src-tauri/binaries/
 # ---- Installer build artifacts (large, reproducible) ----
 setup/src-tauri/payload/*.zip
 *.exe
+*.minisig
 *.nupkg
 
 # ---- Secrets / runtime data — never commit ----

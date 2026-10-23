@@ -50,7 +50,11 @@ export type FilterPreset =
   | "cool"
   | "warm";
 
-/** The eight adjustment sliders, each an integer in -100..100, 0 meaning untouched. */
+/**
+ * The Tone sliders, each an integer in -100..100, 0 meaning untouched. Fade folds into the
+ * colour matrix; vibrance, sharpen and grain are per-pixel passes and vignette is drawn
+ * over the result (`editorEffects`), as the Android editor runs them.
+ */
 export type Adjustments = {
   brightness: number;
   contrast: number;
@@ -60,6 +64,11 @@ export type Adjustments = {
   shadows: number;
   temperature: number;
   tone: number;
+  vibrance: number;
+  sharpen: number;
+  grain: number;
+  vignette: number;
+  fade: number;
   filter: FilterPreset;
 };
 
@@ -72,6 +81,11 @@ export const NEUTRAL_ADJUSTMENTS: Adjustments = {
   shadows: 0,
   temperature: 0,
   tone: 0,
+  vibrance: 0,
+  sharpen: 0,
+  grain: 0,
+  vignette: 0,
+  fade: 0,
   filter: "none",
 };
 
@@ -183,7 +197,7 @@ export function concat(a: ColorMatrix, b: ColorMatrix): ColorMatrix {
  * can skip the pass entirely.
  *
  * Applied to a pixel, the stages run in this order: saturation, then contrast+brightness,
- * then exposure, highlights, shadows, temperature, tone, and the filter last.
+ * then exposure, highlights, shadows, temperature, tone, fade, and the filter last.
  */
 export function buildColorMatrix(adj: Adjustments): ColorMatrix | null {
   if (
@@ -195,6 +209,7 @@ export function buildColorMatrix(adj: Adjustments): ColorMatrix | null {
     adj.shadows === 0 &&
     adj.temperature === 0 &&
     adj.tone === 0 &&
+    adj.fade === 0 &&
     adj.filter === "none"
   ) {
     return null;
@@ -277,6 +292,23 @@ export function buildColorMatrix(adj: Adjustments): ColorMatrix | null {
         1, 0, 0, 0, 0,
         0, 1, 0, 0, g,
         0, 0, 1, 0, 0,
+        0, 0, 0, 1, 0,
+      ],
+      combined,
+    );
+  }
+
+  // Fade / matte: positive lifts the black point and eases contrast for a washed film look;
+  // negative deepens blacks and adds contrast. One matrix folds the scale and the lift.
+  if (adj.fade !== 0) {
+    const f = adj.fade / 100;
+    const scale = 1 - f * 0.2;
+    const lift = f * 30;
+    combined = concat(
+      [
+        scale, 0, 0, 0, lift,
+        0, scale, 0, 0, lift,
+        0, 0, scale, 0, lift,
         0, 0, 0, 1, 0,
       ],
       combined,

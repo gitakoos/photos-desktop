@@ -544,9 +544,11 @@ fn decode_full_res_to_jpeg(_src: &Path, _orientation: u32) -> Result<Vec<u8>, St
 pub async fn save_local_edit(
     app: AppHandle,
     src_path: String,
-    jpeg_base64: String,
+    image_base64: String,
+    format: Option<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let format = OutFormat::parse(format.as_deref())?;
         let resolved = crate::local_file::checked_media_path(&app, &src_path)?;
         let ext = crate::local_file::extension_of(&resolved.to_string_lossy());
         match crate::local_file::media_entry(&ext) {
@@ -554,35 +556,74 @@ pub async fn save_local_edit(
             _ => return Err("only photos can be edited".into()),
         }
 
-        let edited = decode_edited(&jpeg_base64)?;
+        let edited = decode_edited(&image_base64)?;
         let meta = read_source_meta(&resolved);
 
-        // A JPEG source's EXIF is copied verbatim; anything else has its metadata rebuilt.
-        // A JPEG that carries none falls through to the rebuild too, which then has little
-        // to write beyond the upright orientation and the new size.
-        let source_app1 = is_jpeg(&ext)
+        // A JPEG source saved as a JPEG has its EXIF copied verbatim; anything else has its
+        // metadata rebuilt. A JPEG that carries none falls through to the rebuild too, which
+        // then has little to write beyond the upright orientation and the new size.
+        let source_app1 = (is_jpeg(&ext) && format == OutFormat::Jpeg)
             .then(|| std::fs::read(&resolved).ok())
             .flatten()
             .and_then(|bytes| find_exif_app1(&bytes));
 
-        let output = assemble_output(source_app1.as_deref(), &meta, &edited)?;
+        let output = assemble_output(source_app1.as_deref(), &meta, &edited, format)?;
 
         let parent = resolved.parent().ok_or("that photo has no folder")?;
         let stem = resolved
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "photo".to_string());
-        write_new_copy(parent, &stem, &local_now(), &output)
+        write_new_copy(parent, &stem, &local_now(), format.extension(), &output)
     })
     .await
     .map_err(|e| format!("saving that photo failed: {e}"))?
 }
 
+/// What a copy is saved as: the editor encodes the pixels, this only checks and labels them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutFormat {
+    Jpeg,
+    Png,
+    Webp,
+}
+
+impl OutFormat {
+    /// The format the frontend asked for; none means a JPEG, as every save was before.
+    fn parse(name: Option<&str>) -> Result<Self, String> {
+        match name.unwrap_or("jpeg") {
+            "jpeg" => Ok(Self::Jpeg),
+            "png" => Ok(Self::Png),
+            "webp" => Ok(Self::Webp),
+            other => Err(format!("a photo cannot be saved as {other}")),
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Webp => "webp",
+        }
+    }
+
+    /// Whether the bytes really are this format, by their signature.
+    fn matches(self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Jpeg => bytes.starts_with(&[0xFF, 0xD8]),
+            Self::Png => bytes.starts_with(&PNG_SIGNATURE),
+            Self::Webp => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        }
+    }
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
 fn is_jpeg(ext: &str) -> bool {
     matches!(ext, "jpg" | "jpeg" | "jpe" | "jfif")
 }
 
-/// The edited JPEG bytes from what the frontend sent. A bare base64 payload is expected,
+/// The edited image's bytes from what the frontend sent. A bare base64 payload is expected,
 /// but a whole `data:` URL is accepted too, so a caller that forwards the canvas output
 /// unchanged is not punished for it.
 fn decode_edited(input: &str) -> Result<Vec<u8>, String> {
@@ -595,7 +636,7 @@ fn decode_edited(input: &str) -> Result<Vec<u8>, String> {
         .map_err(|_| "the edited image was not valid base64".to_string())
 }
 
-/// Build the output JPEG: the edited pixels, with metadata attached.
+/// Build the output file: the edited pixels, with metadata attached.
 ///
 /// Separated from the command so it can be tested without a Tauri handle or the disk: it
 /// takes bytes and returns bytes.
@@ -603,7 +644,27 @@ fn assemble_output(
     source_app1: Option<&[u8]>,
     meta: &SourceMeta,
     edited: &[u8],
+    format: OutFormat,
 ) -> Result<Vec<u8>, String> {
+    if !format.matches(edited) {
+        return Err(format!("the edited image is not a readable {}", format.extension()));
+    }
+    if format != OutFormat::Jpeg {
+        let size = imagesize::blob_size(edited)
+            .map_err(|_| format!("the edited image is not a readable {}", format.extension()))?;
+        let md = build_fresh_metadata(meta, size.width as u32, size.height as u32);
+        let mut out = edited.to_vec();
+        match format {
+            OutFormat::Png => insert_png_exif(&mut out, &md)?,
+            _ => {
+                extend_webp(&mut out, size.width as u32, size.height as u32)?;
+                md.write_to_vec(&mut out, FileExtension::WEBP)
+                    .map_err(|e| format!("the photo's details could not be written: {e}"))?
+            }
+        }
+        return Ok(out);
+    }
+
     let (width, height) =
         jpeg_sof_dimensions(edited).ok_or("the edited image is not a readable JPEG")?;
 
@@ -629,6 +690,75 @@ fn assemble_output(
         .write_to_vec(&mut out, FileExtension::JPEG)
         .map_err(|e| format!("the photo's details could not be written: {e}"))?;
     Ok(out)
+}
+
+/// Put the EXIF block into a PNG as the standard `eXIf` chunk, right after the header, where
+/// readers look for it (the crate's own PNG writer stores it as ImageMagick's text chunk,
+/// which most readers skip).
+fn insert_png_exif(png: &mut Vec<u8>, md: &Metadata) -> Result<(), String> {
+    const EXIF_PREFIX: &[u8] = b"Exif\0\0";
+    let app1 = md
+        .as_u8_vec(FileExtension::JPEG)
+        .map_err(|e| format!("the photo's details could not be written: {e}"))?;
+    let tiff = app1
+        .windows(EXIF_PREFIX.len())
+        .position(|w| w == EXIF_PREFIX)
+        .map(|i| &app1[i + EXIF_PREFIX.len()..])
+        .ok_or("the photo's details could not be written")?;
+    // The signature, then IHDR: length, type, its data, CRC.
+    let ihdr_len = read_u32(png, 8, false).ok_or("the edited image is not a readable png")? as usize;
+    if png.get(12..16) != Some(b"IHDR".as_slice()) || png.len() < 8 + 12 + ihdr_len {
+        return Err("the edited image is not a readable png".into());
+    }
+    let at = 8 + 12 + ihdr_len;
+    let mut chunk = Vec::with_capacity(tiff.len() + 12);
+    chunk.extend_from_slice(&(tiff.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(b"eXIf");
+    chunk.extend_from_slice(tiff);
+    let crc = crc32(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    png.splice(at..at, chunk);
+    Ok(())
+}
+
+/// Give a simple WebP (one bare VP8 or VP8L chunk, as a canvas writes an opaque photo) the
+/// extended header that EXIF needs, which the metadata crate cannot add itself: a VP8X chunk
+/// with the canvas size, and the alpha flag a lossless frame says it uses. An extended file
+/// is left as it is.
+fn extend_webp(webp: &mut Vec<u8>, width: u32, height: u32) -> Result<(), String> {
+    let kind = webp.get(12..16).ok_or("the edited image is not a readable webp")?;
+    let alpha = match kind {
+        b"VP8X" => return Ok(()),
+        b"VP8 " => false,
+        // The lossless header: a signature byte, then 14 + 14 bits of size and one alpha bit.
+        b"VP8L" => (read_u32(webp, 21, true).ok_or("the edited image is not a readable webp")? >> 28) & 1 == 1,
+        _ => return Err("the edited image is not a readable webp".into()),
+    };
+    if width == 0 || height == 0 || width > 1 << 24 || height > 1 << 24 {
+        return Err("the edited image is not a readable webp".into());
+    }
+    let mut vp8x = Vec::with_capacity(18);
+    vp8x.extend_from_slice(b"VP8X");
+    vp8x.extend_from_slice(&10u32.to_le_bytes());
+    vp8x.extend_from_slice(&[if alpha { 0x10 } else { 0 }, 0, 0, 0]);
+    vp8x.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+    vp8x.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+    webp.splice(12..12, vp8x);
+    let riff = read_u32(webp, 4, true).ok_or("the edited image is not a readable webp")?;
+    write_u32(webp, 4, true, riff + 18);
+    Ok(())
+}
+
+/// The CRC-32 a PNG chunk ends with, over its type and data.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
 }
 
 /// A fresh EXIF block for a source that had none to copy: the date, camera and location
@@ -984,37 +1114,37 @@ fn stamp_str(s: &Stamp) -> String {
 
 /// The name for the nth candidate copy of `stem`. The first bears the stamp alone; a
 /// collision within the same second gains a counter.
-fn edit_file_name(stem: &str, stamp: &str, n: u32) -> String {
+fn edit_file_name(stem: &str, stamp: &str, n: u32, ext: &str) -> String {
     if n <= 1 {
-        format!("{stem}_edit_{stamp}.jpg")
+        format!("{stem}_edit_{stamp}.{ext}")
     } else {
-        format!("{stem}_edit_{stamp}_{n}.jpg")
+        format!("{stem}_edit_{stamp}_{n}.{ext}")
     }
 }
 
 /// The first candidate name that no file in `dir` already holds.
-fn next_free_name(dir: &Path, stem: &str, stamp: &str) -> String {
+fn next_free_name(dir: &Path, stem: &str, stamp: &str, ext: &str) -> String {
     for n in 1..=9_999 {
-        let name = edit_file_name(stem, stamp, n);
+        let name = edit_file_name(stem, stamp, n, ext);
         if !dir.join(&name).exists() {
             return name;
         }
     }
-    edit_file_name(stem, stamp, 10_000)
+    edit_file_name(stem, stamp, 10_000, ext)
 }
 
 /// Write the output under a fresh, non-colliding name and return its path. `create_new`
 /// makes the collision check part of the write itself: a file that appears between
 /// choosing the name and opening it is a refusal, never a silent overwrite of the
 /// original or of another save.
-fn write_new_copy(dir: &Path, stem: &str, stamp: &Stamp, bytes: &[u8]) -> Result<String, String> {
+fn write_new_copy(dir: &Path, stem: &str, stamp: &Stamp, ext: &str, bytes: &[u8]) -> Result<String, String> {
     use std::io::Write;
     let stamp = stamp_str(stamp);
     for n in 1..=10_000u32 {
         let name = if n == 1 {
-            next_free_name(dir, stem, &stamp)
+            next_free_name(dir, stem, &stamp, ext)
         } else {
-            edit_file_name(stem, &stamp, n)
+            edit_file_name(stem, &stamp, n, ext)
         };
         let dest = dir.join(&name);
         match std::fs::OpenOptions::new()
@@ -1104,19 +1234,22 @@ mod tests {
             second: 5,
         };
         assert_eq!(stamp_str(&stamp), "20240102_130405");
-        assert_eq!(edit_file_name("DSC_0001", "20240102_130405", 1), "DSC_0001_edit_20240102_130405.jpg");
-        assert_eq!(edit_file_name("DSC_0001", "20240102_130405", 2), "DSC_0001_edit_20240102_130405_2.jpg");
+        assert_eq!(edit_file_name("DSC_0001", "20240102_130405", 1, "jpg"), "DSC_0001_edit_20240102_130405.jpg");
+        assert_eq!(edit_file_name("DSC_0001", "20240102_130405", 2, "jpg"), "DSC_0001_edit_20240102_130405_2.jpg");
+        assert_eq!(edit_file_name("DSC_0001", "20240102_130405", 1, "webp"), "DSC_0001_edit_20240102_130405.webp");
 
         let dir = std::env::temp_dir().join(format!("pfp-edit-name-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let stamp = "20240102_130405";
         // Nothing there yet: the first candidate wins.
-        assert_eq!(next_free_name(&dir, "IMG", stamp), "IMG_edit_20240102_130405.jpg");
+        assert_eq!(next_free_name(&dir, "IMG", stamp, "jpg"), "IMG_edit_20240102_130405.jpg");
         // Occupy it, and the counter appears.
         std::fs::write(dir.join("IMG_edit_20240102_130405.jpg"), b"x").unwrap();
-        assert_eq!(next_free_name(&dir, "IMG", stamp), "IMG_edit_20240102_130405_2.jpg");
+        assert_eq!(next_free_name(&dir, "IMG", stamp, "jpg"), "IMG_edit_20240102_130405_2.jpg");
         std::fs::write(dir.join("IMG_edit_20240102_130405_2.jpg"), b"x").unwrap();
-        assert_eq!(next_free_name(&dir, "IMG", stamp), "IMG_edit_20240102_130405_3.jpg");
+        assert_eq!(next_free_name(&dir, "IMG", stamp, "jpg"), "IMG_edit_20240102_130405_3.jpg");
+        // Another format is another name.
+        assert_eq!(next_free_name(&dir, "IMG", stamp, "png"), "IMG_edit_20240102_130405.png");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1126,12 +1259,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let stamp = Stamp { year: 2024, month: 3, day: 4, hour: 5, minute: 6, second: 7 };
 
-        let first = write_new_copy(&dir, "pic", &stamp, b"one").unwrap();
+        let first = write_new_copy(&dir, "pic", &stamp, "jpg", b"one").unwrap();
         assert!(first.ends_with("pic_edit_20240304_050607.jpg"));
         assert_eq!(std::fs::read(&first).unwrap(), b"one");
 
         // A second save in the same second must not touch the first file.
-        let second = write_new_copy(&dir, "pic", &stamp, b"two").unwrap();
+        let second = write_new_copy(&dir, "pic", &stamp, "jpg", b"two").unwrap();
         assert!(second.ends_with("pic_edit_20240304_050607_2.jpg"));
         assert_eq!(std::fs::read(&first).unwrap(), b"one", "the first copy is untouched");
         assert_eq!(std::fs::read(&second).unwrap(), b"two");
@@ -1252,7 +1385,7 @@ mod tests {
 
         let app1 = find_exif_app1(&source).unwrap();
         let edited = jpeg_with_size(640, 480);
-        let out = assemble_output(Some(&app1), &SourceMeta::default(), &edited).unwrap();
+        let out = assemble_output(Some(&app1), &SourceMeta::default(), &edited, OutFormat::Jpeg).unwrap();
 
         let after = read_back(&out);
         // Date, camera and location carried across untouched.
@@ -1282,7 +1415,7 @@ mod tests {
             ..SourceMeta::default()
         };
         let edited = jpeg_with_size(800, 600);
-        let out = assemble_output(None, &meta, &edited).unwrap();
+        let out = assemble_output(None, &meta, &edited, OutFormat::Jpeg).unwrap();
 
         let after = read_back(&out);
         assert_eq!(ascii(&after, exif::Tag::DateTimeOriginal).as_deref(), Some("2019:01:02 03:04:05"));
@@ -1296,5 +1429,113 @@ mod tests {
         assert!(lat.map(|v| (v - 12.5).abs() < 1e-3).unwrap_or(false), "latitude: {lat:?}");
         assert!(lon.map(|v| (v + 34.25).abs() < 1e-3).unwrap_or(false), "longitude went west: {lon:?}");
         assert_eq!(jpeg_sof_dimensions(&out), Some((800, 600)));
+    }
+
+    fn png_with_size(w: u32, h: u32) -> Vec<u8> {
+        let mut v = PNG_SIGNATURE.to_vec();
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        v.extend_from_slice(&13u32.to_be_bytes());
+        v.extend_from_slice(&ihdr);
+        v.extend_from_slice(&crc32(&ihdr).to_be_bytes());
+        let iend = b"IEND";
+        v.extend_from_slice(&0u32.to_be_bytes());
+        v.extend_from_slice(iend);
+        v.extend_from_slice(&crc32(iend).to_be_bytes());
+        v
+    }
+
+    /// A simple lossy WebP, as a canvas encodes one: RIFF, then one VP8 chunk whose frame
+    /// header carries the size.
+    fn webp_with_size(w: u16, h: u16) -> Vec<u8> {
+        let mut vp8 = vec![0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a];
+        vp8.extend_from_slice(&w.to_le_bytes());
+        vp8.extend_from_slice(&h.to_le_bytes());
+        vp8.extend_from_slice(&[0u8; 8]);
+        let mut v = b"RIFF".to_vec();
+        v.extend_from_slice(&((4 + 8 + vp8.len()) as u32).to_le_bytes());
+        v.extend_from_slice(b"WEBP");
+        v.extend_from_slice(b"VP8 ");
+        v.extend_from_slice(&(vp8.len() as u32).to_le_bytes());
+        v.extend_from_slice(&vp8);
+        v
+    }
+
+    fn sample_meta() -> SourceMeta {
+        SourceMeta {
+            date_original: Some("2019:01:02 03:04:05".to_string()),
+            make: Some("PixelMaker".to_string()),
+            latitude: Some(12.5),
+            longitude: Some(-34.25),
+            orientation: 1,
+            ..SourceMeta::default()
+        }
+    }
+
+    #[test]
+    fn a_format_is_parsed_and_named() {
+        assert_eq!(OutFormat::parse(None), Ok(OutFormat::Jpeg), "no format is the old JPEG save");
+        assert_eq!(OutFormat::parse(Some("png")).map(OutFormat::extension), Ok("png"));
+        assert_eq!(OutFormat::parse(Some("webp")).map(OutFormat::extension), Ok("webp"));
+        assert!(OutFormat::parse(Some("gif")).is_err());
+    }
+
+    #[test]
+    fn the_png_crc_matches_the_standard() {
+        // The IEND chunk's CRC every PNG ends with.
+        assert_eq!(crc32(b"IEND"), 0xAE42_6082);
+    }
+
+    #[test]
+    fn a_png_copy_carries_its_date_and_place_in_an_exif_chunk() {
+        let out = assemble_output(None, &sample_meta(), &png_with_size(320, 200), OutFormat::Png).unwrap();
+        assert!(out.starts_with(&PNG_SIGNATURE));
+        let after = read_back(&out);
+        assert_eq!(ascii(&after, exif::Tag::DateTimeOriginal).as_deref(), Some("2019:01:02 03:04:05"));
+        assert_eq!(uint(&after, exif::Tag::Orientation), Some(1), "upright");
+        assert_eq!(uint(&after, exif::Tag::PixelXDimension), Some(320));
+        assert_eq!(uint(&after, exif::Tag::PixelYDimension), Some(200));
+        let lat = gps_decimal(&after, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef, 'S', 90.0);
+        assert!(lat.map(|v| (v - 12.5).abs() < 1e-3).unwrap_or(false), "latitude: {lat:?}");
+        // Still the same picture: the header first and the end chunk last.
+        assert_eq!(imagesize::blob_size(&out).map(|s| (s.width, s.height)).ok(), Some((320, 200)));
+        assert!(out.ends_with(&[b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82]));
+    }
+
+    #[test]
+    fn a_webp_copy_carries_its_date_and_place() {
+        let out = assemble_output(None, &sample_meta(), &webp_with_size(640, 480), OutFormat::Webp).unwrap();
+        let after = read_back(&out);
+        assert_eq!(ascii(&after, exif::Tag::DateTimeOriginal).as_deref(), Some("2019:01:02 03:04:05"));
+        assert_eq!(uint(&after, exif::Tag::PixelXDimension), Some(640));
+        let lon = gps_decimal(&after, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef, 'W', 180.0);
+        assert!(lon.map(|v| (v + 34.25).abs() < 1e-3).unwrap_or(false), "longitude: {lon:?}");
+        assert_eq!(imagesize::blob_size(&out).map(|s| (s.width, s.height)).ok(), Some((640, 480)));
+    }
+
+    #[test]
+    fn a_simple_webp_gains_the_extended_header_with_its_size() {
+        let mut webp = webp_with_size(640, 480);
+        let before = webp.len();
+        extend_webp(&mut webp, 640, 480).unwrap();
+        assert_eq!(&webp[12..16], b"VP8X");
+        assert_eq!(webp.len(), before + 18);
+        assert_eq!(read_u32(&webp, 4, true), Some((webp.len() - 8) as u32), "RIFF size follows");
+        assert_eq!(webp[20], 0, "an opaque frame has no alpha flag");
+        assert_eq!(&webp[24..30], &[0x7F, 0x02, 0x00, 0xDF, 0x01, 0x00], "639 x 479");
+        assert_eq!(&webp[30..34], b"VP8 ", "the frame follows untouched");
+        // Already extended: nothing changes.
+        let again = webp.clone();
+        extend_webp(&mut webp, 640, 480).unwrap();
+        assert_eq!(webp, again);
+    }
+
+    #[test]
+    fn bytes_of_another_format_are_refused() {
+        assert!(assemble_output(None, &sample_meta(), &jpeg_with_size(10, 10), OutFormat::Png).is_err());
+        assert!(assemble_output(None, &sample_meta(), &png_with_size(10, 10), OutFormat::Webp).is_err());
+        assert!(assemble_output(None, &sample_meta(), &webp_with_size(10, 10), OutFormat::Jpeg).is_err());
     }
 }

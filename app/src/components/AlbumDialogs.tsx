@@ -29,9 +29,12 @@
 // written for; the photo rename asks exactly the same question, under the same
 // SDK name rules, so it asks it here rather than growing a second copy.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { rpc } from "../lib/rpc";
 import { useT } from "../lib/i18n";
+import { filterAlbums } from "../lib/albumSearch";
+import { useThumbnails } from "../hooks/useThumbnails";
+import { CloseIcon, ImageIcon, SearchIcon } from "./icons";
 import type { Album } from "../views/Albums";
 import "../styles/Confirm.css";
 import "../styles/AlbumDialogs.css";
@@ -117,6 +120,10 @@ export function NameDialog({
  * Picks the album for the selected photos, and makes a new one if none of them
  * fit. Creating is this dialog's own job so the caller only has to know how to
  * add photos to a uid; the new album is handed straight back as the pick.
+ *
+ * Laid out as Android's picker: the albums as cover cards, New album first, and a
+ * search over the names. Escape clears a search before it closes the dialog, and
+ * Enter picks the album when the search leaves exactly one.
  */
 export function AlbumPicker({
   count,
@@ -137,6 +144,13 @@ export function AlbumPicker({
   const [naming, setNaming] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const shown = useMemo(() => (albums ? filterAlbums(albums, query) : []), [albums, query]);
+  const coverUids = useMemo(
+    () => (albums ?? []).map((a) => a.coverUid).filter((u): u is string => !!u),
+    [albums],
+  );
+  const covers = useThumbnails(coverUids);
 
   useEffect(() => {
     let cancelled = false;
@@ -160,11 +174,17 @@ export function AlbumPicker({
     if (naming) return; // the name dialog owns the keys while it is up
     function onKey(e: KeyboardEvent) {
       e.stopPropagation();
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape") {
+        if (query) setQuery("");
+        else onCancel();
+      } else if (e.key === "Enter" && query.trim() && shown.length === 1 && !busy) {
+        e.preventDefault();
+        onPick(shown[0].uid);
+      }
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onCancel, naming]);
+  }, [onCancel, onPick, naming, query, shown, busy]);
 
   async function createAndPick(name: string) {
     setCreating(true);
@@ -201,49 +221,85 @@ export function AlbumPicker({
         onCancel();
       }}
     >
-      <div className="cf-panel" role="dialog" onClick={(e) => e.stopPropagation()}>
-        <h3 className="cf-title">{t("albums.addTitle")}</h3>
-        <p className="cf-msg">
-          {t(count === 1 ? "albums.addCount.one" : "albums.addCount.other", { count })}
-        </p>
+      <div className="cf-panel ad-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
+        <div className="ad-picker-head">
+          <div className="ad-picker-titles">
+            <h3 className="cf-title">{t("albums.addTitle")}</h3>
+            <p className="cf-msg">
+              {t(count === 1 ? "albums.addCount.one" : "albums.addCount.other", { count })}
+            </p>
+          </div>
+          <button className="ad-close" onClick={onCancel} title={t("common.cancel")} aria-label={t("common.cancel")}>
+            <CloseIcon size={18} />
+          </button>
+        </div>
+
+        <div className="ad-search">
+          <SearchIcon size={16} />
+          <input
+            autoFocus
+            value={query}
+            placeholder={t("albums.searchHint")}
+            aria-label={t("albums.searchHint")}
+            onChange={(e) => setQuery(e.currentTarget.value)}
+          />
+          {query && (
+            <button className="ad-search-clear" onClick={() => setQuery("")} aria-label={t("common.cancel")}>
+              <CloseIcon size={14} />
+            </button>
+          )}
+        </div>
 
         {error && <div className="ad-error">{error}</div>}
 
-        <button className="ad-new" disabled={busy} onClick={() => setNaming(true)}>
-          <span className="ad-new-plus">+</span>
-          {t("albums.newAlbum")}
-        </button>
+        <div className="ad-grid">
+          <button className="ad-card new" disabled={busy} onClick={() => setNaming(true)}>
+            <span className="ad-cover">
+              <span className="ad-new-plus">+</span>
+            </span>
+            <span className="ad-card-name">{t("albums.newAlbum")}</span>
+          </button>
+          {albums === null &&
+            Array.from({ length: 7 }, (_, i) => (
+              <span className="ad-card skeleton" key={`s${i}`} aria-hidden>
+                <span className="ad-cover" />
+                <span className="ad-skel-line" />
+                <span className="ad-skel-line short" />
+              </span>
+            ))}
+          {shown.map((a) => (
+            <button
+              className="ad-card"
+              key={a.uid}
+              disabled={busy}
+              onClick={() => onPick(a.uid)}
+              title={a.name || t("albums.untitled")}
+            >
+              <span className="ad-cover">
+                {a.coverUid && covers[a.coverUid] ? (
+                  <img src={covers[a.coverUid]!} alt="" draggable={false} />
+                ) : (
+                  <span className="ad-cover-empty">
+                    <ImageIcon size={30} />
+                  </span>
+                )}
+              </span>
+              <span className="ad-card-name">{a.name || t("albums.untitled")}</span>
+              <span className="ad-card-count">
+                {t(a.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+                  count: a.photoCount,
+                })}
+              </span>
+            </button>
+          ))}
+        </div>
 
-        {albums === null && <div className="ad-hint">{t("common.loading")}</div>}
         {albums !== null && albums.length === 0 && !error && (
           <div className="ad-hint">{t("albums.none")}</div>
         )}
-
-        {albums !== null && albums.length > 0 && (
-          <div className="ad-list">
-            {albums.map((a) => (
-              <button
-                className="ad-row"
-                key={a.uid}
-                disabled={busy}
-                onClick={() => onPick(a.uid)}
-              >
-                <span className="ad-row-name">{a.name || t("albums.untitled")}</span>
-                <span className="ad-row-count">
-                  {t(a.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other", {
-                    count: a.photoCount,
-                  })}
-                </span>
-              </button>
-            ))}
-          </div>
+        {albums !== null && albums.length > 0 && query.trim() && shown.length === 0 && (
+          <div className="ad-hint">{t("albums.searchEmpty")}</div>
         )}
-
-        <div className="cf-actions">
-          <button className="cf-btn" onClick={onCancel}>
-            {t("common.cancel")}
-          </button>
-        </div>
       </div>
     </div>
   );

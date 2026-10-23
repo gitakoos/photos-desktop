@@ -27,6 +27,7 @@ import { downloadMessage, downloadPhotos, explorerMode, type SaveProgress } from
 import { pinOffline, unpinOffline } from "../lib/offline";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { useThumbnails } from "../hooks/useThumbnails";
+import { filterAlbums } from "../lib/albumSearch";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
 import { VirtualSections } from "../components/VirtualSections";
 import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
@@ -304,8 +305,7 @@ export function Albums({
   // The album list after the shell's search and sort: filter by name, then order by the
   // chosen mode ("activity" keeps the server's own most-recent-first order).
   const shown = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const base = q ? albums.filter((a) => (a.name || "").toLowerCase().includes(q)) : albums;
+    const base = filterAlbums(albums, query);
     if (sort === "name") {
       return [...base].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     }

@@ -44,6 +44,7 @@ import {
   SweepIcon,
   TrashIcon,
 } from "../components/icons";
+import { createPortal } from "react-dom";
 import { ContextMenu, type MenuAction } from "../components/ContextMenu";
 import { useT } from "../lib/i18n";
 
@@ -433,6 +434,12 @@ export function SelectionBar({
   const barRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLButtonElement>(null);
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  // The selection takes over the page's own head: its title becomes "Selected" and the
+  // count, and the actions stand where the sort and filter controls were.
+  const [host, setHost] = useState<HTMLElement | null>(() => document.querySelector<HTMLElement>(".g-topbar"));
+  useLayoutEffect(() => {
+    if (count > 0 && (!host || !host.isConnected)) setHost(document.querySelector<HTMLElement>(".g-topbar"));
+  }, [count, host]);
 
   const actions = useMemo(() => {
     const list: BarAction[] = [];
@@ -515,15 +522,16 @@ export function SelectionBar({
     onSelect: a.onSelect,
   }));
 
-  return (
-    <>
-      <div className="g-selbar" data-tier={fit.tier} ref={barRef}>
-        <button className="g-selx" title={t("selection.cancel")} onClick={onCancel}>
-          <CloseIcon size={13} />
-        </button>
-        <span className="g-selcount">
-          {t(count === 1 ? "selection.count.one" : "selection.count.other", { count })}
+  const head = (
+    <div className={`g-selhead${host ? "" : " floating"}`}>
+      <div className="g-pagehead">
+        <h1 className="g-pagetitle">{t("selection.title")}</h1>
+        <span className="g-pagesub">
+          {t(count === 1 ? "common.photoCount.one" : "common.photoCount.other", { count })}
         </span>
+      </div>
+      <div className="g-spacer" />
+      <div className="g-selbar" data-tier={fit.tier} ref={barRef}>
         {shown.map((a) => (
           <span className="g-selslot" key={a.key}>
             {a.apart && <span className="g-selsep" />}
@@ -560,6 +568,15 @@ export function SelectionBar({
           </button>
         )}
       </div>
+      <button className="g-selx" title={t("selection.cancel")} aria-label={t("selection.cancel")} onClick={onCancel}>
+        <CloseIcon size={16} />
+      </button>
+    </div>
+  );
+
+  return (
+    <>
+      {host ? createPortal(head, host) : head}
 
       {menuAt && (
         <ContextMenu

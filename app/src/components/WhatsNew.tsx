@@ -22,11 +22,12 @@
 
 import { useEffect, type ReactNode } from "react";
 import { useT } from "../lib/i18n";
-import { FaceIcon, FolderOpenIcon, ImageIcon, MenuIcon, PaletteIcon, PhoneIcon, SearchIcon } from "./icons";
+import { DownloadIcon, FaceIcon, ImageIcon, LibraryAddIcon, TuneIcon } from "./icons";
+import { isWindows } from "../lib/platform";
 import "../styles/WhatsNew.css";
 
 /** Which "what's new" a reader has seen; a new one gets a new id. */
-export const WHATS_NEW_ID = "2026-10-sidebar";
+export const WHATS_NEW_ID = "2026-10-editor";
 
 /** What this version brought, shown once, the first time the new version opens. */
 export function WhatsNew({ onClose }: { onClose: () => void }) {
@@ -40,21 +41,20 @@ export function WhatsNew({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   const items: { icon: ReactNode; title: string; body: string }[] = [
-    { icon: <MenuIcon size={20} />, title: t("whatsNew.layoutTitle"), body: t("whatsNew.layoutBody") },
-    { icon: <SearchIcon size={20} />, title: t("whatsNew.searchTitle"), body: t("whatsNew.searchBody") },
-    {
-      icon: <PhoneIcon size={20} />,
-      title: t("whatsNew.phoneTitle"),
-      body: t("whatsNew.phoneBody", { place: `${t("settings.title")} › ${t("settings.phone")}` }),
-    },
-    { icon: <FaceIcon size={20} />, title: t("whatsNew.libraryTitle"), body: t("whatsNew.libraryBody") },
-    {
-      icon: <FolderOpenIcon size={20} />,
-      title: t("whatsNew.explorerTitle"),
-      body: t("whatsNew.explorerBody", { place: `${t("settings.title")} › ${t("settings.explorer")}` }),
-    },
-    { icon: <ImageIcon size={20} />, title: t("whatsNew.speedTitle"), body: t("whatsNew.speedBody") },
-    { icon: <PaletteIcon size={20} />, title: t("whatsNew.coloursTitle"), body: t("whatsNew.coloursBody") },
+    { icon: <TuneIcon size={20} />, title: t("whatsNew.editorTitle"), body: t("whatsNew.editorBody") },
+    { icon: <FaceIcon size={20} />, title: t("whatsNew.facesTitle"), body: t("whatsNew.facesBody") },
+    { icon: <ImageIcon size={20} />, title: t("whatsNew.viewerTitle"), body: t("whatsNew.viewerBody") },
+    { icon: <LibraryAddIcon size={20} />, title: t("whatsNew.albumsTitle"), body: t("whatsNew.albumsBody") },
+    // The self-updater is Windows only; the Linux build updates through Flatpak.
+    ...(isWindows
+      ? [
+          {
+            icon: <DownloadIcon size={20} />,
+            title: t("whatsNew.updatesTitle"),
+            body: t("whatsNew.updatesBody", { place: `${t("settings.title")} › ${t("settings.about")}` }),
+          },
+        ]
+      : []),
   ];
 
   return (

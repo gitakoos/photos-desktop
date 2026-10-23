@@ -84,7 +84,7 @@ every package esbuild reported as an input to that bundle.
   openpgp 6.3.1-0                             LGPL-3.0+
   pend 1.2.0                                  MIT
   ttag 1.8.12                                 MIT
-  undici 7.24.4                               MIT
+  undici 7.30.0                               MIT
   yauzl 3.4.0                                 MIT
 
 ------------------------------------------------------------------------------
@@ -566,7 +566,7 @@ ttag 1.8.12
 
 ------------------------------------------------------------------------------
 
-undici 7.24.4
+undici 7.30.0
   Licence: MIT
   Project: https://undici.nodejs.org
 
@@ -1705,6 +1705,14 @@ search is turned on, from https://github.com/gitakoos/clip-models (release v1,
 clip_text.onnx), the CLIP ViT-B/16 text encoder trained on DataComp-1B
 (laion/CLIP-ViT-B-16-DataComp.XL-s13B-b90K), whose weights are MIT-licensed.
 
+Hide faces in the photo editor fetches its face detector the same way, outside
+the installer, when it is first used: from https://github.com/gitakoos/face-models
+(release v2, yolov5face.onnx), the YOLOv5-face detector
+(https://github.com/deepcam-cn/yolov5-face), licensed under the GNU General
+Public License version 3, the licence of this app. The code that reads its
+output follows the published YOLOv5-face format, Copyright (c) 2021 the
+YOLOv5-face contributors.
+
 ------------------------------------------------------------------------------
 
 The map's list of places names each one after the nearest town in a list
@@ -1726,7 +1734,7 @@ cities15000 (GeoNames)
 4. Rust crates linked into app.exe and setup.exe
 ==============================================================================
 
-291 crates, grouped by the licence each one declares. A crate marked [app] is
+292 crates, grouped by the licence each one declares. A crate marked [app] is
 linked into app.exe, [setup] into setup.exe, and [both] into each. Where a crate
 offers a choice of licences, the choice is recorded exactly as the crate states
 it. Copyright holders are the authors each crate declares.
@@ -2153,7 +2161,7 @@ MIT OR Apache-2.0  (147 crates)
       https://github.com/microsoft/windows-rs
 
 ------------------------------------------------------------------------------
-MIT  (48 crates)
+MIT  (49 crates)
 ------------------------------------------------------------------------------
 
   bytes 1.12.0  [app]
@@ -2201,6 +2209,9 @@ MIT  (48 crates)
   memoffset 0.9.1  [both]
       Gilad Naaman <gilad.naaman@gmail.com>
       https://github.com/Gilnaa/memoffset
+  minisign-verify 0.3.0  [app]
+      Frank Denis <github@pureftpd.org>
+      https://github.com/jedisct1/rust-minisign-verify
   mio 1.2.1  [both]
       Carl Lerche <me@carllerche.com>, Thomas de Zeeuw <thomasdezeeuw@gmail.com>, Tokio Contributors <team@tokio.rs>
       https://github.com/tokio-rs/mio

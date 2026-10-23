@@ -596,10 +596,22 @@ export function Lightbox({
         else if (e.key.toLowerCase() === "f") void toggleFavorite();
         else if (e.key.toLowerCase() === "s") setSharing(true);
       }}
+      fileSize={details?.size ?? null}
       toolbar={
         <>
-          {/* Icons alone, named in their tooltips, as in Windows Photos: the bar keeps one
-              width whatever the language. Favourite colours in when held, as a state. */}
+          {/* Edit first and named, as in Windows Photos; the rest are icons named in their
+              tooltips. Favourite colours in when held, as a state. */}
+          {canEdit && (
+            <button
+              className="lbx-tbtn"
+              disabled={busy}
+              onClick={() => setEditing(true)}
+              title={t("editor.edit")}
+            >
+              <PencilIcon size={15} />
+              {t("editor.edit")}
+            </button>
+          )}
           <button
             className={`lbx-ibtn ${fav ? "sel" : ""}`}
             disabled={busy || fav === null}
@@ -609,17 +621,6 @@ export function Lightbox({
           >
             <HeartIcon size={17} filled={!!fav} />
           </button>
-          {canEdit && (
-            <button
-              className="lbx-ibtn"
-              disabled={busy}
-              onClick={() => setEditing(true)}
-              title={t("editor.edit")}
-              aria-label={t("editor.edit")}
-            >
-              <PencilIcon size={16} />
-            </button>
-          )}
           <button
             className="lbx-ibtn"
             onClick={() => setPickingAlbum(true)}
@@ -766,6 +767,7 @@ export function Lightbox({
         <PhotoEditor
           sourceKey={uid}
           loadSource={() => cloudEditorSource(uid)}
+          saveTo="drive"
           saveEdit={(jpeg, src) =>
             saveCloudEdit(jpeg, {
               name: details.name,

@@ -22,6 +22,7 @@
 
 import { Confirm } from "./Confirm";
 import { useT } from "../lib/i18n";
+import { isWindows } from "../lib/platform";
 
 /**
  * The question before signing out, which says what goes and what stays: signing out
@@ -33,7 +34,7 @@ export function SignOutConfirm({ onConfirm, onCancel }: { onConfirm: () => void;
   return (
     <Confirm
       title={t("signOut.title")}
-      message={t("signOut.message")}
+      message={t(isWindows ? "signOut.message" : "signOut.messageLinux")}
       confirmLabel={t("profile.signOut")}
       danger
       irreversible

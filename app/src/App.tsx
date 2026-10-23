@@ -34,6 +34,7 @@ import { rpc } from "./lib/rpc";
 import { applyTheme, type ThemeMode } from "./lib/theme";
 import { useT } from "./lib/i18n";
 import "./styles/App.css";
+import { isWindows } from "./lib/platform";
 
 type Phase = "credentials" | "twofa" | "captcha" | "browser" | "protect" | "offline";
 type MenuState = { x: number; y: number } | null;
@@ -695,7 +696,7 @@ function App() {
                   />
                   <span>
                     <strong>{t("protect.device")}</strong>
-                    <small>{t("protect.deviceDesc")}</small>
+                    <small>{t(isWindows ? "protect.deviceDesc" : "protect.deviceDescLinux")}</small>
                   </span>
                 </label>
                 <button type="submit" disabled={busy}>

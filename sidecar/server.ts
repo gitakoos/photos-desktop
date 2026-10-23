@@ -34,6 +34,7 @@ import { VERSION } from "@protontech/drive-sdk";
 import { session } from "./proton/session.ts";
 import { initStore } from "./proton/store.ts";
 import { modelStatus as semanticModelStatus, removeModel, startModelDownload } from "./proton/semantic.ts";
+import { detectFaces, faceModelStatus, startFaceModelDownload } from "./proton/faces.ts";
 import { setVaultMetaKey } from "./proton/vault.ts";
 import { respond, type RpcWriter } from "./rpc.ts";
 import { scrubSecrets } from "./scrub.ts";
@@ -210,6 +211,9 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   semanticModelStatus: () => semanticModelStatus(),
   semanticModelDownload: () => startModelDownload(),
   semanticModelRemove: () => removeModel(),
+  faceModelStatus: () => faceModelStatus(),
+  faceModelDownload: () => startFaceModelDownload(),
+  detectFaces: (p) => detectFaces(String(p?.rgb ?? "")),
   thumbServer: () => session.thumbServer(),
   cancelUpload: () => session.cancelUpload(),
   clearUploads: () => session.clearUploads(),

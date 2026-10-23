@@ -21,6 +21,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import type { SaveFormat } from "./editorRender";
 
 /**
  * A file on this machine, which the app can show without a Proton session.
@@ -76,10 +77,16 @@ export const localEditorSource = (path: string) =>
 /**
  * Write the edited image as a new copy beside the original, re-attaching the source's
  * metadata (date, GPS, camera) with orientation reset. Returns the new file's path.
- * `jpegBase64` is the canvas output, already encoded at quality ~0.92.
+ * `imageBase64` is the canvas output, already encoded as `format`.
  */
-export const saveLocalEdit = (srcPath: string, jpegBase64: string) =>
-  invoke<string>("save_local_edit", { srcPath, jpegBase64 });
+export const saveLocalEdit = (srcPath: string, imageBase64: string, format: SaveFormat) =>
+  invoke<string>("save_local_edit", { srcPath, imageBase64, format });
+
+/** The format a copy of this file defaults to: its own where it can be written, else JPEG. */
+export function copyFormatFor(path: string): SaveFormat {
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return ext === "png" ? "png" : ext === "webp" ? "webp" : "jpeg";
+}
 
 /**
  * Formats the engine has no decoder for, which go straight to the host rather

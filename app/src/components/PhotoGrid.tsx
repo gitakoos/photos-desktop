@@ -171,8 +171,28 @@ export function PhotoCell({
   // With the thumbnail server up a lazy tile is just its URL, and the webview loads and
   // decodes it as it would on any web page. Only without one does the tile fetch its own.
   const serverBase = useThumbServerBase();
-  const served = lazy && serverBase ? serverBase + encodeURIComponent(item.uid) : null;
+  // A served tile that failed asks again a few times, a little later each time: a fetch
+  // that stalled or was refused for a moment comes good, and the tile must not stay
+  // empty for the rest of its life. The server reads only the path, so the query is
+  // only there to make the webview load it again.
+  const [attempt, setAttempt] = useState(0);
+  const served =
+    lazy && serverBase
+      ? serverBase + encodeURIComponent(item.uid) + (attempt ? `?a=${attempt}` : "")
+      : null;
   const fetchesOwn = lazy && !served;
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // A tile scrolled away lets go of its request, so the server is not left fetching it
+  // ahead of the ones now on screen.
+  useEffect(
+    () => () => {
+      clearTimeout(retryTimer.current);
+      const img = imgRef.current;
+      if (img && !img.complete) img.removeAttribute("src");
+    },
+    [],
+  );
   const ref = useRef<HTMLDivElement>(null);
   const [self, setSelf] = useState<string | null | undefined>(() =>
     lazy ? cachedThumbnail(item.uid) : undefined,
@@ -317,12 +337,18 @@ export function PhotoCell({
           alt=""
           draggable={false}
           ref={(img) => {
+            imgRef.current = img;
             if (img && img.complete && img.naturalWidth > 0) img.dataset.ok = "1";
           }}
           onLoad={(e) => {
             e.currentTarget.dataset.ok = "1";
           }}
-          onError={() => setBroken(src)}
+          onError={() => {
+            if (src === served && attempt < 3) {
+              retryTimer.current = setTimeout(() => setAttempt(attempt + 1), 1500 * (attempt + 1));
+            }
+            setBroken(src);
+          }}
         />
       ) : (
         <div className={`g-cell-ph${loading ? " g-cell-loading" : ""}`} />

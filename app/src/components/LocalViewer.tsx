@@ -38,6 +38,7 @@ import {
   looksLikeVideo,
   needsDecode,
   renameLocalFile,
+  copyFormatFor,
   saveLocalEdit,
   toMillis,
   type LocalFileInfo,
@@ -368,6 +369,7 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         setVideoUrl(null);
         setProblem("videoUnsupported");
       }}
+      fileSize={info?.size ?? null}
       toolbar={
         // The reason this is unavailable is the whole point of the label, and the
         // button carrying it is disabled in exactly that case. The engine draws no
@@ -376,13 +378,13 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         <>
           {canEdit && (
             <button
-              className="lbx-ibtn"
+              className="lbx-tbtn"
               disabled={busy}
               onClick={() => setEditing(true)}
               title={t("editor.edit")}
-              aria-label={t("editor.edit")}
             >
-              <PencilIcon size={16} />
+              <PencilIcon size={15} />
+              {t("editor.edit")}
             </button>
           )}
           <span className="lbx-ibtn-wrap" title={uploadLabel}>
@@ -483,7 +485,10 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         <PhotoEditor
           sourceKey={current}
           loadSource={() => localEditorSource(current)}
-          saveEdit={(jpegBase64) => saveLocalEdit(current, jpegBase64)}
+          saveTo="computer"
+          saveFormats={["jpeg", "png", "webp"]}
+          defaultFormat={copyFormatFor(current)}
+          saveEdit={(base64, _src, options) => saveLocalEdit(current, base64, options.format)}
           onClose={() => setEditing(false)}
           onSaved={(p) => {
             setEditing(false);

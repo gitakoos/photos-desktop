@@ -50,9 +50,11 @@
   width: calc(100% - 56px);
   height: calc(100% - 56px);
   object-fit: contain;
-  border-radius: 6px;
   transform-origin: center center;
   will-change: transform;
+  /* Every zoom eases into place; a new photo fades in rather than cutting. */
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: pv-in 0.18s ease-out both;
   -webkit-user-drag: none;
   user-select: none;
 }
@@ -63,8 +65,20 @@
 .pv.panning {
   cursor: grabbing;
 }
+/* A drag follows the pointer as it is. */
+.pv.panning .pv-img {
+  transition: none;
+}
+@keyframes pv-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
 
-/* Centred pill while the HD still loads, matching the zoom control's styling. */
+/* Centred pill while the HD still loads. */
 .pv-loading {
   position: absolute;
   top: 50%;
@@ -98,70 +112,4 @@
   to {
     transform: rotate(360deg);
   }
-}
-
-/* ---- Zoom control ---- */
-.pv-zoom {
-  position: absolute;
-  left: 50%;
-  bottom: 18px;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
-  border-radius: 999px;
-  background: var(--pill-bg-opaque);
-  border: 0.5px solid var(--border);
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
-  opacity: 0.55;
-  transition: opacity 0.14s ease;
-}
-.pv:hover .pv-zoom {
-  opacity: 1;
-}
-
-.pv-zbtn {
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--fg-primary);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-}
-.pv-zbtn:hover:not(:disabled) {
-  background: var(--line-hover);
-}
-.pv-zbtn:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-
-.pv-zval {
-  min-width: 48px;
-  height: 26px;
-  padding: 0 6px;
-  border: none;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--fg-dim);
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.pv-zval:hover {
-  background: var(--line-hover);
-  color: var(--fg-primary);
-}
-
-.pv-dims {
-  padding: 0 8px 0 4px;
-  font-size: 12px;
-  color: var(--fg-mute);
-  white-space: nowrap;
 }

@@ -42,8 +42,12 @@
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
-/** The bytes of one grid thumbnail, or null when there is none to give. */
-export type ThumbnailSource = (uid: string) => Promise<Buffer | null>;
+/**
+ * The bytes of one grid thumbnail, or null when there is none to give. `gone` fires when
+ * the webview stops waiting, as it does for a tile scrolled away, so the thumbnail is not
+ * fetched ahead of the ones still on screen.
+ */
+export type ThumbnailSource = (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
 
 /** A node uid: base64url halves joined by a tilde. Anything else is refused unread. */
 const UID_SHAPE = /^[A-Za-z0-9_=~-]{1,256}$/;
@@ -110,8 +114,13 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   }
   if (!UID_SHAPE.test(uid) || !source) return refuse(404);
 
+  const gone = new AbortController();
+  res.on("close", () => {
+    if (!res.writableFinished) gone.abort();
+  });
   try {
-    const bytes = await source(uid);
+    const bytes = await source(uid, gone.signal);
+    if (gone.signal.aborted) return;
     if (!bytes) return refuse(404);
     res.writeHead(200, {
       "Content-Type": "image/jpeg",

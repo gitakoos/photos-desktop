@@ -26,7 +26,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import logo from "./assets/logo.png";
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 const APP_NAME = "Photos for Proton";
 
 // Each of these is allow-listed in src-tauri/capabilities/default.json; the opener

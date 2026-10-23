@@ -816,7 +816,8 @@ impl Drop for BusyGuard {
 
 /// What the folder is busy with, for the app to say instead of a bare "Syncing": the
 /// fill that keeps the folder matching the library, a file something opened, or
-/// photos kept on this device. `done` of `total` while there is a count to give.
+/// photos kept on this device. `done` of `total` while there is a count to give. On
+/// Linux the file-manager drive reports through the same, so the window says it once.
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountActivity {
@@ -827,10 +828,8 @@ pub struct MountActivity {
     total: u64,
 }
 
-#[cfg(windows)]
 static ACTIVITY: std::sync::Mutex<Option<MountActivity>> = std::sync::Mutex::new(None);
 
-#[cfg(windows)]
 fn show_activity(app: &tauri::AppHandle, now: Option<MountActivity>) {
     use tauri::Emitter;
     let mut cur = ACTIVITY.lock().unwrap();
@@ -840,15 +839,13 @@ fn show_activity(app: &tauri::AppHandle, now: Option<MountActivity>) {
 
 /// Names the outermost piece of work while it runs: one nested inside it (a download
 /// a fill set off) leaves the outer name standing, and only its owner clears it.
-#[cfg(windows)]
-struct Doing {
+pub(crate) struct Doing {
     app: tauri::AppHandle,
     owns: bool,
 }
 
-#[cfg(windows)]
 impl Doing {
-    fn new(app: &tauri::AppHandle, what: &'static str, name: Option<String>, by: Option<String>) -> Self {
+    pub(crate) fn new(app: &tauri::AppHandle, what: &'static str, name: Option<String>, by: Option<String>) -> Self {
         let owns = ACTIVITY.lock().unwrap().is_none();
         if owns {
             show_activity(app, Some(MountActivity { what, name, by, done: 0, total: 0 }));
@@ -857,7 +854,6 @@ impl Doing {
     }
 }
 
-#[cfg(windows)]
 impl Drop for Doing {
     fn drop(&mut self) {
         if self.owns {
@@ -867,8 +863,7 @@ impl Drop for Doing {
 }
 
 /// The fill's count of photos placed, shown only while a fill is what the folder is doing.
-#[cfg(windows)]
-fn fill_progress(app: &tauri::AppHandle, done: u64, total: u64) {
+pub(crate) fn fill_progress(app: &tauri::AppHandle, done: u64, total: u64) {
     let next = match ACTIVITY.lock().unwrap().clone() {
         Some(a) if a.what == "fill" => Some(MountActivity { done, total, ..a }),
         _ => return,
@@ -893,12 +888,7 @@ fn filled() {
 /// What the folder is busy with right now, for a window that opens while it already is.
 #[tauri::command]
 pub fn mount_activity() -> Option<MountActivity> {
-    #[cfg(windows)]
-    {
-        ACTIVITY.lock().unwrap().clone()
-    }
-    #[cfg(not(windows))]
-    None
+    ACTIVITY.lock().unwrap().clone()
 }
 
 /// The current sync state, for the tray popup's status line (live updates arrive via
@@ -1260,15 +1250,12 @@ fn mark_path_in_sync(app: &tauri::AppHandle, path: &std::path::Path) {
 /// The smallest and largest page populate asks the sidecar for. A cold page resolves
 /// every photo in it over the network, so it starts small; one answered from cache
 /// costs milliseconds, and paging four at a time would turn a large library into hours.
-#[cfg_attr(not(windows), allow(dead_code))]
-const POPULATE_PAGE_MIN: u64 = 4;
-#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const POPULATE_PAGE_MIN: u64 = 4;
 const POPULATE_PAGE_MAX: u64 = 200;
 
 /// The next page size and the rest before asking for it, from how long the last page
 /// took: fast pages double, slow ones halve and leave the channel free for a moment.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn next_populate_page(page: u64, took: std::time::Duration) -> (u64, std::time::Duration) {
+pub(crate) fn next_populate_page(page: u64, took: std::time::Duration) -> (u64, std::time::Duration) {
     use std::time::Duration;
     if took < Duration::from_millis(300) {
         ((page * 2).min(POPULATE_PAGE_MAX), Duration::ZERO)

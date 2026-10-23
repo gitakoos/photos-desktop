@@ -131,8 +131,9 @@ console.log("staged   -> build/assets (search vocabulary)");
 
 /**
  * The ONNX runtime the search's text encoder runs on, copied from the installed packages with
- * only this platform's binaries: the package carries every platform's, and on Windows the
- * DirectML files too, which the CPU provider it runs on never loads.
+ * only this platform's binaries: the package carries every platform's, and the GPU providers
+ * too (DirectML on Windows, CUDA and TensorRT on Linux), which the CPU provider it runs on
+ * never loads.
  */
 function stageOnnxRuntime() {
   const deps = join(here, "node_modules");
@@ -160,6 +161,14 @@ function stageOnnxRuntime() {
     for (const napi of readdirSync(bin)) {
       const dir = join(bin, napi, "win32", process.arch);
       for (const file of ["DirectML.dll", "dxcompiler.dll", "dxil.dll"]) rmSync(join(dir, file), { force: true });
+    }
+  }
+  if (process.platform === "linux") {
+    for (const napi of readdirSync(bin)) {
+      const dir = join(bin, napi, "linux", process.arch);
+      for (const file of ["libonnxruntime_providers_cuda.so", "libonnxruntime_providers_tensorrt.so"]) {
+        rmSync(join(dir, file), { force: true });
+      }
     }
   }
   const binding = join(bin, readdirSync(bin)[0], process.platform, process.arch, "onnxruntime_binding.node");

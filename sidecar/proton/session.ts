@@ -1189,32 +1189,47 @@ export class ProtonSession {
    */
   async thumbServer(): Promise<{ base: string }> {
     if (!this.photos) throw new Error("Not signed in");
-    return { base: await startThumbServer((uid) => this.thumbnailFor(uid)) };
+    return { base: await startThumbServer((uid, gone) => this.thumbnailFor(uid, gone)) };
   }
 
   /**
    * One grid thumbnail for the server: from the sealed cache when it is there, which is
    * a file read and a decrypt, and otherwise fetched with whichever others are missing
    * at the same moment, so a screen of new photos is one request rather than one each.
+   * A tile the webview stopped waiting for leaves the queue unfetched.
    */
-  private thumbnailFor(uid: string): Promise<Buffer | null> {
-    if (!this.photos) return Promise.resolve(null);
+  private thumbnailFor(uid: string, gone: AbortSignal): Promise<Buffer | null> {
+    if (!this.photos || gone.aborted) return Promise.resolve(null);
     const cached = thumbGet(uid, ThumbnailType.Type1);
     if (cached) return Promise.resolve(cached);
     return new Promise((resolve) => {
       const waiting = this.thumbWaiting.get(uid);
       if (waiting) waiting.push(resolve);
       else this.thumbWaiting.set(uid, [resolve]);
+      gone.addEventListener(
+        "abort",
+        () => {
+          const still = this.thumbWaiting.get(uid);
+          if (!still?.includes(resolve)) return;
+          still.splice(still.indexOf(resolve), 1);
+          if (still.length === 0) this.thumbWaiting.delete(uid);
+          resolve(null);
+        },
+        { once: true },
+      );
       if (!this.thumbFlush) this.thumbFlush = setTimeout(() => this.fetchWaitingThumbs(), 15);
     });
   }
 
-  /** Fetches up to 30 waiting thumbnails, two batches at most in flight. */
+  /**
+   * Fetches up to 30 waiting thumbnails, two batches at most in flight, the latest asked
+   * first: after a long scroll those are the ones on screen.
+   */
   private async fetchWaitingThumbs(): Promise<void> {
     this.thumbFlush = null;
     if (this.thumbFetching >= 2 || this.thumbWaiting.size === 0) return;
     const photos = this.photos;
-    const batch = [...this.thumbWaiting.keys()].slice(0, 30);
+    const batch = [...this.thumbWaiting.keys()].slice(-30);
     const answers = new Map<string, ((bytes: Buffer | null) => void)[]>();
     for (const uid of batch) {
       answers.set(uid, this.thumbWaiting.get(uid)!);

@@ -28,6 +28,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { rpc } from "../lib/rpc";
 import { isNewer } from "../lib/version";
 import { START_UPDATE_EVENT } from "../components/UpdateOverlay";
+import { autoUpdateOn, setAutoUpdate } from "../lib/updatePrefs";
 import { isWindows } from "../lib/platform";
 import { Confirm } from "../components/Confirm";
 import {
@@ -783,6 +784,7 @@ export function Settings({
       .catch(() => {});
   }, []);
   const [updateInfo, setUpdateInfo] = useState<{ version: string } | null>(null);
+  const [autoUpdate, setAutoUpdateState] = useState(autoUpdateOn);
   const [checkState, setCheckState] = useState<
     "idle" | "checking" | "uptodate" | "found" | "installing" | "error"
   >("idle");
@@ -894,7 +896,7 @@ export function Settings({
                   </span>
                   <div className="st-text">
                     <div className="st-label">{t("settings.theme")}</div>
-                    <div className="st-desc">{t("settings.themeDesc")}</div>
+                    <div className="st-desc">{t(isWindows ? "settings.themeDesc" : "settings.themeDescLinux")}</div>
                   </div>
                   <div className="st-seg" role="group" aria-label={t("settings.theme")}>
                     {THEMES.map((th) => (
@@ -1165,7 +1167,7 @@ export function Settings({
                     <LockIcon size={18} />
                   </span>
                   <div className="st-text">
-                    <div className="st-label">{t("settings.deviceProtected")}</div>
+                    <div className="st-label">{t(isWindows ? "settings.deviceProtected" : "settings.deviceProtectedLinux")}</div>
                     <div className="st-desc">{t("settings.deviceProtectedDesc")}</div>
                   </div>
                 </div>
@@ -1202,6 +1204,27 @@ export function Settings({
                 <div className="st-rows">
                   {/* The self-updater downloads and runs a Windows installer; the Linux
                       build updates through Flatpak, so it offers no in-app update. */}
+                  {isWindows && (
+                    <label className="st-row">
+                      <span className="st-row-ico" aria-hidden>
+                        <DownloadIcon size={18} />
+                      </span>
+                      <div className="st-text">
+                        <div className="st-label">{t("settings.autoUpdate")}</div>
+                        <div className="st-desc">{t("settings.autoUpdateDesc")}</div>
+                      </div>
+                      <input
+                        className="st-switch"
+                        type="checkbox"
+                        checked={autoUpdate}
+                        onChange={(e) => {
+                          const on = e.currentTarget.checked;
+                          setAutoUpdate(on);
+                          setAutoUpdateState(on);
+                        }}
+                      />
+                    </label>
+                  )}
                   {isWindows && (
                     <div className="st-row">
                       <span className="st-row-ico" aria-hidden>

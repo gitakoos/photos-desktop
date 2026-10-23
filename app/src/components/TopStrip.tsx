@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { forwardRef, useState, type ReactNode } from "react";
+import { forwardRef, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { WindowButtons } from "./Titlebar";
 import type { Activity } from "./Sidebar";
 import { CloseIcon, DownloadIcon, GearIcon, SearchIcon, SpinnerIcon, UploadArrowIcon } from "./icons";
@@ -62,6 +62,27 @@ export const TopStrip = forwardRef<
   searchRef,
 ) {
   const t = useT();
+  // The name shows whole or not at all: a narrow strip would otherwise cut it to its
+  // first letter. The brand's width comes from the strip, never from what it holds, so
+  // hiding the name cannot change the width this measures.
+  const brandRef = useRef<HTMLSpanElement>(null);
+  const nameWidth = useRef(0);
+  const [nameFits, setNameFits] = useState(true);
+  useLayoutEffect(() => {
+    const brand = brandRef.current;
+    if (!brand) return;
+    const check = () => {
+      const width = brand.querySelector<HTMLElement>(".g-strip-name")?.getBoundingClientRect().width ?? 0;
+      if (width > 0) nameWidth.current = width;
+      const logo = brand.querySelector<HTMLElement>(".g-strip-logo")?.getBoundingClientRect().width ?? 0;
+      const gap = parseFloat(getComputedStyle(brand).columnGap) || 0;
+      setNameFits(brand.clientWidth >= logo + gap + nameWidth.current);
+    };
+    const observer = new ResizeObserver(check);
+    observer.observe(brand);
+    check();
+    return () => observer.disconnect();
+  }, []);
   const busy = activity !== null;
   const spinning = activity?.kind === "index" || activity?.kind === "sync";
   const label = dragging
@@ -78,9 +99,13 @@ export const TopStrip = forwardRef<
 
   return (
     <header className="g-strip" data-tauri-drag-region>
-      <span className="g-strip-brand" data-tauri-drag-region>
+      <span className="g-strip-brand" ref={brandRef} data-tauri-drag-region>
         <img className="g-strip-logo" src={logo} alt="" draggable={false} />
-        <span data-tauri-drag-region>Photos for Proton</span>
+        {nameFits && (
+          <span className="g-strip-name" data-tauri-drag-region>
+            Photos for Proton
+          </span>
+        )}
       </span>
 
       <SearchField

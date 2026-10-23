@@ -27,20 +27,34 @@
   display: grid;
   /* minmax(0, 1fr), not 1fr: a grid track's automatic minimum is its content
      size, which lets a large photo push the row past the viewport. */
-  grid-template-rows: 56px minmax(0, 1fr);
-  grid-template-columns: minmax(0, 1fr);
-  background: rgba(6, 6, 8, 0.94);
-  backdrop-filter: blur(4px);
+  /* Bar, picture, filmstrip, status bar; and the picture beside the details. Every track
+     is always there, at no size when its part is away, so opening the strip or the
+     details grows a track and the picture eases out of its way rather than jumping. */
+  grid-template-rows: 52px minmax(0, 1fr) 0px 46px;
+  grid-template-columns: minmax(0, 1fr) 0px;
+  transition:
+    grid-template-columns 0.28s cubic-bezier(0.2, 0.8, 0.2, 1),
+    grid-template-rows 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+  /* One even ground round the picture, bars included, as Windows Photos draws it; the
+     theme sets it from the palette, black under AMOLED. */
+  background: var(--viewer-ground, #1f1f1f);
   user-select: none;
+  /* The details card slides past the right edge as its track closes. */
+  overflow: hidden;
 }
 /* A third row for the filmstrip, and only when there is one: a viewer over a single
    item keeps the whole window for the picture. */
 .lbx.with-strip {
-  grid-template-rows: 56px minmax(0, 1fr) auto;
+  grid-template-rows: 52px minmax(0, 1fr) 78px 46px;
 }
 /* A second column for the details, docked beside the picture as Windows Photos does. */
 .lbx.with-aside {
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) 348px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lbx {
+    transition: none;
+  }
 }
 
 /* When the viewer is the whole of the window, this bar is the window's chrome, so
@@ -54,8 +68,6 @@
 .lbx.owns-window {
   border-radius: 12px;
   border: 1px solid var(--surface);
-  background: rgb(6, 6, 8);
-  backdrop-filter: none;
 }
 :root[data-native-frame] .lbx.owns-window {
   border-radius: 0;
@@ -77,22 +89,28 @@
   align-items: center;
   gap: 12px;
   padding: 0 12px;
-  /* A solid strip, so the top reads as a real toolbar instead of buttons floating on
-     the photo. Fixed dark: the viewer stage is always dark, whatever the app theme. */
-  background: rgba(16, 16, 19, 0.94);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  /* The same ground as the picture, so bar and photo read as one window. */
+  background: var(--viewer-ground);
 }
+/* The photo's actions, Edit first and named. */
 .lbx-left {
-  justify-self: stretch;
+  justify-self: start;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 2px;
 }
+.lbx-left .lbx-tbtn {
+  margin-right: 6px;
+}
+/* The name, centred on the window, and where it sits in the run. */
 .lbx-center {
+  min-width: 0;
+  max-width: min(46vw, 560px);
   display: flex;
   align-items: center;
-  gap: 2px;
+  justify-content: center;
+  gap: 8px;
 }
 .lbx-right {
   justify-self: end;
@@ -115,7 +133,7 @@
 /* The name is the rename affordance: click it, no separate button. */
 .lbx-title {
   min-width: 0;
-  text-align: left;
+  text-align: center;
   height: 32px;
   padding: 0 10px;
   border: 1px solid transparent;
@@ -488,6 +506,84 @@
   right: 18px;
 }
 
+/* ---- Status bar ---- */
+/* Windows Photos' bottom bar: the strip and what the file is on the left, its details in
+   the middle, the zoom and full screen on the right. */
+.lbx-status {
+  grid-row: 4;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  background: var(--viewer-ground);
+}
+.lbx-status-left,
+.lbx-status-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.lbx-status-right {
+  justify-self: end;
+}
+.lbx-fact {
+  padding: 0 8px;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.lbx-ibtn.small {
+  width: 32px;
+  height: 32px;
+}
+.lbx-zoom-val {
+  min-width: 56px;
+  height: 30px;
+  padding: 0 8px;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.lbx-zoom-val:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+/* A thin track filled up to the zoom, with a round thumb. */
+.lbx-zoom-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 120px;
+  height: 4px;
+  margin: 0 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent) 0,
+    var(--accent) var(--fill, 0%),
+    rgba(255, 255, 255, 0.22) var(--fill, 0%)
+  );
+  cursor: pointer;
+  outline: none;
+}
+.lbx-zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #fff;
+  border: 3px solid var(--accent);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
 /* ---- Filmstrip ---- */
 /* The Android viewer's strip, one for one: 54px tiles, 5px between them, 16px at each
    end, the current one ringed in white at full opacity and the rest at 45%.
@@ -497,7 +593,8 @@
    thousand photos would be fifty thousand elements. */
 .lbx-strip {
   grid-row: 3;
-  grid-column: 1 / -1;
+  grid-column: 1;
+  min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 10px 0 14px;
@@ -555,48 +652,32 @@
 }
 
 /* ---- Contents ---- */
-.lbx-contents-backdrop {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: var(--scrim);
-  z-index: 5;
-}
-.lbx-contents-panel {
+/* The list as a side panel: the details' card, its rows running edge to edge. */
+.lbx-aside.lbx-contents {
   display: flex;
   flex-direction: column;
-  width: min(460px, 92vw);
-  height: min(560px, 82vh);
-  padding: 18px 8px 12px 20px;
-  background: var(--surface-deep);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  box-shadow: var(--dialog-shadow);
+  overflow: hidden;
+  padding: 16px 8px 10px 12px;
+  user-select: none;
 }
-.lbx-contents-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding-right: 12px;
-  margin-bottom: 10px;
+.lbx-contents .lbx-details-head {
+  padding: 0 4px 0 6px;
 }
-.lbx-contents-head h3 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--fg-primary);
+.lbx-contents .lbx-details-head h3 {
+  flex: 1 1 auto;
 }
 .lbx-contents-count {
   font-size: 12.5px;
   color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .lbx-contents-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding-right: 6px;
+  padding-right: 4px;
+  scrollbar-width: thin;
 }
 .lbx-contents-scroll::-webkit-scrollbar {
   width: 8px;
@@ -612,14 +693,14 @@
   position: absolute;
   left: 0;
   right: 0;
-  height: 44px;
+  height: 56px;
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding: 0 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: 12px;
   background: transparent;
   text-align: left;
   cursor: pointer;
@@ -632,14 +713,14 @@
 }
 .lbx-contents-thumb {
   position: relative;
-  width: 36px;
-  height: 36px;
-  border-radius: 6px;
+  width: 48px;
+  height: 48px;
+  border-radius: 9px;
   background: var(--bg2);
   overflow: hidden;
 }
 .lbx-contents-name {
-  font-size: 12.5px;
+  font-size: 13.5px;
   color: var(--fg-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -665,15 +746,38 @@
 }
 
 /* ---- Details panel ---- */
+/* The details, as the editor's side panel: a card standing beside the picture, sliding in
+   as its track opens and out as it closes. */
 .lbx-aside {
-  grid-row: 2;
+  grid-row: 2 / 4;
   grid-column: 2;
+  box-sizing: border-box;
+  width: 320px;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 20px;
-  background: var(--surface-deep);
-  border-left: 1px solid var(--border);
+  margin: 4px 16px 12px 12px;
+  padding: 16px 18px;
+  border: 0.5px solid var(--border);
+  border-radius: 20px;
+  background: var(--pill-bg-opaque);
   user-select: text;
+  scrollbar-width: thin;
+  animation: lbx-aside-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.lbx-aside.closing {
+  animation: lbx-aside-out 0.2s ease-in both;
+}
+@keyframes lbx-aside-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+@keyframes lbx-aside-out {
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
 }
 .lbx-details-head {
   display: flex;

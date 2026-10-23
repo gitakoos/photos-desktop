@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { formatBytes } from "../lib/format";
-import { PlayArrowIcon } from "./icons";
+import { CloseIcon, PlayArrowIcon } from "./icons";
 import { useT } from "../lib/i18n";
 import type { ViewerList } from "./ViewerShell";
 
@@ -45,7 +45,7 @@ const STEP = TILE + GAP;
 /** Tiles drawn beyond each edge, so a fast scroll does not show empty space. */
 const OVERSCAN = 4;
 
-const ROW = 48;
+const ROW = 60;
 const ROW_OVERSCAN = 6;
 
 /** Which indices a scroller of `viewport` px at `scroll` px is showing, plus the overscan. */
@@ -188,6 +188,22 @@ export function ViewerFilmstrip({ list, onRange }: StripProps) {
     );
   }
 
+  // The wheel scrolls the strip sideways, the way a row of photos is read. Bound natively,
+  // since a passive React listener could not keep the wheel from the picture.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    function onWheel(e: WheelEvent) {
+      if (!el) return;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!delta) return;
+      e.preventDefault();
+      el.scrollBy({ left: delta, behavior: "auto" });
+    }
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   return (
     <div
       className="lbx-strip"
@@ -203,7 +219,7 @@ export function ViewerFilmstrip({ list, onRange }: StripProps) {
   );
 }
 
-type ContentsProps = StripProps & { onClose: () => void };
+type ContentsProps = StripProps & { closing?: boolean; onClose: () => void };
 
 /**
  * Everything the viewer can open, as a list: a picture, a name and a size for each.
@@ -211,7 +227,7 @@ type ContentsProps = StripProps & { onClose: () => void };
  * The same windowing as the strip, for the same reason. A name or a size the source has
  * not resolved yet is simply absent rather than guessed at, and fills in when it lands.
  */
-export function ViewerContents({ list, onRange, onClose }: ContentsProps) {
+export function ViewerContents({ list, onRange, closing, onClose }: ContentsProps) {
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
   const viewport = useViewport(ref, true);
@@ -241,10 +257,7 @@ export function ViewerContents({ list, onRange, onClose }: ContentsProps) {
         className={`lbx-contents-row ${i === index ? "cur" : ""}`}
         style={{ top: i * ROW }}
         aria-current={i === index || undefined}
-        onClick={() => {
-          list.go(i);
-          onClose();
-        }}
+        onClick={() => list.go(i)}
       >
         {/* The badge sits over the picture rather than beside the name, so a row with a
             video in it keeps the same columns as a row without one. */}
@@ -265,28 +278,25 @@ export function ViewerContents({ list, onRange, onClose }: ContentsProps) {
   }
 
   return (
-    // Stopped, not just handled: the whole viewer closes on a click, so a click meant to
-    // dismiss this panel would take the photo behind it with the panel.
-    <div
-      className="lbx-contents-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
+    // Docked beside the picture like the details, and kept open while the reader moves
+    // through the list. Stopped: the whole viewer closes on a click.
+    <aside
+      className={`lbx-aside lbx-contents ${closing ? "closing" : ""}`}
+      aria-label={t("viewer.contents")}
+      onClick={(e) => e.stopPropagation()}
     >
-      <div className="lbx-contents-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="lbx-contents-head">
-          <h3>{t("viewer.contents")}</h3>
-          <span className="lbx-contents-count">
-            {t("viewer.position", { n: index + 1, total: count })}
-          </span>
-        </div>
-        <div className="lbx-contents-scroll" ref={ref}>
+      <div className="lbx-details-head">
+        <h3>{t("viewer.contents")}</h3>
+        <span className="lbx-contents-count">{t("viewer.position", { n: index + 1, total: count })}</span>
+        <button className="lbx-ibtn" onClick={onClose} title={t("common.close")} aria-label={t("common.close")}>
+          <CloseIcon size={14} />
+        </button>
+      </div>
+      <div className="lbx-contents-scroll" ref={ref}>
           <div className="lbx-contents-rail" style={{ height: count * ROW }}>
             {rows}
           </div>
-        </div>
       </div>
-    </div>
+    </aside>
   );
 }

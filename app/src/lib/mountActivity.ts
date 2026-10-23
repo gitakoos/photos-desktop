@@ -24,8 +24,9 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { TFunc } from "./i18n";
+import { isWindows } from "./platform";
 
-/** What the File Explorer folder is busy with, as the host reports it. */
+/** What the File Explorer folder, or the Linux file-manager drive, is busy with, as the host reports it. */
 export type MountActivity = {
   what: "fill" | "open" | "offline";
   name: string | null;
@@ -60,11 +61,17 @@ export function describeMount(a: MountActivity, t: TFunc): SyncInfo {
   const count = { done: a.done, total: a.total };
   switch (a.what) {
     case "fill":
-      return {
-        title: a.total > 0 ? t("sync.fillCount", count) : t("sync.fill"),
-        why: t("sync.fillWhy"),
-        ...count,
-      };
+      return isWindows
+        ? {
+            title: a.total > 0 ? t("sync.fillCount", count) : t("sync.fill"),
+            why: t("sync.fillWhy"),
+            ...count,
+          }
+        : {
+            title: a.total > 0 ? t("sync.fillCountLinux", count) : t("sync.fillLinux"),
+            why: t("sync.fillWhyLinux"),
+            ...count,
+          };
     case "open":
       return {
         title: a.name ? t("sync.open", { name: a.name }) : t("sync.openAny"),

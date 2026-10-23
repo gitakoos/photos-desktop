@@ -44,6 +44,7 @@ mod local_file;
 mod local_folder;
 mod photo_edit;
 mod secure_store;
+mod update_sig;
 mod upload_frame;
 mod window_place;
 
@@ -139,7 +140,7 @@ fn priority_for(method: &str) -> Priority {
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
         | "protectSession" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
-        | "semanticSearch" => Priority::Interactive,
+        | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
         // even though the user is looking at that photo: the transfer itself runs inside
@@ -632,6 +633,8 @@ fn packaged_command(app: &AppHandle) -> Result<Command, String> {
     // Tell the sidecar this is the packaged build, so it keeps library console
     // output out of the on-disk log (only our own scrubbed lines are persisted).
     command.env("SIDECAR_RELEASE", "1");
+    // This app's version, so the updater can take the update installer made for it.
+    command.env("PFP_APP_VERSION", app.package_info().version.to_string());
     // The process that holds the unlocked session reads none of these from whatever
     // environment the app was started in: each would let something else run code in
     // it (`NODE_OPTIONS=--require`, a module path) or turn its TLS checks off. A
@@ -1325,7 +1328,7 @@ async fn rpc(
     if result.as_ref().is_ok_and(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true)) {
         match called.as_str() {
             // The timeline loads right after every unlock: the drive can list again.
-            "getTimeline" => files_drive::session_started(),
+            "getTimeline" | "startTimeline" => files_drive::session_started(),
             "startUpload" | "confirmImport" => files_drive::upload_started(),
             "trashPhotos" | "restorePhotos" | "deletePhotosForever" | "emptyTrash" | "renamePhoto"
             | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
@@ -2377,7 +2380,7 @@ fn enter_app(app: AppHandle) {
 /// in place and relaunches the app), then quit so the running files unlock. The
 /// installer runs from TEMP and breaks away from any job so it survives our exit.
 #[tauri::command]
-fn run_updater(app: AppHandle) {
+fn run_updater(app: AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -2391,7 +2394,16 @@ fn run_updater(app: AppHandle) {
         let path = std::env::temp_dir().join("pfp-update.exe");
         if !path.is_file() {
             note(&app, "[update] no verified installer staged, not launching");
-            return;
+            return Err("no installer staged".into());
+        }
+        // Checked here, by the process that runs it, right before it runs: signed with
+        // the update key and newer than this app, or it is deleted and not run.
+        let signature = std::env::temp_dir().join("pfp-update.exe.minisig");
+        if let Err(e) = update_sig::verify_installer(&path, &signature, &app.package_info().version) {
+            note(&app, &format!("[update] installer refused: {e}"));
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(&signature);
+            return Err(e);
         }
         let spawn = |flags: u32| {
             std::process::Command::new(&path)
@@ -2405,10 +2417,11 @@ fn run_updater(app: AppHandle) {
             .is_err()
         {
             note(&app, "[update] could not launch the installer");
-            return;
+            return Err("could not launch the installer".into());
         }
     }
     app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2573,8 +2586,9 @@ fn open_sign_in_page(url: String) -> Result<(), String> {
         }
         Err("could not open the browser".into())
     }
+    // xdg-open, which inside the Flatpak sandbox is the desktop's open-URI portal.
     #[cfg(not(windows))]
-    Err("not available on this system".into())
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|_| "could not open the browser".into())
 }
 
 #[cfg(test)]

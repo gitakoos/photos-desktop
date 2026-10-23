@@ -213,6 +213,11 @@ function paint(): void {
   style.setProperty("--frame-bg", mix(FRAME[side].frame, a.accent, tint));
   style.setProperty("--strip-field", light ? FRAME[side].field : mix(FRAME[side].field, a.accent, tint));
   style.removeProperty("--panel-edge");
+  // The viewer stands on an even dark grey, as Windows Photos does, tinted toward the
+  // palette like the window's frame; pure black under AMOLED. It stays dark in the light
+  // theme, where a photo still reads best on a dark ground.
+  const ground = black && !light ? "#000000" : mix("#1f1f1f", p.dark.accent, p.key === "mono" ? 0 : FRAME_TINT.dark);
+  style.setProperty("--viewer-ground", ground);
 
   // Only AMOLED overrides the base surfaces, and only in dark mode; every other
   // palette (and light mode) clears the overrides so theme.css applies.

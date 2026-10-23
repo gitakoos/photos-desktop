@@ -38,7 +38,7 @@ import { rpc } from "../lib/rpc";
 import { useT, type TFunc } from "../lib/i18n";
 import { locale } from "../lib/format";
 import { Confirm } from "./Confirm";
-import { CloseIcon, PersonAddIcon } from "./icons";
+import { CloseIcon, PersonAddIcon, ShareIcon } from "./icons";
 import "../styles/Confirm.css";
 import "../styles/ShareDialog.css";
 
@@ -300,16 +300,26 @@ export function ShareDialog({
     >
       <div className="cf-panel sh-panel" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="sh-head">
-          <div>
+          <span className="sh-headicon">
+            <ShareIcon size={18} />
+          </span>
+          <div className="sh-headtext">
             <h3 className="cf-title sh-title">{t("share.title")}</h3>
             <p className="sh-subtitle">{title}</p>
           </div>
-          <button className="sh-close" onClick={onClose} title={t("common.close")}>
-            <CloseIcon size={14} />
+          <button className="sh-close" onClick={onClose} title={t("common.close")} aria-label={t("common.close")}>
+            <CloseIcon size={16} />
           </button>
         </div>
 
-        {loading && <p className="sh-dim">{t("common.loading")}</p>}
+        {/* Two cards of their final size while the share loads, so the dialog does not
+            grow under the pointer when it arrives. */}
+        {loading && (
+          <div aria-hidden>
+            <div className="sh-section sh-skel" />
+            <div className="sh-section sh-skel short" />
+          </div>
+        )}
 
         {!loading && info && !info.canShare && <p className="sh-dim">{t("share.notOwned")}</p>}
 
@@ -317,7 +327,10 @@ export function ShareDialog({
           <>
             {info.supportsPublicLink ? (
               <section className="sh-section">
-                <h4 className="sh-heading">{t("share.linkTitle")}</h4>
+                <h4 className="sh-heading">
+                  <ShareIcon size={15} />
+                  {t("share.linkTitle")}
+                </h4>
                 {link ? (
                   <>
                     <div className="sh-linkrow">
@@ -436,7 +449,10 @@ export function ShareDialog({
             )}
 
             <section className="sh-section">
-              <h4 className="sh-heading">{t("share.peopleTitle")}</h4>
+              <h4 className="sh-heading">
+                <PersonAddIcon size={15} />
+                {t("share.peopleTitle")}
+              </h4>
               <div className="sh-invite">
                 <input
                   className="sh-email"
@@ -449,18 +465,26 @@ export function ShareDialog({
                     if (e.key === "Enter") invite();
                   }}
                 />
-                <select
-                  className="sh-role"
-                  value={draftRole}
-                  disabled={busy}
-                  onChange={(e) => setDraftRole(e.currentTarget.value as Role)}
-                >
-                  <option value="viewer">{t("share.roleViewer")}</option>
-                  <option value="editor">{t("share.roleEditor")}</option>
-                </select>
                 <button className="sh-add" disabled={busy || !draftEmail.trim()} onClick={invite} title={t("share.invite")}>
-                  <PersonAddIcon size={15} />
+                  <PersonAddIcon size={16} />
+                  <span>{t("share.invite")}</span>
                 </button>
+              </div>
+              {/* The role as the app's own two-way switch: a native select draws a white
+                  system list over the dark theme. */}
+              <div className="sh-seg" role="radiogroup" aria-label={t("share.peopleTitle")}>
+                {(["viewer", "editor"] as Role[]).map((r) => (
+                  <button
+                    key={r}
+                    role="radio"
+                    aria-checked={draftRole === r}
+                    className={draftRole === r ? "sel" : ""}
+                    disabled={busy}
+                    onClick={() => setDraftRole(r)}
+                  >
+                    {t(r === "viewer" ? "share.roleViewer" : "share.roleEditor")}
+                  </button>
+                ))}
               </div>
 
               {people.length === 0 ? (
@@ -469,8 +493,13 @@ export function ShareDialog({
                 <ul className="sh-people">
                   {people.map((person) => (
                     <li className="sh-person" key={person.uid}>
-                      <span className="sh-email-text">{person.email}</span>
-                      <span className="sh-state">{stateLabel(person)}</span>
+                      <span className="sh-avatar" aria-hidden>
+                        {(person.email.trim()[0] ?? "?").toUpperCase()}
+                      </span>
+                      <span className="sh-persontext">
+                        <span className="sh-email-text">{person.email}</span>
+                        <span className="sh-state">{stateLabel(person)}</span>
+                      </span>
                       <button
                         className="sh-linkbtn"
                         disabled={busy}

@@ -62,12 +62,48 @@ use file_assoc::{APP_EXE, APP_NAME, LEGACY_APP_EXE, PACK_ID};
 #[path = "../../../app/src-tauri/src/autostart.rs"]
 pub mod autostart;
 
-const VERSION: &str = "1.1.0";
+const VERSION: &str = "1.2.0";
 const PUBLISHER: &str = "Akoos";
 const DATA_DIR_NAME: &str = "eu.akoos.photos.desktop"; // where the app keeps its vault/caches
 
 // The app itself, zipped at build time by build-setup.ps1.
 static PAYLOAD: &[u8] = include_bytes!("../payload/payload.zip");
+
+/// Set at build time for an update installer, whose payload holds only the files that
+/// changed since this version: it may update exactly that version, and install nothing.
+const PATCH_FROM: Option<&str> = option_env!("PFP_PATCH_FROM");
+
+/// Whether this installer may lay its payload over an install of `installed` (none for
+/// a fresh install). A full installer always may; an update installer only over the
+/// version it was made from, since over any other the files it leaves out are not the
+/// ones that version needs.
+fn patch_allows(patch_from: Option<&str>, installed: Option<&str>) -> Result<(), String> {
+    match (patch_from, installed) {
+        (None, _) => Ok(()),
+        (Some(from), Some(version)) if version == from => Ok(()),
+        (Some(from), _) => Err(format!(
+            "This file only updates version {from}. Download Photos-for-Proton-Setup.exe instead."
+        )),
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::patch_allows;
+
+    #[test]
+    fn a_full_installer_installs_and_updates_anything() {
+        assert!(patch_allows(None, None).is_ok());
+        assert!(patch_allows(None, Some("1.0.0")).is_ok());
+    }
+
+    #[test]
+    fn an_update_installer_updates_only_its_own_version() {
+        assert!(patch_allows(Some("1.1.0"), Some("1.1.0")).is_ok());
+        assert!(patch_allows(Some("1.1.0"), Some("1.0.0")).is_err());
+        assert!(patch_allows(Some("1.1.0"), None).is_err());
+    }
+}
 
 fn local_app_data() -> PathBuf {
     PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
@@ -392,6 +428,23 @@ fn read_install_location() -> Option<String> {
     None
 }
 
+/// The version the installed app was laid down as, as the registry records it.
+#[cfg(windows)]
+fn read_installed_version() -> Option<String> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{PACK_ID}"
+        ))
+        .ok()?;
+    key.get_value("DisplayVersion").ok()
+}
+#[cfg(not(windows))]
+fn read_installed_version() -> Option<String> {
+    None
+}
+
 /// The directory of an existing installation (present in the registry AND still
 /// on disk), so the installer can offer to upgrade it, or to remove it, instead of
 /// laying a second copy down beside it.
@@ -540,6 +593,7 @@ fn install_impl(
     network_drive: bool,
     file_types: bool,
 ) -> Result<(), String> {
+    patch_allows(PATCH_FROM, None)?;
     let target = PathBuf::from(&dir);
     // Which step failed, not where: the chosen folder sits under the user's profile,
     // so naming it here would put the account name on the error screen.
@@ -613,6 +667,7 @@ fn drop_superseded_exe(install: &Path) {
 /// Returns true if the app's data had to be reset (see `carry_data`).
 #[cfg(windows)]
 fn upgrade_impl(install: &Path, relaunch: bool) -> Result<bool, String> {
+    patch_allows(PATCH_FROM, read_installed_version().as_deref())?;
     // Make sure nothing under the folder still holds a file, then overwrite the
     // payload, retrying while the app finishes closing.
     kill_under_dir(install);
@@ -1191,7 +1246,15 @@ pub fn run() {
     if is_update() {
         *UPDATE_STATE.lock().unwrap() = "running".into();
         std::thread::spawn(|| {
-            let result = registered_install().and_then(|d| upgrade_impl(&d, true));
+            let result = registered_install().and_then(|d| {
+                // Refused before a file was touched: the app that quit for this comes
+                // back as it was.
+                if let Err(e) = patch_allows(PATCH_FROM, read_installed_version().as_deref()) {
+                    let _ = std::process::Command::new(d.join(APP_EXE)).current_dir(&d).spawn();
+                    return Err(e);
+                }
+                upgrade_impl(&d, true)
+            });
             let ok = result.is_ok();
             *UPDATE_STATE.lock().unwrap() = match result {
                 Ok(_) => "done".into(),
