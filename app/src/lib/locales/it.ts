@@ -105,6 +105,10 @@ export const it: Record<string, string> = {
   "login.signIn": "Accedi",
   "login.signingIn": "Accesso in corso…",
   "login.twofaLabel": "Codice a due fattori",
+  "login.mailboxLabel": "Password della casella",
+  "login.mailboxHint": "Questo account usa due password. Inserisci la password della casella per sbloccarlo.",
+  "login.unlockKeys": "Sblocca",
+  "login.mailboxWrong": "Password della casella errata",
   "login.verify": "Verifica",
   "login.verifying": "Verifica in corso…",
   "login.captchaHint": "Proton ti chiede di confermare di essere una persona reale.",
@@ -658,6 +662,7 @@ export const it: Record<string, string> = {
   "selection.unfavorite": "Rimuovi dai preferiti",
   "selection.offlineAdd": "Disponibile offline",
   "selection.offlineRemove": "Rimuovi la copia offline",
+  "selection.fixDates": "Correggi date",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} liberate",
@@ -682,6 +687,39 @@ export const it: Record<string, string> = {
   "offline.alreadyOffline": "Già disponibile offline",
   "offline.noneOffline": "Nessuna copia offline da rimuovere",
   "offline.failed": "impossibile salvare per l'uso offline",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Correggere le date dai nomi dei file?",
+  "datefix.count.one":
+    "{count} di {total} foto selezionate contiene una data nel nome.",
+  "datefix.count.other":
+    "{count} di {total} foto selezionate contengono una data nel nome.",
+  "datefix.body": "Ciascuna viene caricata di nuovo con la data del nome scritta nel file stesso (cambiano solo i metadati; l'immagine non viene ricodificata), rimessa nei suoi album con i suoi tag, e la copia vecchia finisce nel cestino. Le foto che mostrano già il giorno giusto restano come sono.",
+  "datefix.apply": "Correggi date",
+  "datefix.none": "Nessuna delle foto selezionate contiene una data utilizzabile nel nome",
+  "datefix.checking": "Lettura dei nomi di {count} foto selezionate…",
+  "datefix.readFailed": "Impossibile leggere i nomi delle foto: {error}",
+  "datefix.noDateCount": "{count} non hanno una data nel nome.",
+  "datefix.line.noDate": "• {name}: nessuna data nel nome",
+  "datefix.line.same": "• {name}: nome {named}, Drive {drive}, già giusta",
+  "datefix.line.fix": "• {name}: nome {named}, Drive {drive}, verrà corretta",
+  "datefix.allCorrect": "Tutte le foto il cui nome contiene una data mostrano già quella data su Drive",
+  "datefix.uptodate": "{count} mostrano già questa stessa data su Drive e vengono lasciate invariate.",
+  "datefix.done.one": "Data corretta per {count} foto dal nome del file",
+  "datefix.done.other": "Date corrette per {count} foto dai nomi dei file",
+  "datefix.partial": "Corrette {ok}, {failed} non riuscite",
+  "datefix.alreadyRunning": "È già in corso una correzione delle date",
+  "datefix.stopped": "Interrotta: {ok} corrette, {failed} non riuscite, {skipped} non avviate",
+  "datefix.halted": "Interrotto: Proton Drive non ha accettato la nuova data per nessuna foto ({failed} non riuscite, {skipped} non avviate). Non è stato modificato nulla.",
+  "datefix.cancel": "Annulla le restanti",
+  "datefix.canceling": "Completamento delle foto in corso…",
+  "datefix.progressDetail": "{done} di {total} controllate · {uploaded} corrette · {unchanged} già giuste · {failed} non riuscite",
+  "datefix.stage.uploading": "Aggiornamento delle date su Drive, a piccoli gruppi…",
+  "datefix.stage.albums": "Ripristino delle appartenenze agli album…",
+  "datefix.stage.trashing": "Spostamento degli originali nel cestino…",
+  "datefix.stage.done": "Completamento…",
 
   // Trash confirmation
   "confirm.trashTitle": "Spostare nel cestino?",

@@ -105,6 +105,10 @@ export const es: Record<string, string> = {
   "login.signIn": "Iniciar sesión",
   "login.signingIn": "Iniciando sesión…",
   "login.twofaLabel": "Código de dos factores",
+  "login.mailboxLabel": "Contraseña del buzón",
+  "login.mailboxHint": "Esta cuenta usa dos contraseñas. Introduce la contraseña del buzón para desbloquearla.",
+  "login.unlockKeys": "Desbloquear",
+  "login.mailboxWrong": "Contraseña del buzón incorrecta",
   "login.verify": "Verificar",
   "login.verifying": "Verificando…",
   "login.captchaHint": "Proton te pide que confirmes que eres una persona.",
@@ -658,6 +662,7 @@ export const es: Record<string, string> = {
   "selection.unfavorite": "Quitar de favoritos",
   "selection.offlineAdd": "Disponible sin conexión",
   "selection.offlineRemove": "Quitar la copia sin conexión",
+  "selection.fixDates": "Corregir fechas",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} liberadas",
@@ -682,6 +687,39 @@ export const es: Record<string, string> = {
   "offline.alreadyOffline": "Ya disponibles sin conexión",
   "offline.noneOffline": "No hay copias sin conexión que quitar",
   "offline.failed": "no se pudo guardar para uso sin conexión",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "¿Corregir fechas según el nombre de archivo?",
+  "datefix.count.one":
+    "{count} de {total} fotos seleccionadas tiene una fecha en su nombre.",
+  "datefix.count.other":
+    "{count} de {total} fotos seleccionadas tienen una fecha en su nombre.",
+  "datefix.body": "Cada una se vuelve a subir con la fecha de su nombre escrita en el propio archivo (solo cambian sus metadatos; la imagen no se vuelve a codificar), vuelve a sus álbumes con sus etiquetas y su copia anterior pasa a la papelera. Las fotos que ya muestran el día correcto no se tocan.",
+  "datefix.apply": "Corregir fechas",
+  "datefix.none": "Ninguna de las fotos seleccionadas tiene una fecha utilizable en su nombre",
+  "datefix.checking": "Leyendo los nombres de {count} fotos seleccionadas…",
+  "datefix.readFailed": "No se pudieron leer los nombres de las fotos: {error}",
+  "datefix.noDateCount": "{count} no tienen fecha en el nombre.",
+  "datefix.line.noDate": "• {name}: sin fecha en el nombre",
+  "datefix.line.same": "• {name}: nombre {named}, Drive {drive}, ya es correcta",
+  "datefix.line.fix": "• {name}: nombre {named}, Drive {drive}, se corregirá",
+  "datefix.allCorrect": "Todas las fotos cuyo nombre lleva una fecha ya muestran esa fecha en Drive",
+  "datefix.uptodate": "{count} ya muestran esa misma fecha en Drive y se dejan como están.",
+  "datefix.done.one": "Fecha corregida de {count} foto según su nombre de archivo",
+  "datefix.done.other": "Fechas corregidas de {count} fotos según sus nombres de archivo",
+  "datefix.partial": "Corregidas {ok}, {failed} con error",
+  "datefix.alreadyRunning": "Ya hay una corrección de fechas en curso",
+  "datefix.stopped": "Detenida: {ok} corregidas, {failed} con error, {skipped} sin iniciar",
+  "datefix.halted": "Detenido: Proton Drive no aceptó la nueva fecha para ninguna foto ({failed} con error, {skipped} sin empezar). No se cambió nada.",
+  "datefix.cancel": "Cancelar restantes",
+  "datefix.canceling": "Terminando las fotos actuales…",
+  "datefix.progressDetail": "{done} de {total} revisadas · {uploaded} corregidas · {unchanged} ya correctas · {failed} con error",
+  "datefix.stage.uploading": "Actualizando fechas en Drive por lotes pequeños…",
+  "datefix.stage.albums": "Restaurando pertenencia a álbumes…",
+  "datefix.stage.trashing": "Moviendo originales a la papelera…",
+  "datefix.stage.done": "Finalizando…",
 
   // Trash confirmation
   "confirm.trashTitle": "¿Mover a la papelera?",

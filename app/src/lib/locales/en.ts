@@ -106,6 +106,10 @@ export const en: Record<string, string> = {
   "login.signIn": "Sign in",
   "login.signingIn": "Signing in…",
   "login.twofaLabel": "Two-factor code",
+  "login.mailboxLabel": "Mailbox password",
+  "login.mailboxHint": "This account uses two passwords. Enter your mailbox password to unlock it.",
+  "login.unlockKeys": "Unlock",
+  "login.mailboxWrong": "Wrong mailbox password",
   "login.verify": "Verify",
   "login.verifying": "Verifying…",
   "login.captchaHint": "Proton asks you to confirm you are human.",
@@ -657,6 +661,7 @@ export const en: Record<string, string> = {
   "selection.unfavorite": "Remove from favorites",
   "selection.offlineAdd": "Available offline",
   "selection.offlineRemove": "Remove offline copy",
+  "selection.fixDates": "Fix dates",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} freed up",
@@ -680,6 +685,39 @@ export const en: Record<string, string> = {
   "offline.alreadyOffline": "Already available offline",
   "offline.noneOffline": "No offline copies to remove",
   "offline.failed": "could not save for offline use",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Fix dates from filenames?",
+  "datefix.count.one":
+    "{count} of {total} selected photos has a date in its name.",
+  "datefix.count.other":
+    "{count} of {total} selected photos have a date in their name.",
+  "datefix.body": "Each of them is uploaded again with the date from its filename written into the file itself (only its metadata changes; the picture is not re-encoded), put back in its albums with its tags, and its old copy is moved to the trash. Photos already showing the right day are left alone.",
+  "datefix.apply": "Fix dates",
+  "datefix.none": "None of the selected photos has a usable date in its name",
+  "datefix.checking": "Reading the names of {count} selected photos…",
+  "datefix.readFailed": "The photos' names could not be read: {error}",
+  "datefix.noDateCount": "{count} have no date in their name.",
+  "datefix.line.noDate": "• {name}: no date in the name",
+  "datefix.line.same": "• {name}: name {named}, Drive {drive}, already right",
+  "datefix.line.fix": "• {name}: name {named}, Drive {drive}, will be fixed",
+  "datefix.allCorrect": "Every photo whose name carries a date already shows that date on Drive",
+  "datefix.uptodate": "{count} already show this same date on Drive and are left as they are.",
+  "datefix.done.one": "{count} photo's date fixed from its filename",
+  "datefix.done.other": "{count} photos' dates fixed from their filenames",
+  "datefix.partial": "Fixed {ok}, {failed} failed",
+  "datefix.alreadyRunning": "A date-fix batch is already running",
+  "datefix.stopped": "Stopped: {ok} fixed, {failed} failed, {skipped} not started",
+  "datefix.halted": "Stopped: Proton Drive did not accept the new date for any photo ({failed} failed, {skipped} not started). Nothing was changed.",
+  "datefix.cancel": "Cancel remaining",
+  "datefix.canceling": "Finishing current photos…",
+  "datefix.progressDetail": "{done} of {total} checked · {uploaded} fixed · {unchanged} already right · {failed} failed",
+  "datefix.stage.uploading": "Updating dates on Drive, one small batch at a time…",
+  "datefix.stage.albums": "Restoring album membership…",
+  "datefix.stage.trashing": "Moving originals to Trash…",
+  "datefix.stage.done": "Finishing…",
 
   // Trash confirmation
   "confirm.trashTitle": "Move to trash?",

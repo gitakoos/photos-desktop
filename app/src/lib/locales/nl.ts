@@ -104,6 +104,10 @@ export const nl: Record<string, string> = {
   "login.signIn": "Aanmelden",
   "login.signingIn": "Aanmelden…",
   "login.twofaLabel": "Tweefactorcode",
+  "login.mailboxLabel": "Mailboxwachtwoord",
+  "login.mailboxHint": "Dit account gebruikt twee wachtwoorden. Voer je mailboxwachtwoord in om het te ontgrendelen.",
+  "login.unlockKeys": "Ontgrendelen",
+  "login.mailboxWrong": "Onjuist mailboxwachtwoord",
   "login.verify": "Verifiëren",
   "login.verifying": "Verifiëren…",
   "login.captchaHint": "Proton vraagt je te bevestigen dat je een mens bent.",
@@ -658,6 +662,7 @@ export const nl: Record<string, string> = {
   "selection.unfavorite": "Verwijderen uit favorieten",
   "selection.offlineAdd": "Offline beschikbaar",
   "selection.offlineRemove": "Offline-kopie verwijderen",
+  "selection.fixDates": "Datums herstellen",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} vrijgemaakt",
@@ -682,6 +687,39 @@ export const nl: Record<string, string> = {
   "offline.alreadyOffline": "Al offline beschikbaar",
   "offline.noneOffline": "Geen offline-kopieën om te verwijderen",
   "offline.failed": "kon niet offline worden opgeslagen",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Datums herstellen vanuit bestandsnamen?",
+  "datefix.count.one":
+    "{count} van {total} geselecteerde foto's heeft een datum in de naam.",
+  "datefix.count.other":
+    "{count} van {total} geselecteerde foto's hebben een datum in de naam.",
+  "datefix.body": "Elke foto wordt opnieuw geüpload met de datum uit de bestandsnaam in het bestand zelf (alleen de metadata verandert; de afbeelding wordt niet opnieuw gecodeerd), teruggezet in zijn albums met zijn labels, en de oude kopie gaat naar de prullenbak. Foto's die al de juiste dag tonen, blijven ongemoeid.",
+  "datefix.apply": "Datums herstellen",
+  "datefix.none": "Geen van de geselecteerde foto's heeft een bruikbare datum in de naam",
+  "datefix.checking": "De namen van {count} geselecteerde foto's worden gelezen…",
+  "datefix.readFailed": "De namen van de foto's konden niet worden gelezen: {error}",
+  "datefix.noDateCount": "{count} hebben geen datum in de naam.",
+  "datefix.line.noDate": "• {name}: geen datum in de naam",
+  "datefix.line.same": "• {name}: naam {named}, Drive {drive}, al juist",
+  "datefix.line.fix": "• {name}: naam {named}, Drive {drive}, wordt gecorrigeerd",
+  "datefix.allCorrect": "Alle foto's waarvan de naam een datum bevat laten die datum al in Drive zien",
+  "datefix.uptodate": "{count} laten deze datum al in Drive zien en blijven ongewijzigd.",
+  "datefix.done.one": "Datum van {count} foto hersteld vanuit de bestandsnaam",
+  "datefix.done.other": "Datum van {count} foto's hersteld vanuit de bestandsnamen",
+  "datefix.partial": "Hersteld {ok}, {failed} mislukt",
+  "datefix.alreadyRunning": "Er wordt al een datumcorrectie uitgevoerd",
+  "datefix.stopped": "Gestopt: {ok} hersteld, {failed} mislukt, {skipped} niet gestart",
+  "datefix.halted": "Gestopt: Proton Drive nam de nieuwe datum voor geen enkele foto over ({failed} mislukt, {skipped} niet gestart). Er is niets gewijzigd.",
+  "datefix.cancel": "Resterende annuleren",
+  "datefix.canceling": "Huidige foto's worden afgerond…",
+  "datefix.progressDetail": "{done} van {total} gecontroleerd · {uploaded} gecorrigeerd · {unchanged} al juist · {failed} mislukt",
+  "datefix.stage.uploading": "Datums in Drive bijwerken, in kleine batches…",
+  "datefix.stage.albums": "Albumlidmaatschappen herstellen…",
+  "datefix.stage.trashing": "Originelen naar de prullenbak verplaatsen…",
+  "datefix.stage.done": "Afronden…",
 
   // Trash confirmation
   "confirm.trashTitle": "Naar prullenbak verplaatsen?",

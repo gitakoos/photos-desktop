@@ -167,7 +167,27 @@ fn priority_for(method: &str) -> Priority {
         "warmThumbnails" | "listAlbumsForMount" | "listExtrasForMount"
         | "getAlbumPhotoUids" | "heapStats"
         | "whoami" | "getAccountInfo" | "getSharingInfo" | "listInvitations"
-        | "checkUpdate" | "downloadUpdate" | "getDriveCollections" => Priority::Background,
+        | "checkUpdate" | "downloadUpdate" | "getDriveCollections"
+        // The trash read ahead of its view: a whole-trash decrypt nobody is waiting on.
+        | "warmTrash" => Priority::Background,
+
+        // The date-fix job's control surface. Every one of them answers in microseconds
+        // once admitted, but they must be REACHABLE while a `listTrashed`-length walk
+        // holds the foreground lane: the job's start, and the progress polling a dialog
+        // lives on, otherwise starve behind it and die at the frontend's default 60s
+        // timeout while the walk grinds on. The background lane keeps flowing through
+        // exactly such walks, and these calls cost the sweeps they share it with
+        // almost nothing.
+        "startFixDatesFromName" | "dateFixStatus" | "cancelFixDatesFromName"
+        | "dateFixResults" => Priority::Background,
+
+        // The names of a selection the user is acting on (Fix dates). The same lookup as
+        // `getMetadata`, which sits under the warmer as `Enumerate`: with the Explorer
+        // folder off nothing had cached those names, so the call starved there behind a
+        // warm that never paused, and the action died at its timeout without a word. Here
+        // it takes its turn among the warms instead of after all of them, on the lane that
+        // keeps flowing while a long walk (a large trash) holds the foreground one.
+        "getSelectionMetadata" => Priority::Background,
 
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
@@ -1130,7 +1150,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "warmTrash" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" => TRANSFER,
         _ => REPLY,
@@ -3327,6 +3347,8 @@ mod log_tests {
         // The whole-library sweeps come in by priority tier, not by a second list.
         assert_eq!(priority_for("listForMount"), Priority::Enumerate);
         assert_eq!(deadline_for("listForMount"), long);
+        // A selection's names are asked by the user, so they are not buried with the sweeps.
+        assert!(priority_for("getSelectionMetadata") > Priority::Enumerate);
         assert!(deadline_for("getPreview") < long);
         assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
     }
@@ -3340,5 +3362,23 @@ mod log_tests {
             );
         }
         assert_eq!(priority_for("warmThumbnails"), Priority::Background);
+    }
+
+    #[test]
+    fn the_date_fix_control_calls_share_the_background_lane() {
+        // The whole point: no whole-walk call (`listTrashed` walks every trash page in
+        // ONE rpc) may keep the job's start and its polling from being admitted.
+        for method in [
+            "startFixDatesFromName",
+            "dateFixStatus",
+            "cancelFixDatesFromName",
+            "dateFixResults",
+        ] {
+            assert_eq!(
+                priority_for(method),
+                Priority::Background,
+                "{method} must not sit on the foreground lane behind a whole-library walk"
+            );
+        }
     }
 }

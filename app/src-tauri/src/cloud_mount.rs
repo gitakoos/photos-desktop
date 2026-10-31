@@ -47,6 +47,24 @@ const PREF_KEY: &str = "Software\\PhotosForProton";
 #[cfg(windows)]
 const PREF_VALUE: &str = "ShowInExplorer";
 
+/// Set by the uninstaller just before it settles the sync root under the running app,
+/// and removed with the rest of the prefs once the app is closed. Must match the
+/// installer's `UNINSTALLING_VALUE`.
+#[cfg(windows)]
+const UNINSTALLING_VALUE: &str = "Uninstalling";
+
+/// Whether the app is being uninstalled around it. The uninstaller then deletes every
+/// cloud-only placeholder while this app still serves the folder, and none of those
+/// deletions is the user's: each is let through, and none is taken to the Proton trash,
+/// answered with a refill, or otherwise acted on.
+#[cfg(windows)]
+pub fn uninstalling() -> bool {
+    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey(PREF_KEY)
+        .and_then(|k| k.get_value::<u32, _>(UNINSTALLING_VALUE))
+        .is_ok_and(|v| v != 0)
+}
+
 /// Whether the Explorer "Proton Photos" mount is enabled. Default ON when the value
 /// is missing. Set by the installer checkbox and the Settings toggle; read once at
 /// startup to decide whether to mount.
@@ -223,6 +241,14 @@ pub fn mount(app: tauri::AppHandle) {
 /// app, so nothing is mid-uninstall while we are booting.
 #[cfg(windows)]
 pub fn reap_temp_leftovers() {
+    // The same timing makes an uninstall mark found now a stale one, from an uninstall
+    // that died before it took the prefs away. Left in place it would have this app
+    // quietly ignore every change made in the folder.
+    if let Ok(key) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey_with_flags(PREF_KEY, winreg::enums::KEY_SET_VALUE)
+    {
+        let _ = key.delete_value(UNINSTALLING_VALUE);
+    }
     // The staging folders, emptied whole: nothing else puts a file in them.
     let _ = std::fs::remove_dir_all(std::env::temp_dir().join("pfp-view"));
     let _ = std::fs::remove_dir_all(std::env::temp_dir().join(crate::upload_frame::FRAME_DIR));
@@ -468,12 +494,52 @@ fn mount_index() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
 /// all, which is what leaves the colliding file untouched.
 #[cfg(windows)]
 fn index_push(uid: &str, rel: &str) {
+    if let Some(staged) = STAGED_INDEX.lock().unwrap().as_mut() {
+        staged.entry(uid.to_string()).or_default().push(rel.to_string());
+        return;
+    }
     mount_index()
         .lock()
         .unwrap()
         .entry(uid.to_string())
         .or_default()
         .push(rel.to_string());
+}
+
+/// The index a fill is building, while it builds it. A fill on a large library takes a
+/// while, and clearing the live index at its start left everything that reads it with
+/// nothing for that whole time: the downloaded-badge scan reported no photo local (and
+/// then all of them again), and Download / Free up found nothing to act on. The live
+/// index now keeps the previous fill's answer until the new one is complete, and a fill
+/// that fails partway leaves it as it was rather than half-built.
+#[cfg(windows)]
+static STAGED_INDEX: std::sync::Mutex<Option<std::collections::HashMap<String, Vec<String>>>> =
+    std::sync::Mutex::new(None);
+
+/// Routes `index_push` into a fresh index for as long as it lives; `commit` swaps that
+/// index in, and dropping it uncommitted (an early return) simply discards it.
+#[cfg(windows)]
+struct StagedIndex;
+
+#[cfg(windows)]
+impl StagedIndex {
+    fn begin() -> Self {
+        *STAGED_INDEX.lock().unwrap() = Some(std::collections::HashMap::new());
+        StagedIndex
+    }
+
+    fn commit(self) {
+        if let Some(fresh) = STAGED_INDEX.lock().unwrap().take() {
+            *mount_index().lock().unwrap() = fresh;
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StagedIndex {
+    fn drop(&mut self) {
+        STAGED_INDEX.lock().unwrap().take();
+    }
 }
 
 /// uid -> the size the cloud file has, as the last populate listed it. Recorded for
@@ -1390,6 +1456,10 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         let Some(rel) = crate::explorer_sync::relative(&root, &request.path()) else {
             return ticket.pass().map_err(|_| cloud_filter::error::CloudErrorKind::InvalidRequest);
         };
+        if uninstalling() {
+            // The uninstaller clearing the folder: refusing would strand the file.
+            return ticket.pass().map_err(|_| cloud_filter::error::CloudErrorKind::InvalidRequest);
+        }
         if !crate::explorer_sync::is_own(&rel) && (read_only_place(&rel) || !explorer_edits_enabled()) {
             // The trash is never emptied from here, and what others shared is theirs.
             return Err(cloud_filter::error::CloudErrorKind::AccessDenied);
@@ -1473,7 +1543,7 @@ pub fn populate_mount(app: tauri::AppHandle) {
         // rather than at the caller: otherwise a user who turned the Explorer
         // integration off still got the folder tree, one subfolder named after each
         // of their albums, and the uid snapshot written to disk.
-        if !show_in_explorer_enabled() {
+        if !show_in_explorer_enabled() || uninstalling() {
             return;
         }
         // The page asks again each time it loads, which a window brought back from the
@@ -1874,7 +1944,7 @@ pub(crate) fn populate_lock() -> std::sync::MutexGuard<'static, ()> {
 /// over: what the library took shows as it now is, and what it did not comes back.
 #[cfg(windows)]
 pub(crate) fn refresh_mount(app: &tauri::AppHandle) {
-    if !show_in_explorer_enabled() {
+    if !show_in_explorer_enabled() || uninstalling() {
         return;
     }
     {
@@ -1926,8 +1996,10 @@ fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), Strin
     // What the previous fill knew, for `prune_stale` to recognise a downloaded copy that
     // is still a photo of the library under the name it had before a rename.
     let previous = rel_to_uid();
-    mount_index().lock().unwrap().clear();
-    mount_sizes().lock().unwrap().clear();
+    // Sizes are overwritten as the listing arrives rather than cleared up front; one
+    // left behind for a photo the library no longer has is never read, since the
+    // committed index will not name that photo.
+    let staged = StagedIndex::begin();
     cleanup_stale_root(&folder);
 
     let photos_dir = folder.join("Photos");
@@ -2055,6 +2127,8 @@ fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), Strin
     // files, backed by the same uid, hydrated on demand).
     populate_albums(app, &folder.join("Albums"), &meta);
     populate_extras(app, &folder, &favorites);
+    // Every placement is made: the new index replaces the previous one in one step.
+    staged.commit();
     prune_stale(app, &folder, &previous);
     // The index now names copies an earlier run downloaded, which the badge has to show.
     rescan_hydrated();

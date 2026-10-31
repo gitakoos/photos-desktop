@@ -133,6 +133,7 @@ import { cachedMediaType } from "../lib/mediaTypes";
 import { useUploads } from "../hooks/useUploads";
 import { useLang, useT } from "../lib/i18n";
 import { onThisDay, seasons } from "../lib/memories";
+import { dateNeedsFix, parseFilenameCapture } from "../lib/filenameDate";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
 import "../styles/Photos.css";
 
@@ -257,6 +258,9 @@ function AlbumHero({
 const TIMELINE_PAGE = 20_000;
 const TIMELINE_POLL_MS = 250;
 
+/** Up to this many selected photos, the date-fix dialog explains each one by name. */
+const DATEFIX_REPORT_LIMIT = 25;
+
 export function Photos({ email, onSignOut }: { email: string; onSignOut: () => void }) {
   const t = useT();
   const [items, setItems] = useState<TimelineItem[]>([]);
@@ -354,6 +358,41 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
 
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
+  // "Fix dates from filenames": the selection's photos whose own name records a real date
+  // that differs from what Drive already shows, waiting behind the confirm the replace
+  // needs. The already-correct and unparseable counts ride beside them, so the dialog
+  // lines say exactly what would happen and to how many.
+  const [fixDates, setFixDates] = useState<{
+    items: { uid: string; captureTime: number; expectedSize?: number; withTime: boolean }[];
+    total: number;
+    upToDate: number;
+    /** Selected photos whose name carries no date the reader can trust. */
+    noDate: number;
+    /** The names are still being read: the dialog is open and says so. */
+    checking: boolean;
+    /** Why the names could not be read, when they could not. */
+    error?: string;
+    /** One line per photo, for a selection small enough to explain. */
+    report: string[];
+  } | null>(null);
+  const [fixDateProgress, setFixDateProgress] = useState<{
+    running: boolean;
+    done: number;
+    total: number;
+    failed: number;
+    skipped: number;
+    active: number;
+    uploaded: number;
+    unchanged: number;
+    batch: number;
+    batches: number;
+    batchDone: number;
+    batchTotal: number;
+    stage: "uploading" | "albums" | "trashing" | "done";
+    cancelled: boolean;
+    halted?: boolean;
+  } | null>(null);
+  const [fixDateCanceling, setFixDateCanceling] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -1576,6 +1615,185 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       setPickAlbum(false);
     } finally {
       setAlbumBusy(false);
+    }
+  }
+
+  /**
+   * The names and sizes of a selection the user is acting on. Asked in chunks: with the
+   * Explorer folder off nothing has cached them, so every name is a node decrypt, and a
+   * chunk keeps each call well inside its timeout and lets the thumbnail warming take
+   * its turns in between instead of waiting on one call for the whole selection.
+   */
+  async function readSelectionNames(uids: string[]) {
+    const CHUNK = 200;
+    const out: { uid: string; name: string; size?: number | null }[] = [];
+    for (let at = 0; at < uids.length; at += CHUNK) {
+      out.push(
+        ...(await rpc<{ uid: string; name: string; size?: number | null }[]>("getSelectionMetadata", {
+          uids: uids.slice(at, at + CHUNK),
+        })),
+      );
+    }
+    return out;
+  }
+
+  // "Fix dates from filenames": ask for the selection's own names, parse them, and offer
+  // the replacement only for photos whose name date differs from the capture time the
+  // photo already carries on Drive — a name whose date Drive already shows has nothing
+  // to fix. The timeline state is the cloud look-up: same item the month grouping runs
+  // on, no second RPC needed.
+  async function openFixDates() {
+    const uids = [...selected];
+    if (uids.length === 0) return;
+    // The dialog opens at once and says what it is doing: before, nothing showed until the
+    // names were read, and a selection with nothing to fix ended in a four-second notice
+    // that was easy to miss — the button looked as if it did nothing.
+    setFixDates({ items: [], total: uids.length, upToDate: 0, noDate: 0, checking: true, report: [] });
+    const note = (message: string) => void invoke("log_note", { message: `datefix: ${message}` }).catch(() => {});
+    note(`checking ${uids.length} selected`);
+    let metas: { uid: string; name: string; size?: number | null }[];
+    try {
+      metas = await readSelectionNames(uids);
+    } catch (e) {
+      note(`reading names failed: ${String(e)}`);
+      setFixDates((open) => open && { ...open, checking: false, error: String(e) });
+      return;
+    }
+    const now = Date.now();
+    // The capture time each selected photo already shows on Drive, from the timeline's
+    // own items; a photo absent there has no comparison here, so its name decides and the
+    // sidecar compares it against the node itself before it writes anything.
+    const cloudMs = new Map(items.map((it) => [it.uid, it.captureTime]));
+    const day = (ms: number, utc: boolean) =>
+      new Date(ms).toLocaleDateString(lang, utc ? { timeZone: "UTC" } : undefined);
+    // A small selection is explained photo by photo, so "nothing to fix" can be checked.
+    const explain = uids.length <= DATEFIX_REPORT_LIMIT;
+    const report: string[] = [];
+    const fixItems: { uid: string; captureTime: number; expectedSize?: number; withTime: boolean }[] = [];
+    let upToDate = 0;
+    let noDate = 0;
+    for (const meta of metas) {
+      const capture = parseFilenameCapture(meta.name, now);
+      if (!capture) {
+        noDate++;
+        if (explain) report.push(t("datefix.line.noDate", { name: meta.name }));
+        continue;
+      }
+      const cloud = cloudMs.get(meta.uid) ?? 0;
+      const named = day(capture.ms, false);
+      // Drive's date as the reading that matches, where one does (see `dateNeedsFix`).
+      const drive = cloud > 0 ? (day(cloud, true) === named ? named : day(cloud, false)) : "—";
+      if (!dateNeedsFix(capture, cloud)) {
+        upToDate++;
+        if (explain) report.push(t("datefix.line.same", { name: meta.name, named, drive }));
+        continue;
+      }
+      if (explain) report.push(t("datefix.line.fix", { name: meta.name, named, drive }));
+      const size = Number(meta.size);
+      fixItems.push({
+        uid: meta.uid,
+        captureTime: capture.ms,
+        ...(Number.isFinite(size) && size > 0 ? { expectedSize: size } : {}),
+        // The sidecar re-checks Drive at this same precision before it writes anything.
+        withTime: capture.withTime,
+      });
+    }
+    note(`${fixItems.length} to fix, ${upToDate} already right, ${noDate} without a date, of ${uids.length}`);
+    setFixDates((open) =>
+      open && { ...open, items: fixItems, upToDate, noDate, checking: false, report },
+    );
+  }
+
+  async function applyFixDates() {
+    const items = fixDates?.items ?? [];
+    if (items.length === 0) return;
+    try {
+      setFixDateProgress({
+        running: true,
+        done: 0,
+        total: items.length,
+        failed: 0,
+        skipped: 0,
+        active: 0,
+        uploaded: 0,
+        unchanged: 0,
+        batch: 1,
+        // The sidecar's authoritative batches arrive on the first progress export; this
+        // early estimate only sizes the bar, and matches the sidecar's window cap.
+        batches: Math.max(1, Math.ceil(items.length / 8)),
+        batchDone: 0,
+        batchTotal: items.length,
+        stage: "uploading",
+        cancelled: false,
+      });
+      const started = await rpc<{ started: boolean }>("startFixDatesFromName", {
+        items,
+      });
+      if (!started.started) {
+        setToast(t("datefix.alreadyRunning"));
+        return;
+      }
+      // The poll tolerates transient failures — a call queued behind a walk, a respawn —
+      // so one bad trip doesn't kill a job the sidecar is still running. Only several
+      // in a row mean the transport is really gone, and the same cleanup path runs.
+      let status: NonNullable<typeof fixDateProgress>;
+      let stalledPolls = 0;
+      for (;;) {
+        await new Promise((resolve) => window.setTimeout(resolve, 650));
+        try {
+          status = await rpc<NonNullable<typeof fixDateProgress>>("dateFixStatus");
+        } catch (pollError) {
+          if (++stalledPolls >= 3) throw pollError;
+          continue;
+        }
+        stalledPolls = 0;
+        setFixDateProgress(status);
+        if (!status.running) break;
+      }
+      const done = await rpc<
+        { uid: string; ok: boolean; error?: string; cancelled?: boolean; unchanged?: boolean }[]
+      >(
+        "dateFixResults",
+      );
+      // Photos Drive turned out to already date correctly (a stale timeline, a re-run, a
+      // fix from another device) were left alone by the sidecar: not fixed, not failed.
+      const fixed = done.filter((r) => r.ok && !r.unchanged).length;
+      const unchanged = done.filter((r) => r.unchanged).length;
+      const failed = done.filter((r) => !r.ok && !r.cancelled).length;
+      const skipped = done.filter((r) => r.cancelled).length;
+      // The job stops itself when Drive takes the date for none of the photos it tries;
+      // that says why the rest was not started, not merely that it was not.
+      const summary = status.halted
+        ? t("datefix.halted", { failed, skipped })
+        : skipped > 0
+          ? t("datefix.stopped", { ok: fixed, failed, skipped })
+          : failed === 0
+            ? t(fixed === 1 ? "datefix.done.one" : "datefix.done.other", { count: fixed })
+            : t("datefix.partial", { ok: fixed, failed });
+      setToast(unchanged > 0 ? `${summary} · ${t("datefix.uptodate", { count: unchanged })}` : summary);
+      // The replaced copies are brand-new nodes: drop their stale previews.
+      done.filter((r) => r.ok && !r.unchanged).forEach((r) => dropPreview(r.uid));
+      sel.clear();
+      if (fixed > 0) bumpReload();
+    } catch (e) {
+      setToast(String(e));
+      // If progress polling loses the sidecar, at least prevent more queued uploads.
+      void rpc("cancelFixDatesFromName").catch(() => {});
+    } finally {
+      setFixDates(null);
+      setFixDateProgress(null);
+      setFixDateCanceling(false);
+    }
+  }
+
+  async function cancelFixDates() {
+    if (!fixDateProgress?.running || fixDateCanceling) return;
+    setFixDateCanceling(true);
+    try {
+      setFixDateProgress(await rpc<NonNullable<typeof fixDateProgress>>("cancelFixDatesFromName"));
+    } catch {
+      // The active workers will finish their current safe replace if the sidecar is still
+      // connected; the polling loop owns the final result and error message.
     }
   }
 
@@ -2868,6 +3086,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             onCancel={sel.clear}
             onAddToAlbum={() => setPickAlbum(true)}
             onDownload={() => void runSelection(downloadSelected)}
+            onFixDates={() => void runSelection(openFixDates)}
             onFreeUp={() => void runSelection(freeUpSelected)}
             onOfflineAdd={
               allSelectedOffline ? undefined : () => void runSelection(offlineAddSelected)
@@ -3107,6 +3326,69 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             setConfirmEmpty(false);
             void emptyTrash();
           }}
+        />
+      )}
+
+      {fixDates && (
+        <Confirm
+          title={t("datefix.title")}
+          message={(() => {
+            if (fixDates.checking) return t("datefix.checking", { count: fixDates.total });
+            if (fixDates.error) return t("datefix.readFailed", { error: fixDates.error });
+            const lines: string[] = [];
+            if (fixDates.items.length > 0) {
+              lines.push(
+                t(fixDates.items.length === 1 ? "datefix.count.one" : "datefix.count.other", {
+                  count: fixDates.items.length,
+                  total: fixDates.total,
+                }),
+                t("datefix.body"),
+              );
+            } else {
+              lines.push(t(fixDates.upToDate > 0 ? "datefix.allCorrect" : "datefix.none"));
+            }
+            if (fixDates.upToDate > 0 && fixDates.items.length > 0) {
+              lines.push(t("datefix.uptodate", { count: fixDates.upToDate }));
+            }
+            if (fixDates.noDate > 0) lines.push(t("datefix.noDateCount", { count: fixDates.noDate }));
+            if (fixDates.report.length > 0) lines.push("", ...fixDates.report);
+            return lines.join("\n");
+          })()}
+          confirmLabel={t("datefix.apply")}
+          // While reading, and when there is nothing to fix, the only button closes it.
+          busy={fixDateProgress !== null || fixDates.checking || fixDates.items.length === 0}
+          canceling={fixDateCanceling}
+          cancelLabel={fixDateProgress ? t("datefix.cancel") : t("common.close")}
+          cancelingLabel={t("datefix.canceling")}
+          progress={
+            fixDateProgress
+              ? {
+                  // The sidecar's `done` counts only outcomes sealed on Drive, so the bar
+                  // never runs ahead of what has actually landed in the cloud.
+                  value:
+                    fixDateProgress.stage === "done"
+                      ? 100
+                      : Math.round(
+                          ((fixDateProgress.done + fixDateProgress.skipped) /
+                            Math.max(1, fixDateProgress.total)) *
+                            100,
+                        ),
+                  label: t(`datefix.stage.${fixDateProgress.stage}`),
+                  detail: t("datefix.progressDetail", {
+                    done: fixDateProgress.done,
+                    total: fixDateProgress.total,
+                    uploaded: fixDateProgress.uploaded,
+                    unchanged: fixDateProgress.unchanged,
+                    failed: fixDateProgress.failed,
+                  }),
+                }
+              : undefined
+          }
+          onCancel={() => {
+            if (fixDateProgress) void cancelFixDates();
+            else setFixDates(null);
+          }}
+          onConfirm={() => void runSelection(applyFixDates)}
         />
       )}
 

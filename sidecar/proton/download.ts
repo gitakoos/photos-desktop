@@ -547,8 +547,22 @@ export async function resolveMediaTypesBatch(
  * new photos does zero node decrypts and returns in milliseconds. Paging still lets the
  * Rust host release the RPC lock between pages so thumbnails keep loading on a cold run.
  */
-export async function listForMount(photos: any, offset: number, limit: number): Promise<MountPage> {
-  if (offset === 0 || !mountUids) {
+export async function listForMount(
+  photos: any,
+  offset: number,
+  limit: number,
+  timeline: { uid: string; captureTime: number; tags: number[] }[] | null = null,
+): Promise<MountPage> {
+  if (offset === 0 && timeline) {
+    // The window has just read the whole timeline: the fill pages from that read.
+    mountUids = timeline
+      .filter((item) => !!item.uid)
+      .map((item) => ({
+        uid: item.uid,
+        captureTime: item.captureTime,
+        favorite: item.tags.includes(PhotoTag.Favorites),
+      }));
+  } else if (offset === 0 || !mountUids) {
     const picks: { uid: string; captureTime: number; favorite: boolean }[] = [];
     for await (const item of withStallGuard(
       photos.iterateTimeline(),

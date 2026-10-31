@@ -189,31 +189,48 @@ export async function listAlbumsForMount(photos: any): Promise<AlbumMount[]> {
   const albumUids = await listAlbumUids(photos);
   if (albumUids.length === 0) return [];
 
-  const out: AlbumMount[] = [];
+  const albums: { uid: string; name: string }[] = [];
   for await (const albumNode of withStallGuard(
     photos.iterateNodes(albumUids),
     SDK_STALL_MS,
     "iterateNodes",
   )) {
     if ((albumNode as any).missingUid) continue;
-    const albumUid = (albumNode as any).uid;
-    const uids: string[] = [];
-    try {
-      for await (const item of withStallGuard(
-        photos.iterateAlbum(albumUid),
-        SDK_STALL_MS,
-        "iterateAlbum",
-      )) {
-        const u = (item as any).nodeUid;
-        if (u) uids.push(u);
-      }
-    } catch (e) {
-      process.stderr.write(`[albums] iterateAlbum failed: ${(e as Error).message}\n`);
-    }
-    out.push({ uid: albumUid, name: nodeName(albumNode) || "Album", uids });
+    albums.push({ uid: (albumNode as any).uid, name: nodeName(albumNode) || "Album" });
   }
+
+  // Each album's listing is its own run of round-trips, so a few go at once instead of
+  // one after another: a library of many albums no longer holds the call (and the
+  // Explorer fill waiting on it) for the sum of every album's latency. Kept small, so
+  // the SDK's own request queue and Proton's rate limits are never crowded.
+  const out: AlbumMount[] = new Array(albums.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(MOUNT_ALBUM_CONCURRENCY, albums.length) }, async () => {
+      for (let i = next++; i < albums.length; i = next++) {
+        const album = albums[i]!;
+        const uids: string[] = [];
+        try {
+          for await (const item of withStallGuard(
+            photos.iterateAlbum(album.uid),
+            SDK_STALL_MS,
+            "iterateAlbum",
+          )) {
+            const u = (item as any).nodeUid;
+            if (u) uids.push(u);
+          }
+        } catch (e) {
+          process.stderr.write(`[albums] iterateAlbum failed: ${(e as Error).message}\n`);
+        }
+        out[i] = { ...album, uids };
+      }
+    }),
+  );
   return out;
 }
+
+/** How many album listings the Explorer fill reads at once. */
+const MOUNT_ALBUM_CONCURRENCY = 4;
 
 // ---- Changing ----
 

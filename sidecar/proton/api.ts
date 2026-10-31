@@ -20,6 +20,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { updateServerTimeWithUpdateTimestamp } from "@protontech/crypto/serverTime";
+
 // Raw Proton API client for the sidecar: auth + core endpoints, plus the
 // session-aware HTTP client the Drive SDK consumes.
 
@@ -29,7 +31,10 @@ export const BASE_URL = "https://drive-api.proton.me";
 // Mirror the Android app's proven appVersion exactly. The underscore form passes
 // both ProtonCore's client-side regex and the auth server; other shapes get a
 // "this version is no longer supported" rejection. Do not change the shape.
-export const APP_VERSION = "external-drive-akoos_proton_photos@2.3.10-stable";
+// Kept in step with the Android build's accepted app-version header format. This
+// is distinct from the Windows User-Agent below; it has not been shown to cause
+// or fix the manifest-signature rejection.
+export const APP_VERSION = "external-drive-akoos_proton_photos@2.6.0-stable";
 
 /**
  * The User-Agent, which is what Proton's security log shows as the device ("the app, and
@@ -280,7 +285,11 @@ export function reportSlowUpload(): void {
  * tokens. Refresh is single-flight because Proton rotates the refresh token on every
  * use, so concurrent refreshes would invalidate each other and force a real logout.
  */
-export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
+export function makeSdkHttpClient(
+  session: Session,
+  onRefreshed?: () => void,
+  onManifestCommit?: (body: Record<string, unknown>) => Promise<void>,
+) {
   function inject(url: string, headers: Headers): Headers {
     headers.set("x-pm-appversion", APP_VERSION);
     headers.set("User-Agent", USER_AGENT);
@@ -291,6 +300,32 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
       headers.set("Authorization", `Bearer ${session.accessToken}`);
     }
     return headers;
+  }
+
+  /**
+   * Feeds the crypto clock with the server's own time, the same hook the SDK's
+   * official CLI installs ("keep crypto time in sync with the API"). Node keys
+   * and manifest signatures are dated by `serverTime()`, which falls back to the
+   * device clock as long as it is never fed — and the API rejects keys and
+   * signatures dated by a clock it considers wrong (e.g. ahead of its own),
+   * surfacing as "Invalid manifest signature." at commit. `x-pm-date` is the
+   * authoritative one; the standard header is the documented fallback.
+   */
+  let loggedServerClock = false;
+  function noteServerTime(url: string, res: Response, requestStartedAt: Date): void {
+    if (!isApiUrl(url)) return;
+    const raw = res.headers.get("x-pm-date") ?? res.headers.get("date");
+    if (!raw) return;
+    const when = new Date(raw);
+    if (Number.isNaN(when.getTime())) return;
+    updateServerTimeWithUpdateTimestamp(when, requestStartedAt);
+    if (!loggedServerClock) {
+      loggedServerClock = true;
+      const midpoint = requestStartedAt.getTime() + (Date.now() - requestStartedAt.getTime()) / 2;
+      process.stderr.write(
+        `[crypto:clock] source=${res.headers.has("x-pm-date") ? "x-pm-date" : "date"} estimatedOffsetMs=${Math.round(midpoint - when.getTime())}\n`,
+      );
+    }
   }
 
   let refreshing: Promise<void> | null = null;
@@ -313,14 +348,20 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
   }
 
   async function withAuthRetry(url: string, run: () => Promise<Response>): Promise<Response> {
-    const res = await run();
+    const runAndUpdateServerTime = async () => {
+      const requestStartedAt = new Date();
+      const response = await run();
+      noteServerTime(url, response, requestStartedAt);
+      return response;
+    };
+    const res = await runAndUpdateServerTime();
     if (res.status === 401 && isApiUrl(url)) {
       try {
         await refresh();
       } catch {
         return res; // refresh failed: surface the original 401
       }
-      return run(); // retry once with the fresh access token
+      return runAndUpdateServerTime(); // retry once with the fresh access token
     }
     return res;
   }
@@ -337,7 +378,7 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
     }): Promise<Response> {
       // Built per attempt, so the retry a 401 triggers is bounded on its own rather
       // than inheriting what a slow first attempt already spent.
-      return withAuthRetry(req.url, () => {
+      const res = await withAuthRetry(req.url, () => {
         const headers = inject(req.url, new Headers(req.headers));
         if (req.json) headers.set("Content-Type", "application/json");
         return fetch(req.url, {
@@ -347,6 +388,16 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
           signal: attemptSignal(req.timeoutMs, req.signal),
         });
       });
+      if (
+        isApiUrl(req.url) &&
+        req.method.toUpperCase() === "PUT" &&
+        /\/files\/[^/]+\/revisions\/[^/?]+(?:\?|$)/.test(req.url) &&
+        req.json &&
+        onManifestCommit
+      ) {
+        await onManifestCommit(req.json as Record<string, unknown>);
+      }
+      return res;
     },
     async fetchBlob(req: {
       url: string;

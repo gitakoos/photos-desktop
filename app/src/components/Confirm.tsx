@@ -29,6 +29,11 @@ type Props = {
   message: string;
   confirmLabel: string;
   danger?: boolean;
+  busy?: boolean;
+  canceling?: boolean;
+  cancelLabel?: string;
+  cancelingLabel?: string;
+  progress?: { value: number; label: string; detail: string };
   /**
    * For an action with no way back. Enter stops confirming and the focus rests
    * on Cancel, so the button has to be aimed at and hit deliberately.
@@ -48,6 +53,11 @@ export function Confirm({
   message,
   confirmLabel,
   danger,
+  busy,
+  canceling,
+  cancelLabel,
+  cancelingLabel,
+  progress,
   irreversible,
   onConfirm,
   onCancel,
@@ -56,6 +66,7 @@ export function Confirm({
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       e.stopPropagation();
+      if (busy) return;
       if (e.key === "Escape") onCancel();
       // Enter is a reflex on a dialog, which is fine for something the trash can
       // give back, and not fine for something nothing can.
@@ -63,7 +74,7 @@ export function Confirm({
     }
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onCancel, onConfirm, irreversible]);
+  }, [onCancel, onConfirm, irreversible, busy]);
 
   return (
     <div
@@ -71,23 +82,47 @@ export function Confirm({
       onClick={(e) => {
         // Never let the click reach the lightbox or grid underneath.
         e.stopPropagation();
-        onCancel();
+        if (!busy) onCancel();
       }}
     >
       <div className="cf-panel" role="alertdialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">{title}</h3>
         <p className="cf-msg">{message}</p>
+        {progress && (
+          <div className="cf-progress" aria-live="polite">
+            <div
+              className="cf-progress-track"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={progress.value}
+              aria-label={progress.label}
+            >
+              <div className="cf-progress-fill" style={{ width: `${progress.value}%` }} />
+            </div>
+            <div className="cf-progress-label">{progress.label}</div>
+            <div className="cf-progress-detail">{progress.detail}</div>
+          </div>
+        )}
         <div className="cf-actions">
-          <button className="cf-btn" autoFocus={irreversible} onClick={onCancel}>
-            {t("common.cancel")}
-          </button>
-          <button
-            className={`cf-btn ${danger ? "danger" : "primary"}`}
-            autoFocus={!irreversible}
-            onClick={onConfirm}
-          >
-            {confirmLabel}
-          </button>
+          {busy ? (
+            <button className="cf-btn" disabled={canceling} onClick={onCancel}>
+              {canceling ? cancelingLabel ?? t("common.cancel") : cancelLabel ?? t("common.cancel")}
+            </button>
+          ) : (
+            <>
+              <button className="cf-btn" autoFocus={irreversible} onClick={onCancel}>
+                {t("common.cancel")}
+              </button>
+              <button
+                className={`cf-btn ${danger ? "danger" : "primary"}`}
+                autoFocus={!irreversible}
+                onClick={onConfirm}
+              >
+                {confirmLabel}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

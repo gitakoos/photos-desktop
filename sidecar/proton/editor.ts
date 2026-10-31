@@ -115,7 +115,7 @@ export function editedName(sourceName: string, when: Date): string {
 }
 
 /** Download one node's decrypted original into a Buffer. */
-async function downloadToBuffer(photos: any, uid: string): Promise<Buffer> {
+export async function downloadToBuffer(photos: any, uid: string): Promise<Buffer> {
   const downloader = await photos.getFileDownloader(uid);
   const chunks: Uint8Array[] = [];
   const stream = new WritableStream<Uint8Array>({

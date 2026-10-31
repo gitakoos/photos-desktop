@@ -265,6 +265,10 @@ impl Library for Index {
 }
 
 fn apply(app: &tauri::AppHandle, batch: &[RawEvent]) {
+    // The uninstaller is emptying the folder: nothing that vanishes is the user's doing.
+    if crate::cloud_mount::uninstalling() {
+        return;
+    }
     let changes = rules::read_batch(batch);
     if changes.is_empty() {
         return;
@@ -393,6 +397,9 @@ fn run(app: &tauri::AppHandle, action: &Action, album: &str) -> bool {
 
 /// Fills the folder again from the library, soon and once, however many batches ask.
 pub fn request_refresh(app: &tauri::AppHandle) {
+    if crate::cloud_mount::uninstalling() {
+        return;
+    }
     static PENDING: Mutex<bool> = Mutex::new(false);
     {
         let mut pending = PENDING.lock().unwrap();

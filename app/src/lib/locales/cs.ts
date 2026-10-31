@@ -106,6 +106,10 @@ export const cs: Record<string, string> = {
   "login.signIn": "Přihlásit se",
   "login.signingIn": "Přihlašování…",
   "login.twofaLabel": "Dvoufaktorový kód",
+  "login.mailboxLabel": "Heslo schránky",
+  "login.mailboxHint": "Tento účet používá dvě hesla. Zadejte heslo schránky pro odemčení.",
+  "login.unlockKeys": "Odemknout",
+  "login.mailboxWrong": "Nesprávné heslo schránky",
   "login.verify": "Ověřit",
   "login.verifying": "Ověřování…",
   "login.captchaHint": "Proton tě žádá o potvrzení, že jsi člověk.",
@@ -657,6 +661,7 @@ export const cs: Record<string, string> = {
   "selection.unfavorite": "Odebrat z oblíbených",
   "selection.offlineAdd": "Dostupné offline",
   "selection.offlineRemove": "Odebrat offline kopii",
+  "selection.fixDates": "Opravit data",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} uvolněno",
@@ -681,6 +686,39 @@ export const cs: Record<string, string> = {
   "offline.alreadyOffline": "Již dostupné offline",
   "offline.noneOffline": "Nejsou žádné offline kopie k odebrání",
   "offline.failed": "nepodařilo se uložit pro offline použití",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Opravit data podle názvů souborů?",
+  "datefix.count.one":
+    "{count} z {total} vybraných fotografií má datum v názvu.",
+  "datefix.count.other":
+    "{count} z {total} vybraných fotografií má datum v názvu.",
+  "datefix.body": "Každá z nich se nahraje znovu s datem z názvu souboru zapsaným přímo do souboru (mění se jen metadata, obraz se znovu nekóduje), vrátí se do svých alb se svými štítky a její stará kopie se přesune do koše. Fotky, které už ukazují správný den, zůstanou beze změny.",
+  "datefix.apply": "Opravit data",
+  "datefix.none": "Žádná z vybraných fotografií nemá v názvu použitelné datum",
+  "datefix.checking": "Načítají se názvy vybraných fotek ({count})…",
+  "datefix.readFailed": "Názvy fotek se nepodařilo načíst: {error}",
+  "datefix.noDateCount": "Bez data v názvu: {count}.",
+  "datefix.line.noDate": "• {name}: v názvu není datum",
+  "datefix.line.same": "• {name}: název {named}, Drive {drive}, již správně",
+  "datefix.line.fix": "• {name}: název {named}, Drive {drive}, bude opraveno",
+  "datefix.allCorrect": "Všechny fotky, jejichž název obsahuje datum, už toto datum v Drive zobrazují",
+  "datefix.uptodate": "{count} toto datum už v Drive zobrazují a zůstávají beze změny.",
+  "datefix.done.one": "Datum opraveno u {count} fotografie podle názvu souboru",
+  "datefix.done.other": "Data opravena u {count} fotografií podle názvů souborů",
+  "datefix.partial": "Opraveno {ok}, {failed} selhalo",
+  "datefix.alreadyRunning": "Oprava dat už probíhá",
+  "datefix.stopped": "Zastaveno: opraveno {ok}, chyb {failed}, nezahájeno {skipped}",
+  "datefix.halted": "Zastaveno: Proton Drive nové datum nepřijal u žádné fotky (selhalo: {failed}, nespuštěno: {skipped}). Nic nebylo změněno.",
+  "datefix.cancel": "Zrušit zbývající",
+  "datefix.canceling": "Dokončují se právě zpracovávané fotografie…",
+  "datefix.progressDetail": "Zkontrolováno {done} z {total} · opraveno: {uploaded} · již správně: {unchanged} · selhalo: {failed}",
+  "datefix.stage.uploading": "Aktualizace dat v Drive po malých dávkách…",
+  "datefix.stage.albums": "Obnovuje se členství v albech…",
+  "datefix.stage.trashing": "Originály se přesouvají do koše…",
+  "datefix.stage.done": "Dokončování…",
 
   // Trash confirmation
   "confirm.trashTitle": "Přesunout do koše?",

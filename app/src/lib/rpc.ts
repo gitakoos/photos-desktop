@@ -52,12 +52,16 @@ const TIMEOUT_MS: Record<string, number> = {
   // app: on a cold run it decrypts a node per photo before the grid can paint at all.
   getTimeline: 15 * MINUTE,
   getMetadata: 5 * MINUTE,
+  // One chunk of a selection's names (Fix dates): cold, each name is a node decrypt.
+  getSelectionMetadata: 5 * MINUTE,
   getDurations: 5 * MINUTE,
   getMediaTypes: 5 * MINUTE,
   getAlbums: 5 * MINUTE,
   getAlbumPhotos: 5 * MINUTE,
   getAlbumPhotoUids: 5 * MINUTE,
   listTrashed: 5 * MINUTE,
+  // The same walk warmed in the background, which a large trash can stretch well past five.
+  warmTrash: 15 * MINUTE,
   getShared: 5 * MINUTE,
   // A batch of decrypts admitted below everything else, so the wait for the channel
   // can dwarf the work itself.
@@ -79,12 +83,22 @@ const TIMEOUT_MS: Record<string, number> = {
   removePhotosFromAlbum: 15 * MINUTE,
   deleteAlbum: 15 * MINUTE,
 
+  // The date-fix job's control calls. Each answers in microseconds once the sidecar
+  // turns to it, but the run itself must outlast any walk that asked the same
+  // foreground queues before it travelled — a kick that sat behind a whole-trash walk
+  // died at the flat default while its job had not even started.
+  startFixDatesFromName: 15 * MINUTE,
+  dateFixStatus: 15 * MINUTE,
+  dateFixResults: 15 * MINUTE,
+  cancelFixDatesFromName: 15 * MINUTE,
+
   // Signing in: an SRP handshake, then the account keys. Giving up early here costs
   // the user their password a second time, so it is the most generous of the lot.
   login: 5 * MINUTE,
   unlock: 5 * MINUTE,
   submitCaptcha: 5 * MINUTE,
   submit2fa: 5 * MINUTE,
+  submitMailboxPassword: 5 * MINUTE,
 };
 
 /** Rejects if `work` has not settled within `ms`, and never leaves a timer behind. */

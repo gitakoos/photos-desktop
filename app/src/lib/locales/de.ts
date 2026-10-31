@@ -104,6 +104,10 @@ export const de: Record<string, string> = {
   "login.signIn": "Anmelden",
   "login.signingIn": "Anmeldung läuft…",
   "login.twofaLabel": "Zwei-Faktor-Code",
+  "login.mailboxLabel": "Postfachpasswort",
+  "login.mailboxHint": "Dieses Konto verwendet zwei Passwörter. Gib dein Postfachpasswort ein, um es zu entsperren.",
+  "login.unlockKeys": "Entsperren",
+  "login.mailboxWrong": "Falsches Postfachpasswort",
   "login.verify": "Bestätigen",
   "login.verifying": "Wird bestätigt…",
   "login.captchaHint": "Proton bittet dich zu bestätigen, dass du ein Mensch bist.",
@@ -660,6 +664,7 @@ export const de: Record<string, string> = {
   "selection.unfavorite": "Aus Favoriten entfernen",
   "selection.offlineAdd": "Offline verfügbar",
   "selection.offlineRemove": "Offline-Kopie entfernen",
+  "selection.fixDates": "Daten korrigieren",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} freigegeben",
@@ -684,6 +689,39 @@ export const de: Record<string, string> = {
   "offline.alreadyOffline": "Bereits offline verfügbar",
   "offline.noneOffline": "Keine Offline-Kopien zum Entfernen",
   "offline.failed": "konnte nicht für die Offline-Nutzung gespeichert werden",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Daten aus Dateinamen korrigieren?",
+  "datefix.count.one":
+    "{count} von {total} ausgewählten Fotos hat ein Datum im Namen.",
+  "datefix.count.other":
+    "{count} von {total} ausgewählten Fotos haben ein Datum im Namen.",
+  "datefix.body": "Jedes davon wird erneut hochgeladen, mit dem Datum aus dem Dateinamen direkt in der Datei (nur die Metadaten ändern sich, das Bild wird nicht neu kodiert), kommt mit seinen Tags zurück in seine Alben, und die alte Kopie wandert in den Papierkorb. Fotos, die schon den richtigen Tag zeigen, bleiben unverändert.",
+  "datefix.apply": "Daten korrigieren",
+  "datefix.none": "Keines der ausgewählten Fotos hat ein verwertbares Datum im Namen",
+  "datefix.checking": "Die Namen von {count} ausgewählten Fotos werden gelesen…",
+  "datefix.readFailed": "Die Namen der Fotos konnten nicht gelesen werden: {error}",
+  "datefix.noDateCount": "{count} haben kein Datum im Namen.",
+  "datefix.line.noDate": "• {name}: kein Datum im Namen",
+  "datefix.line.same": "• {name}: Name {named}, Drive {drive}, bereits richtig",
+  "datefix.line.fix": "• {name}: Name {named}, Drive {drive}, wird korrigiert",
+  "datefix.allCorrect": "Alle Fotos, deren Name ein Datum trägt, zeigen dieses Datum bereits in Drive",
+  "datefix.uptodate": "{count} zeigen dieses Datum bereits in Drive und bleiben unverändert.",
+  "datefix.done.one": "Datum von {count} Foto aus dem Dateinamen korrigiert",
+  "datefix.done.other": "Daten von {count} Fotos aus den Dateinamen korrigiert",
+  "datefix.partial": "{ok} korrigiert, {failed} fehlgeschlagen",
+  "datefix.alreadyRunning": "Eine Datumskorrektur läuft bereits",
+  "datefix.stopped": "Gestoppt: {ok} korrigiert, {failed} fehlgeschlagen, {skipped} nicht gestartet",
+  "datefix.halted": "Angehalten: Proton Drive hat das neue Datum für kein Foto übernommen ({failed} fehlgeschlagen, {skipped} nicht begonnen). Nichts wurde geändert.",
+  "datefix.cancel": "Rest abbrechen",
+  "datefix.canceling": "Aktuelle Fotos werden fertiggestellt…",
+  "datefix.progressDetail": "{done} von {total} geprüft · {uploaded} korrigiert · {unchanged} bereits richtig · {failed} fehlgeschlagen",
+  "datefix.stage.uploading": "Daten in Drive werden in kleinen Stapeln aktualisiert…",
+  "datefix.stage.albums": "Albumzugehörigkeit wird wiederhergestellt…",
+  "datefix.stage.trashing": "Originale werden in den Papierkorb verschoben…",
+  "datefix.stage.done": "Wird abgeschlossen…",
 
   // Trash confirmation
   "confirm.trashTitle": "In den Papierkorb verschieben?",

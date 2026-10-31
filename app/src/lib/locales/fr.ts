@@ -105,6 +105,10 @@ export const fr: Record<string, string> = {
   "login.signIn": "Se connecter",
   "login.signingIn": "Connexion…",
   "login.twofaLabel": "Code à deux facteurs",
+  "login.mailboxLabel": "Mot de passe de la boîte aux lettres",
+  "login.mailboxHint": "Ce compte utilise deux mots de passe. Saisissez le mot de passe de la boîte aux lettres pour le déverrouiller.",
+  "login.unlockKeys": "Déverrouiller",
+  "login.mailboxWrong": "Mot de passe de la boîte aux lettres incorrect",
   "login.verify": "Vérifier",
   "login.verifying": "Vérification…",
   "login.captchaHint": "Proton vous demande de confirmer que vous êtes bien humain.",
@@ -660,6 +664,7 @@ export const fr: Record<string, string> = {
   "selection.unfavorite": "Retirer des favoris",
   "selection.offlineAdd": "Disponible hors ligne",
   "selection.offlineRemove": "Supprimer la copie hors ligne",
+  "selection.fixDates": "Corriger les dates",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} libérées",
@@ -686,6 +691,39 @@ export const fr: Record<string, string> = {
   "offline.alreadyOffline": "Déjà disponible hors ligne",
   "offline.noneOffline": "Aucune copie hors ligne à supprimer",
   "offline.failed": "impossible d'enregistrer pour une utilisation hors ligne",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Corriger les dates d'après le nom de fichier ?",
+  "datefix.count.one":
+    "{count} des {total} photos sélectionnées comporte une date dans son nom.",
+  "datefix.count.other":
+    "{count} des {total} photos sélectionnées comportent une date dans leur nom.",
+  "datefix.body": "Chacune est envoyée à nouveau avec la date de son nom écrite dans le fichier lui-même (seules ses métadonnées changent ; l'image n'est pas réencodée), remise dans ses albums avec ses étiquettes, et son ancienne copie part à la corbeille. Les photos qui affichent déjà le bon jour ne sont pas touchées.",
+  "datefix.apply": "Corriger les dates",
+  "datefix.none": "Aucune des photos sélectionnées n'a de date exploitable dans son nom",
+  "datefix.checking": "Lecture des noms de {count} photos sélectionnées…",
+  "datefix.readFailed": "Impossible de lire les noms des photos : {error}",
+  "datefix.noDateCount": "{count} n'ont pas de date dans leur nom.",
+  "datefix.line.noDate": "• {name} : pas de date dans le nom",
+  "datefix.line.same": "• {name} : nom {named}, Drive {drive}, déjà correcte",
+  "datefix.line.fix": "• {name} : nom {named}, Drive {drive}, sera corrigée",
+  "datefix.allCorrect": "Toutes les photos dont le nom porte une date affichent déjà cette date dans Drive",
+  "datefix.uptodate": "{count} affichent déjà cette même date dans Drive et restent inchangées.",
+  "datefix.done.one": "Date corrigée pour {count} photo d'après son nom de fichier",
+  "datefix.done.other": "Dates corrigées pour {count} photos d'après leurs noms de fichiers",
+  "datefix.partial": "{ok} corrigées, {failed} en échec",
+  "datefix.alreadyRunning": "Une correction de dates est déjà en cours",
+  "datefix.stopped": "Arrêtée : {ok} corrigées, {failed} en échec, {skipped} non commencées",
+  "datefix.halted": "Arrêté : Proton Drive n'a accepté la nouvelle date pour aucune photo ({failed} en échec, {skipped} non commencées). Rien n'a été modifié.",
+  "datefix.cancel": "Annuler le reste",
+  "datefix.canceling": "Finalisation des photos en cours…",
+  "datefix.progressDetail": "{done} sur {total} vérifiées · {uploaded} corrigées · {unchanged} déjà correctes · {failed} en échec",
+  "datefix.stage.uploading": "Mise à jour des dates dans Drive, par petits lots…",
+  "datefix.stage.albums": "Restauration des albums…",
+  "datefix.stage.trashing": "Déplacement des originaux vers la corbeille…",
+  "datefix.stage.done": "Finalisation…",
 
   // Trash confirmation
   "confirm.trashTitle": "Mettre à la corbeille ?",

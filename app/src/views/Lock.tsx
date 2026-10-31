@@ -29,6 +29,7 @@ import "../styles/App.css";
 type UnlockResult =
   | { status: "ok"; email: string }
   | { status: "2fa" }
+  | { status: "mailbox"; error?: string }
   | { status: "hv"; url: string }
   | { status: "relogin" }
   | { status: "offline" }
@@ -66,7 +67,7 @@ export function Lock({
         return;
       }
       // "ok", or (when the saved tokens expired and the sidecar fell back to a
-      // fresh login) "hv" / "2fa", or "relogin" for a browser sign-in, which only
+      // fresh login) "hv" / "2fa" / "mailbox", or "relogin" for a browser sign-in, which only
       // Proton's page can redo. Hand it to the app, which leaves the lock screen
       // and shows the step it asks for.
       setPassword("");

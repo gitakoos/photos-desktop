@@ -106,6 +106,10 @@ export const sl: Record<string, string> = {
   "login.signIn": "Prijava",
   "login.signingIn": "Prijavljanje…",
   "login.twofaLabel": "Dvofaktorska koda",
+  "login.mailboxLabel": "Geslo nabiralnika",
+  "login.mailboxHint": "Ta račun uporablja dve gesli. Za odklep vnesite geslo nabiralnika.",
+  "login.unlockKeys": "Odkleni",
+  "login.mailboxWrong": "Napačno geslo nabiralnika",
   "login.verify": "Potrdi",
   "login.verifying": "Preverjanje…",
   "login.captchaHint": "Proton želi, da potrdiš, da si človek.",
@@ -659,6 +663,7 @@ export const sl: Record<string, string> = {
   "selection.unfavorite": "Odstrani iz priljubljenih",
   "selection.offlineAdd": "Na voljo brez povezave",
   "selection.offlineRemove": "Odstrani kopijo brez povezave",
+  "selection.fixDates": "Popravi datume",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} sproščenih",
@@ -683,6 +688,39 @@ export const sl: Record<string, string> = {
   "offline.alreadyOffline": "Že na voljo brez povezave",
   "offline.noneOffline": "Ni kopij brez povezave za odstranitev",
   "offline.failed": "shranjevanje za uporabo brez povezave ni uspelo",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Popravi datume iz imen datotek?",
+  "datefix.count.one":
+    "{count} od {total} izbranih fotografij ima datum v imenu.",
+  "datefix.count.other":
+    "{count} od {total} izbranih fotografij ima datum v imenu.",
+  "datefix.body": "Vsaka se znova naloži z datumom iz imena, zapisanim v samo datoteko (spremenijo se le metapodatki, slika se ne kodira znova), vrne se v svoje albume s svojimi oznakami, njena stara kopija pa gre v koš. Fotografije, ki že kažejo pravi dan, ostanejo nespremenjene.",
+  "datefix.apply": "Popravi datume",
+  "datefix.none": "Nobena od izbranih fotografij nima uporabnega datuma v imenu",
+  "datefix.checking": "Branje imen izbranih fotografij ({count})…",
+  "datefix.readFailed": "Imen fotografij ni bilo mogoče prebrati: {error}",
+  "datefix.noDateCount": "Brez datuma v imenu: {count}.",
+  "datefix.line.noDate": "• {name}: v imenu ni datuma",
+  "datefix.line.same": "• {name}: ime {named}, Drive {drive}, že pravilno",
+  "datefix.line.fix": "• {name}: ime {named}, Drive {drive}, bo popravljeno",
+  "datefix.allCorrect": "Vse fotografije z datumom v imenu ta datum v Drive že prikazujejo",
+  "datefix.uptodate": "{count} ta datum v Drive že prikazujejo in ostajajo nespremenjene.",
+  "datefix.done.one": "Datum popravljen za {count} fotografijo iz imena datoteke",
+  "datefix.done.other": "Datumi popravljeni za {count} fotografij iz imen datotek",
+  "datefix.partial": "Popravljeno {ok}, {failed} ni uspelo",
+  "datefix.alreadyRunning": "Popravljanje datumov že poteka",
+  "datefix.stopped": "Ustavljeno: popravljenih {ok}, neuspešnih {failed}, nezagnanih {skipped}",
+  "datefix.halted": "Ustavljeno: Proton Drive novega datuma ni sprejel za nobeno fotografijo (neuspešnih: {failed}, nezačetih: {skipped}). Nič ni bilo spremenjeno.",
+  "datefix.cancel": "Prekliči preostale",
+  "datefix.canceling": "Dokončujejo se trenutne fotografije…",
+  "datefix.progressDetail": "Preverjenih {done} od {total} · popravljenih: {uploaded} · že pravilnih: {unchanged} · neuspešnih: {failed}",
+  "datefix.stage.uploading": "Posodabljanje datumov v Drive v majhnih paketih…",
+  "datefix.stage.albums": "Obnavljanje članstva v albumih…",
+  "datefix.stage.trashing": "Premikanje izvirnikov v koš…",
+  "datefix.stage.done": "Zaključevanje…",
 
   // Trash confirmation
   "confirm.trashTitle": "Premakniti v koš?",

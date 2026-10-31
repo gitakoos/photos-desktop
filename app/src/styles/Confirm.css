@@ -53,6 +53,37 @@
   color: var(--fg-dim);
 }
 
+.cf-progress {
+  margin: -4px 0 20px;
+}
+
+.cf-progress-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line-soft);
+}
+
+.cf-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 220ms ease;
+}
+
+.cf-progress-label {
+  margin-top: 10px;
+  color: var(--fg-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cf-progress-detail {
+  margin-top: 3px;
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
 .cf-actions {
   display: flex;
   gap: 10px;
@@ -72,6 +103,10 @@
 }
 .cf-btn:hover {
   color: var(--fg-primary);
+}
+.cf-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
 }
 .cf-btn.primary {
   border-color: transparent;

@@ -82,6 +82,8 @@ let dataKey: Buffer | null = null;
 
 export function initStore(dir: string): void {
   dataDir = dir;
+  metaMemory.clear();
+  metaDirMade = false;
   mkdirSync(thumbDir(), { recursive: true });
   // A wipe the app quit in the middle of leaves its set-aside folders behind.
   try {
@@ -120,12 +122,16 @@ function discardDir(path: string): void {
 export function setDataKey(key: Buffer): void {
   if (key.length !== 32) throw new Error("data key must be 32 bytes");
   dataKey = key;
+  // Blobs sealed under another key do not open under this one; neither may their copies.
+  metaMemory.clear();
 }
 
 /** Forget the key; the store stays locked until the next unlock. */
 export function clearDataKey(): void {
   if (dataKey) dataKey.fill(0);
   dataKey = null;
+  // What the key opened goes with it: nothing decrypted outlives a lock in memory.
+  metaMemory.clear();
 }
 
 export function storeDir(): string {
@@ -169,6 +175,8 @@ export function wipeCache(): void {
     discardDir(thumbDir());
     mkdirSync(thumbDir(), { recursive: true });
     discardDir(metaDir());
+    metaMemory.clear();
+    metaDirMade = false;
     discardDir(originalDir());
     rmSync(join(dataDir, OFFLINE_LIST_FILE), { force: true });
     rmSync(join(dataDir, SESSION_FILE), { force: true });
@@ -305,6 +313,26 @@ type NodeMetaBlob = {
   geo?: [number, number] | null;
 };
 
+/**
+ * The node metadata already read or written this unlock, so the Explorer fill, the grid
+ * and the search index stop re-reading and re-decrypting one sealed file per photo on
+ * the sidecar's only thread every time they pass over the library. Entries are small
+ * (a name, a type, a few numbers); the cap only bounds a pathological library, oldest
+ * first. Cleared with the key and with the cache it mirrors.
+ */
+const META_MEMORY_LIMIT = 200_000;
+const metaMemory = new Map<string, NodeMetaBlob>();
+/** Whether `metaDir()` is known to exist, so a write does not ask the disk every time. */
+let metaDirMade = false;
+
+function rememberMeta(uid: string, meta: NodeMetaBlob): void {
+  if (metaMemory.size >= META_MEMORY_LIMIT && !metaMemory.has(uid)) {
+    const oldest = metaMemory.keys().next().value;
+    if (oldest !== undefined) metaMemory.delete(oldest);
+  }
+  metaMemory.set(uid, meta);
+}
+
 function metaPath(uid: string): string {
   const name = createHash("sha256").update(`meta:${uid}`).digest("hex");
   return join(metaDir(), `${name}.bin`);
@@ -312,10 +340,15 @@ function metaPath(uid: string): string {
 
 export function metaGet(uid: string): NodeMetaBlob | null {
   if (!isReady()) return null;
+  const known = metaMemory.get(uid);
+  // A copy, so a caller that edits what it got and puts it back cannot reach the cache.
+  if (known) return { ...known };
   const path = metaPath(uid);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(unseal(readFileSync(path)).toString("utf8")) as NodeMetaBlob;
+    const meta = JSON.parse(unseal(readFileSync(path)).toString("utf8")) as NodeMetaBlob;
+    rememberMeta(uid, meta);
+    return { ...meta };
   } catch {
     return null; // tampered or written under a previous key
   }
@@ -323,8 +356,12 @@ export function metaGet(uid: string): NodeMetaBlob | null {
 
 export function metaPut(uid: string, meta: NodeMetaBlob): void {
   if (!isReady()) return;
+  rememberMeta(uid, { ...meta });
   try {
-    mkdirSync(metaDir(), { recursive: true });
+    if (!metaDirMade) {
+      mkdirSync(metaDir(), { recursive: true });
+      metaDirMade = true;
+    }
     writeFileSync(metaPath(uid), seal(Buffer.from(JSON.stringify(meta))));
   } catch {
     /* best-effort */

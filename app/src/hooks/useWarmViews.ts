@@ -91,7 +91,10 @@ export function useWarmViews(ready: boolean, onTimeline: boolean, reloadKey: num
       await new Promise((r) => setTimeout(r, 400));
       if (!fresh()) return;
       try {
-        const rows = await rpc<TrashItem[]>("listTrashed");
+        // Its own name, so the host runs it on the background lane: decrypting a large
+        // trash took nine minutes, and as `listTrashed` it held the lane every click goes
+        // through for all of them, right after sign-in.
+        const rows = await rpc<TrashItem[]>("warmTrash");
         if (fresh()) setTrash(rows);
       } catch {
         /* as above */

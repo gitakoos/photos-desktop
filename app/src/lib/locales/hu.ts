@@ -104,6 +104,10 @@ export const hu: Record<string, string> = {
   "login.signIn": "Belépés",
   "login.signingIn": "Belépés…",
   "login.twofaLabel": "Kétlépcsős kód",
+  "login.mailboxLabel": "Postafiók-jelszó",
+  "login.mailboxHint": "Ez a fiók két jelszót használ. A feloldáshoz add meg a postafiók-jelszót.",
+  "login.unlockKeys": "Feloldás",
+  "login.mailboxWrong": "Hibás postafiók-jelszó",
   "login.verify": "Ellenőrzés",
   "login.verifying": "Ellenőrzés…",
   "login.captchaHint": "A Proton megerősítést kér, hogy nem robot vagy.",
@@ -657,6 +661,7 @@ export const hu: Record<string, string> = {
   "selection.unfavorite": "Eltávolítás a kedvencekből",
   "selection.offlineAdd": "Elérhető offline",
   "selection.offlineRemove": "Offline másolat eltávolítása",
+  "selection.fixDates": "Dátumok javítása",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "{count} felszabadítva",
@@ -681,6 +686,39 @@ export const hu: Record<string, string> = {
   "offline.alreadyOffline": "Már elérhető offline",
   "offline.noneOffline": "Nincs eltávolítható offline másolat",
   "offline.failed": "nem sikerült offline használatra menteni",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Javítsuk a dátumokat a fájlnév alapján?",
+  "datefix.count.one":
+    "A kijelölt {total} fényképből {count} nevében dátum szerepel.",
+  "datefix.count.other":
+    "A kijelölt {total} fényképből {count} nevében dátum szerepel.",
+  "datefix.body": "Mindegyik újra feltöltődik, a fájlnév dátumát magába a fájlba írva (csak a metaadatai változnak, a kép nem kódolódik újra), visszakerül az albumaiba a címkéivel, a régi példánya pedig a kukába kerül. A már helyes napot mutató fotók változatlanok maradnak.",
+  "datefix.apply": "Dátumok javítása",
+  "datefix.none": "Egyik kijelölt fénykép nevében sincs használható dátum",
+  "datefix.checking": "{count} kijelölt fotó nevének beolvasása…",
+  "datefix.readFailed": "A fotók nevét nem sikerült beolvasni: {error}",
+  "datefix.noDateCount": "{count} nevében nincs dátum.",
+  "datefix.line.noDate": "• {name}: a névben nincs dátum",
+  "datefix.line.same": "• {name}: név {named}, Drive {drive}, már helyes",
+  "datefix.line.fix": "• {name}: név {named}, Drive {drive}, javítva lesz",
+  "datefix.allCorrect": "Mindazon fotóknak, amelyek nevében dátum szerepel, a Drive már ezt a dátumot mutatja",
+  "datefix.uptodate": "{count} elemet a Drive már ezen a dátumon mutatja, ezért változatlan marad.",
+  "datefix.done.one": "{count} fénykép dátuma javítva a fájlnév alapján",
+  "datefix.done.other": "{count} fénykép dátuma javítva a fájlnév alapján",
+  "datefix.partial": "{ok} javítva, {failed} sikertelen",
+  "datefix.alreadyRunning": "Már fut egy dátumjavítási köteg",
+  "datefix.stopped": "Leállítva: {ok} javítva, {failed} sikertelen, {skipped} nem indult el",
+  "datefix.halted": "Leállítva: a Proton Drive egyetlen fotónál sem fogadta el az új dátumot ({failed} sikertelen, {skipped} el sem indult). Semmi sem változott.",
+  "datefix.cancel": "Hátralévők leállítása",
+  "datefix.canceling": "A folyamatban lévő fényképek befejezése…",
+  "datefix.progressDetail": "{done}/{total} ellenőrizve · {uploaded} javítva · {unchanged} már helyes · {failed} sikertelen",
+  "datefix.stage.uploading": "Dátumok frissítése a Drive-ban, kis kötegekben…",
+  "datefix.stage.albums": "Albumtagságok visszaállítása…",
+  "datefix.stage.trashing": "Az eredetik áthelyezése a kukába…",
+  "datefix.stage.done": "Befejezés…",
 
   // Trash confirmation
   "confirm.trashTitle": "Áthelyezés a kukába?",

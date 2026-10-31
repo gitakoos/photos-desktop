@@ -106,6 +106,10 @@ export const pl: Record<string, string> = {
   "login.signIn": "Zaloguj się",
   "login.signingIn": "Logowanie…",
   "login.twofaLabel": "Kod dwuskładnikowy",
+  "login.mailboxLabel": "Hasło skrzynki",
+  "login.mailboxHint": "To konto używa dwóch haseł. Wpisz hasło skrzynki, aby je odblokować.",
+  "login.unlockKeys": "Odblokuj",
+  "login.mailboxWrong": "Nieprawidłowe hasło skrzynki",
   "login.verify": "Zweryfikuj",
   "login.verifying": "Weryfikacja…",
   "login.captchaHint": "Proton prosi o potwierdzenie, że jesteś człowiekiem.",
@@ -660,6 +664,7 @@ export const pl: Record<string, string> = {
   "selection.unfavorite": "Usuń z ulubionych",
   "selection.offlineAdd": "Dostępne offline",
   "selection.offlineRemove": "Usuń kopię offline",
+  "selection.fixDates": "Popraw daty",
   // Download: the copy that lands in the Proton Photos folder, where Windows and any
   // other program can read it. Never called offline, which is the app's own copy.
   "download.freedUp": "Zwolniono {count}",
@@ -684,6 +689,39 @@ export const pl: Record<string, string> = {
   "offline.alreadyOffline": "Już dostępne offline",
   "offline.noneOffline": "Brak kopii offline do usunięcia",
   "offline.failed": "nie udało się zapisać do użytku offline",
+
+  // Fix dates from filenames: the cloud copy is replaced byte-for-byte (same name, same
+  // tags, same albums) with only its capture date moved to the one its filename records.
+  // The bytes are re-uploaded untouched, so pixels, quality and every other attribute stay.
+  "datefix.title": "Poprawić daty na podstawie nazw plików?",
+  "datefix.count.one":
+    "{count} z {total} wybranych zdjęć ma datę w nazwie.",
+  "datefix.count.other":
+    "{count} z {total} wybranych zdjęć ma daty w nazwach.",
+  "datefix.body": "Każde zostanie wysłane ponownie z datą z nazwy zapisaną w samym pliku (zmieniają się tylko metadane; obraz nie jest ponownie kodowany), wróci do swoich albumów ze swoimi tagami, a jego stara kopia trafi do kosza. Zdjęcia, które już pokazują właściwy dzień, pozostają bez zmian.",
+  "datefix.apply": "Popraw daty",
+  "datefix.none": "Żadne z wybranych zdjęć nie ma użytecznej daty w nazwie",
+  "datefix.checking": "Odczytywanie nazw zaznaczonych zdjęć ({count})…",
+  "datefix.readFailed": "Nie udało się odczytać nazw zdjęć: {error}",
+  "datefix.noDateCount": "Bez daty w nazwie: {count}.",
+  "datefix.line.noDate": "• {name}: brak daty w nazwie",
+  "datefix.line.same": "• {name}: nazwa {named}, Drive {drive}, już poprawne",
+  "datefix.line.fix": "• {name}: nazwa {named}, Drive {drive}, zostanie poprawione",
+  "datefix.allCorrect": "Wszystkie zdjęcia, których nazwa zawiera datę, już pokazują tę datę w Drive",
+  "datefix.uptodate": "{count} już pokazują tę samą datę w Drive i pozostają bez zmian.",
+  "datefix.done.one": "Data poprawiona dla {count} zdjęcia na podstawie nazwy pliku",
+  "datefix.done.other": "Daty poprawione dla {count} zdjęć na podstawie nazw plików",
+  "datefix.partial": "Poprawiono {ok}, {failed} niepowodzeń",
+  "datefix.alreadyRunning": "Trwa już poprawianie dat",
+  "datefix.stopped": "Zatrzymano: poprawiono {ok}, błędy {failed}, nie rozpoczęto {skipped}",
+  "datefix.halted": "Zatrzymano: Proton Drive nie przyjął nowej daty dla żadnego zdjęcia (błędy: {failed}, nierozpoczęte: {skipped}). Nic nie zostało zmienione.",
+  "datefix.cancel": "Anuluj pozostałe",
+  "datefix.canceling": "Kończenie bieżących zdjęć…",
+  "datefix.progressDetail": "Sprawdzono {done} z {total} · poprawione: {uploaded} · już poprawne: {unchanged} · błędy: {failed}",
+  "datefix.stage.uploading": "Aktualizowanie dat w Drive małymi partiami…",
+  "datefix.stage.albums": "Przywracanie zdjęć do albumów…",
+  "datefix.stage.trashing": "Przenoszenie oryginałów do kosza…",
+  "datefix.stage.done": "Kończenie…",
 
   // Trash confirmation
   "confirm.trashTitle": "Przenieść do kosza?",

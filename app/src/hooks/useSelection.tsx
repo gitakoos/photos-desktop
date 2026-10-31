@@ -32,6 +32,7 @@ import {
   type RefObject,
 } from "react";
 import {
+  CalendarIcon,
   CloseIcon,
   DeleteForeverIcon,
   DownloadIcon,
@@ -408,6 +409,7 @@ export function SelectionBar({
   onAddToAlbum,
   onRemoveFromAlbum,
   onSetCover,
+  onFixDates,
 }: {
   count: number;
   /** True while one of the actions below is still working. */
@@ -429,6 +431,11 @@ export function SelectionBar({
   onRemoveFromAlbum?: () => void;
   /** A cover is one photo, so the caller passes this only when one is selected. */
   onSetCover?: () => void;
+  /**
+   * Sets each selected photo's date from the date written in its filename. Passed
+   * only where the photos are the user's own cloud photos the replace can rewrite.
+   */
+  onFixDates?: () => void;
 }) {
   const t = useT();
   const barRef = useRef<HTMLDivElement>(null);
@@ -456,6 +463,9 @@ export function SelectionBar({
     add(onAddToAlbum, "addToAlbum", <LibraryAddIcon size={18} />);
     add(onSetCover, "setCover", <ImageIcon size={18} />);
     add(onDownload, "download", <DownloadIcon size={18} />);
+    // After everything the selection keeps, and before what it lets go of: a date fix
+    // keeps every pixel and only moves the photo to the day its own name records.
+    add(onFixDates, "fixDates", <CalendarIcon size={18} />);
     add(onFreeUp, "freeUp", <SweepIcon size={18} />);
     add(onOfflineAdd, "offlineAdd", <OfflinePinIcon size={18} />);
     add(onOfflineRemove, "offlineRemove", <OfflinePinIcon size={18} />);
@@ -468,6 +478,7 @@ export function SelectionBar({
     onAddToAlbum,
     onSetCover,
     onDownload,
+    onFixDates,
     onFreeUp,
     onOfflineAdd,
     onOfflineRemove,

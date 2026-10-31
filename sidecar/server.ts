@@ -105,6 +105,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   login: (p) => session.login(p.username, p.password),
   submitCaptcha: (p) => session.submitCaptcha(p.token),
   submit2fa: (p) => session.submit2fa(p.code),
+  submitMailboxPassword: (p) => session.submitMailboxPassword(p.password),
   lockStatus: () => session.lockStatus(),
   unlock: (p) => session.unlock(p.password),
   unlockDevice: () => session.unlockDevice(),
@@ -161,6 +162,9 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   removePerson: (p) => session.removePerson(p.uid, p.email),
   stopSharing: (p) => session.stopSharing(p.uid),
   getMetadata: (p) => session.getMetadata(p.uids),
+  // The same lookup for a selection the user is acting on: its own name, so the host can
+  // admit it ahead of the whole-library sweeps `getMetadata` serves.
+  getSelectionMetadata: (p) => session.getMetadata(p.uids),
   getDurations: (p) => session.getDurations(p.uids),
   getLocations: (p) => session.getLocations(Array.isArray(p?.uids) ? p.uids : []),
   getMediaTypes: (p) => session.getMediaTypes(p.uids),
@@ -220,9 +224,16 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getNodeDetails: (p) => session.getNodeDetails(p.uid),
   cloudEditorSource: (p) => session.cloudEditorSource(p.uid),
   saveCloudEdit: (p) => session.saveCloudEdit(p.jpegBase64, p.meta),
+  startFixDatesFromName: (p) => session.startFixDatesFromName(p.items),
+  dateFixStatus: () => session.dateFixStatus(),
+  cancelFixDatesFromName: () => session.cancelFixDatesFromName(),
+  dateFixResults: () => session.dateFixResults(),
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
+  // The same list read ahead of the Trash view opening, under a name the host keeps off
+  // the foreground lane.
+  warmTrash: () => session.listTrashed(),
   restorePhotos: (p) => session.restorePhotos(p.uids),
   deletePhotosForever: (p) => session.deletePhotosForever(p.uids),
   emptyTrash: () => session.emptyTrash(),

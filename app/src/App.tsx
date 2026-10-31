@@ -36,11 +36,12 @@ import { useT } from "./lib/i18n";
 import "./styles/App.css";
 import { isWindows } from "./lib/platform";
 
-type Phase = "credentials" | "twofa" | "captcha" | "browser" | "protect" | "offline";
+type Phase = "credentials" | "twofa" | "mailbox" | "captcha" | "browser" | "protect" | "offline";
 type MenuState = { x: number; y: number } | null;
 type LoginResult =
   | { status: "ok"; email: string }
   | { status: "2fa" }
+  | { status: "mailbox"; error?: string }
   | { status: "hv"; url: string }
   | { status: "protect"; email: string }
   | { status: "relogin" }
@@ -73,6 +74,7 @@ function App() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
+  const [mailboxPassword, setMailboxPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [menu, setMenu] = useState<MenuState>(null);
@@ -203,9 +205,16 @@ function App() {
   async function applyResult(r: LoginResult) {
     if (r.status === "ok") {
       setPassword("");
+      setMailboxPassword("");
       setEmail(r.email);
     } else if (r.status === "2fa") {
       setPhase("twofa");
+    } else if (r.status === "mailbox") {
+      // A lock screen that fell back to a fresh sign-in lands here too: leave it.
+      setLocked(null);
+      setMailboxPassword("");
+      setPhase("mailbox");
+      if (r.error) setStatus(t("login.mailboxWrong"));
     } else if (r.status === "hv") {
       setHvUrl(r.url);
       setPhase("captcha");
@@ -523,6 +532,18 @@ function App() {
     setBusy(false);
   }
 
+  async function onSubmitMailbox(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setStatus("");
+    try {
+      await applyResult(await rpc<LoginResult>("submitMailboxPassword", { password: mailboxPassword }));
+    } catch (err) {
+      setStatus(String(err));
+    }
+    setBusy(false);
+  }
+
   // What a right-click on the app itself offers, as opposed to on a photo or an
   // album. Reloading is the whole of it for now, and the placeholder says so
   // rather than leaving a menu of one.
@@ -723,6 +744,36 @@ function App() {
                   {busy ? t("login.verifying") : t("login.verify")}
                 </button>
                 <button type="button" className="link" onClick={() => setPhase("credentials")}>
+                  {t("common.back")}
+                </button>
+              </form>
+            )}
+
+            {phase === "mailbox" && (
+              <form className="login-form" onSubmit={onSubmitMailbox}>
+                <p className="login-sub">{t("login.mailboxHint")}</p>
+                <label>
+                  <span>{t("login.mailboxLabel")}</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    autoFocus
+                    value={mailboxPassword}
+                    onChange={(e) => setMailboxPassword(e.currentTarget.value)}
+                    required
+                  />
+                </label>
+                <button type="submit" disabled={busy}>
+                  {busy ? t("login.verifying") : t("login.unlockKeys")}
+                </button>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => {
+                    setMailboxPassword("");
+                    setPhase("credentials");
+                  }}
+                >
                   {t("common.back")}
                 </button>
               </form>

@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
+import { VERIFICATION_STATUS } from "@protontech/crypto/constants";
 import { PhotoTag, ProtonDriveClient, ThumbnailType } from "@protontech/drive-sdk";
 import { ProtonDrivePhotosClient } from "@protontech/drive-sdk/dist/protonDrivePhotosClient.js";
 
@@ -116,6 +117,15 @@ import {
   type CloudEditMeta,
   type CloudEditorSource,
 } from "./editor.ts";
+import {
+  cancelDateFixJob,
+  dateFixJobResults,
+  dateFixJobStatus,
+  startDateFixJob,
+  type DateFixItem,
+  type DateFixResult,
+  type DateFixStatus,
+} from "./dateFix.ts";
 import {
   offlineStatus as readOfflineStatus,
   pinOffline as runPinOffline,
@@ -226,6 +236,9 @@ const THUMBNAIL_FETCH_PER_CALL = 8;
  *  enough for a thumbnail on screen, or a page being opened, to wait on it. */
 const THUMBNAIL_WARM_PER_CALL = 2;
 
+/** What `buildAccount` throws when no user key opened with the password it was given. */
+const KEYS_LOCKED = "Could not unlock your account keys (wrong password)";
+
 /** How long a sign-in may wait on its 2FA code or captcha before the password goes. */
 const PENDING_SIGN_IN_MS = 10 * 60_000;
 
@@ -300,12 +313,24 @@ type SharedSummary = {
 type NodeMeta = { uid: string; name: string; mediaType: string | null; size?: number | null };
 
 type TimelineItem = { uid: string; captureTime: number; tags: number[] };
-type TimelineRun = { id: number; items: TimelineItem[]; done: boolean; error: string | null };
+type TimelineRun = {
+  id: number;
+  items: TimelineItem[];
+  done: boolean;
+  error: string | null;
+  /** Settles when the read ends, however it ends. */
+  finished: Promise<void>;
+};
 type TimelinePage = { items: TimelineItem[]; done: boolean; error: string | null };
 
 type LoginResult =
   | { status: "ok"; email: string }
   | { status: "2fa" }
+  /**
+   * The account is in two-password mode: the login password opened the session, and
+   * its keys need the separate mailbox password. `error` says the last one was wrong.
+   */
+  | { status: "mailbox"; error?: string }
   /** The API demands human verification; `url` is the captcha page to embed. */
   | { status: "hv"; url: string }
   /** Signed in through the browser; the user still picks how this machine keeps it. */
@@ -357,6 +382,20 @@ export class ProtonSession {
   private username = "";
   private email = "";
   private password = "";
+  /**
+   * The mailbox password of a two-password account, which alone unlocks its keys. The
+   * login password in `password` still seals the vault: it is the one the lock screen
+   * asks for, and the one a sign-in replayed from there can redo the handshake with.
+   */
+  private mailboxPassword = "";
+  /** Proton's `PasswordMode` from the handshake: 2 means a separate mailbox password. */
+  private passwordMode = 1;
+  /**
+   * The key salts, read straight after the handshake (and its second factor) while the
+   * fresh session is still allowed to: a mailbox password typed minutes later must not
+   * find the salts endpoint closed to it.
+   */
+  private keySalts: { ID: string; KeySalt: string }[] | null = null;
   /** Derived key passphrases by user key id. Persisted in place of the password. */
   private userKeyPassphrases: Record<string, string> = {};
   /** The key password a browser sign-in delivers, in place of the account password. */
@@ -395,6 +434,8 @@ export class ProtonSession {
     this.browser = null;
     this.username = username;
     this.password = password;
+    this.mailboxPassword = "";
+    this.keySalts = null;
     this.keyPassword = "";
     this.method = "password";
     this.userKeyPassphrases = {};
@@ -487,6 +528,8 @@ export class ProtonSession {
     const timer = setTimeout(() => {
       if (attempt !== this.attempt || this.photos) return;
       this.password = "";
+      this.mailboxPassword = "";
+      this.keySalts = null;
       this.session = null;
     }, PENDING_SIGN_IN_MS);
     timer.unref?.();
@@ -544,13 +587,50 @@ export class ProtonSession {
     }
 
     this.session = { uid: auth.UID, accessToken: auth.AccessToken, refreshToken: auth.RefreshToken };
+    this.passwordMode = Number(auth.PasswordMode) === 2 ? 2 : 1;
+    this.keySalts = null;
 
     const twoFa = auth["2FA"]?.Enabled ?? 0;
     if (twoFa & 1) {
       this.expirePendingSignIn();
       return { status: "2fa" };
     }
-    return this.finishFreshLogin();
+    return this.afterAuthenticated();
+  }
+
+  /**
+   * The handshake (and any second factor) is done. A one-password account opens now; a
+   * two-password one reads its key salts while the session may, and waits for the
+   * mailbox password.
+   */
+  private async afterAuthenticated(): Promise<LoginResult> {
+    if (this.passwordMode !== 2) return this.finishFreshLogin();
+    try {
+      this.keySalts = ((await ProtonApi.getKeySalts(this.session!)) as any).KeySalts ?? [];
+    } catch (e) {
+      if (isTransient(e)) return { status: "error", error: "Proton could not be reached. Please try again." };
+      return { status: "error", error: (e as Error).message };
+    }
+    this.expirePendingSignIn();
+    return { status: "mailbox" };
+  }
+
+  /**
+   * The second password of a two-password account. A wrong one leaves the session as it
+   * is and asks again, since the handshake it rides on was never at fault.
+   */
+  async submitMailboxPassword(mailboxPassword: string): Promise<LoginResult> {
+    if (!this.session || this.passwordMode !== 2 || this.photos) {
+      return { status: "error", error: "No sign-in is waiting for a mailbox password" };
+    }
+    if (!mailboxPassword) return { status: "mailbox", error: "wrong password" };
+    this.mailboxPassword = mailboxPassword;
+    const result = await this.finishFreshLogin();
+    this.mailboxPassword = "";
+    if (result.status === "error" && result.error === KEYS_LOCKED) {
+      return { status: "mailbox", error: "wrong password" };
+    }
+    return result;
   }
 
   /** Replay the sign-in with the token the embedded captcha page produced. */
@@ -562,7 +642,7 @@ export class ProtonSession {
   async submit2fa(code: string): Promise<LoginResult> {
     if (!this.session) return { status: "error", error: "No session in progress" };
     await ProtonApi.auth2fa(this.session, code);
-    return this.finishFreshLogin();
+    return this.afterAuthenticated();
   }
 
   /**
@@ -770,6 +850,10 @@ export class ProtonSession {
 
   /** Drop the in-memory session and forget the vault key; the next use needs an unlock. */
   lock(): { ok: boolean } {
+    // Stop admitting new replacements. An in-flight replacement is allowed to finish its
+    // album/trash fence before the worker pool settles, rather than leaving a half-applied
+    // batch when the account is locked.
+    cancelDateFixJob();
     // First, so no thumbnail is served from a session that is going away.
     void stopThumbServer();
     this.thumbWaiting.clear();
@@ -781,6 +865,8 @@ export class ProtonSession {
     this.browserFinish = null;
     this.awaitingProtection = false;
     this.session = null;
+    this.mailboxPassword = "";
+    this.keySalts = null;
     this.photos = null;
     this.sdkBase = null;
     this.myFiles = null;
@@ -922,7 +1008,34 @@ export class ProtonSession {
     try {
       const account = await this.buildAccount();
       const sdkBase = {
-        httpClient: makeSdkHttpClient(this.session!, () => this.persistSession()),
+        httpClient: makeSdkHttpClient(
+          this.session!,
+          () => this.persistSession(),
+          async (body) => {
+            const signature = body.ManifestSignature;
+            const signatureAddress = body.SignatureAddress;
+            if (typeof signature !== "string" || typeof signatureAddress !== "string") {
+              process.stderr.write("[crypto:manifest] commit payload missing signature/address\n");
+              return;
+            }
+            try {
+              const address = await account.getOwnAddress(signatureAddress);
+              const selected = address.keys[address.primaryKeyIndex]?.key;
+              const selectedKeyId = selected?.getKeyID?.();
+              const signatureInfo: any = await CryptoProxy.getSignatureInfo({ armoredSignature: signature } as any);
+              const signingKeyIds: string[] = signatureInfo.signingKeyIDs ?? [];
+              const keyMatches =
+                typeof selectedKeyId === "string" &&
+                signingKeyIds.some((id) => id.toLowerCase() === selectedKeyId.toLowerCase());
+              process.stderr.write(
+                `[crypto:manifest] addressResolved=true primaryIndex=${address.primaryKeyIndex} keyVersion=${selected?.getVersion?.() ?? "?"} signerCount=${signingKeyIds.length} selectedKeyMatchesSignature=${keyMatches}\n`,
+              );
+            } catch {
+              // Do not log the address, signature, key IDs, or exception text.
+              process.stderr.write("[crypto:manifest] signer/address diagnostic failed\n");
+            }
+          },
+        ),
         account,
         openPGPCryptoModule: makeOpenPGPCryptoModule(),
         // Read per call, so a token refresh (which rewrites the session in
@@ -931,11 +1044,29 @@ export class ProtonSession {
           if (!this.session) throw new Error("Not signed in");
           return randomModulus(this.session);
         }),
-        // Silent telemetry. The SDK otherwise logs every API path and node UID
-        // through `getLogger`, and could hand metrics (which carry node UIDs) to
-        // `recordMetric`. No-ops keep all of that off disk and off the network.
+        // Keep the SDK's AEAD capability explicit. Older JS SDK releases read
+        // this flag when generating file keys; 0.22+ currently enables AEAD in
+        // that path directly. No claim is made that this flag explains the
+        // manifest-signature rejection being diagnosed below.
+        featureFlagProvider: {
+          isEnabled: async (flagName: string) =>
+            flagName === "DriveCryptoEncryptBlocksWithPgpAead",
+        },
+        // Diagnostics telemetry. The SDK otherwise logs every API path and node
+        // UID through `getLogger`, and could hand metrics (which carry node
+        // UIDs) to `recordMetric`, so those stay off the network; while the
+        // commit is being refused, info/warn/error do go to `sidecar.log`
+        // (via stderr) — they carry the upload flow step by step, no metrics.
         telemetry: {
-          getLogger: () => ({ debug() {}, info() {}, warn() {}, error() {} }),
+          getLogger: (name: string) => ({
+            debug() {},
+            info: (msg: string) => process.stderr.write(`[sdk:${name}] ${msg}\n`),
+            warn: (msg: string) => process.stderr.write(`[sdk:${name}] WARN ${msg}\n`),
+            error: (msg: string, err?: unknown) =>
+              process.stderr.write(
+                `[sdk:${name}] ERROR ${msg}${err === undefined ? "" : ` :: ${String(err)}`}\n`,
+              ),
+          }),
           recordMetric: () => {},
         },
       };
@@ -962,7 +1093,8 @@ export class ProtonSession {
 
   private async buildAccount() {
     const s = this.session!;
-    const password = this.password;
+    // In two-password mode the keys open with the mailbox password, never the login one.
+    const password = this.mailboxPassword || this.password;
 
     // The salts turn the account password into the key password. A browser sign-in
     // is handed the key password itself, and its session may not read them: Proton
@@ -970,7 +1102,11 @@ export class ProtonSession {
     const [userRes, addrRes, saltRes] = await Promise.all([
       ProtonApi.getUser(s),
       ProtonApi.getAddresses(s),
-      this.method === "browser" ? Promise.resolve({ KeySalts: [] }) : ProtonApi.getKeySalts(s),
+      this.method === "browser"
+        ? Promise.resolve({ KeySalts: [] })
+        : this.keySalts
+          ? Promise.resolve({ KeySalts: this.keySalts })
+          : ProtonApi.getKeySalts(s),
     ]);
 
     const user: any = (userRes as any).User ?? {};
@@ -996,10 +1132,22 @@ export class ProtonSession {
       }
     }
     if (userKeys.length === 0) {
-      throw new Error("Could not unlock your account keys (wrong password, or two-password mode?)");
+      throw new Error(KEYS_LOCKED);
     }
-    // The password has served its purpose; only the derived passphrases are kept.
+    // Match Proton's reference Account resolver: derive public references from
+    // the unlocked user keys so address-key tokens can be signature-verified
+    // before trusting the passphrase they contain.
+    const userPublicKeys = await Promise.all(
+      userKeys.map(async (key) =>
+        CryptoProxy.importPublicKey({
+          binaryKey: await CryptoProxy.exportPublicKey({ key, format: "binary" } as any),
+        } as any),
+      ),
+    );
+    // The passwords have served their purpose; only the derived passphrases are kept.
     this.password = "";
+    this.mailboxPassword = "";
+    this.keySalts = null;
     const keyPassword = this.keyPassword;
     this.keyPassword = "";
 
@@ -1008,16 +1156,25 @@ export class ProtonSession {
     for (const addr of addresses) {
       if (addr.Status !== 1) continue;
       const keys: { id: string; key: any }[] = [];
-      let primaryKeyIndex = 0;
+      // The SDK's reference Account adapter defines the first successfully
+      // imported key in API order as primary (primaryKeyIndex = 0). Preserve
+      // that exact ordering: the legacy `Primary` property is not part of the
+      // current AddressKey contract and can be absent on migrated addresses.
+      const primaryKeyIndex = 0;
       for (const ak of addr.Keys ?? []) {
         try {
           let passphrase: string;
           if (ak.Token) {
             const dec: any = await CryptoProxy.decryptMessage({
               armoredMessage: ak.Token,
+              armoredSignature: ak.Signature ?? "",
               decryptionKeys: userKeys,
+              verificationKeys: userPublicKeys,
               format: "utf8",
             } as any);
+            if (dec.verificationStatus !== VERIFICATION_STATUS.SIGNED_AND_VALID) {
+              throw new Error("Address key token signature did not verify");
+            }
             passphrase = dec.data;
           } else {
             const salt = saltById.get(ak.ID);
@@ -1025,7 +1182,6 @@ export class ProtonSession {
           }
           const key = await CryptoProxy.importPrivateKey({ armoredKey: ak.PrivateKey, passphrase } as any);
           keys.push({ id: ak.ID, key });
-          if (ak.Primary === 1) primaryKeyIndex = keys.length - 1;
         } catch {
           /* skip this key */
         }
@@ -1149,9 +1305,15 @@ export class ProtonSession {
    */
   startTimeline(): { run: number } {
     if (!this.photos) throw new Error("Not signed in");
-    const run: TimelineRun = { id: ++this.timelineRuns, items: [], done: false, error: null };
+    const run: TimelineRun = {
+      id: ++this.timelineRuns,
+      items: [],
+      done: false,
+      error: null,
+      finished: Promise.resolve(),
+    };
     this.timelineRun = run;
-    void (async () => {
+    run.finished = (async () => {
       try {
         for await (const item of this.timelineItems()) {
           if (this.timelineRun !== run) return;
@@ -1383,6 +1545,43 @@ export class ProtonSession {
     return runSaveCloudEdit(this.photos, jpegBase64, meta);
   }
 
+  /**
+   * Re-dates cloud photos from the capture instants their own filenames recorded, by the
+   * corrected-copy replace (see `dateFix.ts`). Reports per-photo results like
+   * `trashPhotos`, so a mixed batch never reads as a clean pass.
+   */
+  startFixDatesFromName(items: DateFixItem[]): { started: boolean } {
+    if (!this.photos) throw new Error("Not signed in");
+    // Only the fields the job reads cross the RPC boundary, each in its own type.
+    const clean: DateFixItem[] = (Array.isArray(items) ? items : [])
+      .filter(
+        (it: unknown): it is DateFixItem =>
+          !!it && typeof (it as DateFixItem).uid === "string" && Number.isFinite(Number((it as DateFixItem).captureTime)),
+      )
+      .map((it) => {
+        const size = Number(it.expectedSize);
+        return {
+          uid: it.uid,
+          captureTime: Number(it.captureTime),
+          ...(Number.isFinite(size) && size > 0 ? { expectedSize: size } : {}),
+          withTime: it.withTime !== false,
+        };
+      });
+    return startDateFixJob(this.photos, clean);
+  }
+
+  dateFixStatus(): DateFixStatus {
+    return dateFixJobStatus();
+  }
+
+  cancelFixDatesFromName(): DateFixStatus {
+    return cancelDateFixJob();
+  }
+
+  dateFixResults(): DateFixResult[] {
+    return dateFixJobResults();
+  }
+
   /** Kicks the save off and returns at once; the UI polls `saveStatus`. */
   startSaveOriginals(uids: string[], destDir: string): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
@@ -1395,7 +1594,22 @@ export class ProtonSession {
 
   async listForMount(offset: number, limit: number): Promise<MountPage> {
     if (!this.photos) throw new Error("Not signed in");
-    return readMountPage(this.photos, offset, limit);
+    return readMountPage(this.photos, offset, limit, offset === 0 ? await this.settledTimeline() : null);
+  }
+
+  /**
+   * The window's own timeline read, once it has finished cleanly, for the Explorer fill
+   * to page from. The fill is started as soon as the window's first page arrives, so
+   * walking the timeline again for it doubled every timeline request of a startup on the
+   * same SDK client; waiting for the read already under way costs nothing extra. Null
+   * when there is no read, or it was replaced or failed: the fill then walks it itself.
+   */
+  private async settledTimeline(): Promise<TimelineItem[] | null> {
+    const run = this.timelineRun;
+    if (!run) return null;
+    await run.finished;
+    if (this.timelineRun !== run || !run.done || run.error) return null;
+    return run.items;
   }
 
   async hydrateFile(uid: string, dir?: string): Promise<HydratedFile> {

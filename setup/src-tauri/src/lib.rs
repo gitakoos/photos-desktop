@@ -355,8 +355,11 @@ mod tests {
         let dir = fake_install("upgrade");
         let data = install_data_dir(&dir);
 
-        extract_payload(&dir).unwrap();
+        lay_payload(&dir).unwrap();
         let reset = carry_data(&data);
+        // Nothing of the swap's own working space is left in the folder.
+        assert!(!dir.join(UPGRADE_STAGING).exists());
+        assert!(!dir.join(UPGRADE_PREVIOUS).exists());
 
         // The app was replaced by the one this installer carries...
         assert!(
@@ -374,6 +377,65 @@ mod tests {
         assert_eq!(fs::read_to_string(data.join("session.enc")).unwrap(), "the sign-in");
         assert_eq!(fs::read_to_string(data.join("thumbs").join("a.bin")).unwrap(), "a cached thumbnail");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A swap that cannot finish puts every file back, so the install is never left
+    /// holding some of each version, and the staged payload is intact for a retry.
+    #[test]
+    fn a_failed_swap_leaves_the_old_version_whole() {
+        let root = std::env::temp_dir().join(format!("pfp-setup-test-{}-swap", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (install, staging, previous) = (root.join("install"), root.join("staging"), root.join("previous"));
+        fs::create_dir_all(&install).unwrap();
+        fs::create_dir_all(staging.join("blocked")).unwrap();
+        fs::write(install.join("a.txt"), "old a").unwrap();
+        // A plain file where the new version needs a folder: the move under it fails.
+        fs::write(install.join("blocked"), "in the way").unwrap();
+        fs::write(staging.join("a.txt"), "new a").unwrap();
+        fs::write(staging.join("blocked").join("z.txt"), "new z").unwrap();
+
+        assert!(swap_in(&staging, &install, &previous).is_err());
+        assert_eq!(fs::read_to_string(install.join("a.txt")).unwrap(), "old a");
+        assert_eq!(fs::read_to_string(staging.join("a.txt")).unwrap(), "new a");
+        assert_eq!(fs::read_to_string(staging.join("blocked").join("z.txt")).unwrap(), "new z");
+
+        // Clear the way and it goes through, parking what it replaced.
+        fs::remove_file(install.join("blocked")).unwrap();
+        swap_in(&staging, &install, &previous).unwrap();
+        assert_eq!(fs::read_to_string(install.join("a.txt")).unwrap(), "new a");
+        assert_eq!(fs::read_to_string(install.join("blocked").join("z.txt")).unwrap(), "new z");
+        assert_eq!(fs::read_to_string(previous.join("a.txt")).unwrap(), "old a");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_images_inside_the_install_folder_are_its_processes() {
+        let install = Path::new(r"C:\Users\x\AppData\Local\Photos for Proton");
+        assert!(image_is_under(r"C:\Users\x\AppData\Local\Photos for Proton\photosforproton.exe", install));
+        assert!(image_is_under(r"c:\users\x\appdata\local\photos for proton\resources\sidecar.exe", install));
+        assert!(image_is_under(r"\\?\C:\Users\x\AppData\Local\Photos for Proton\app.exe", install));
+        // A sibling sharing the prefix is someone else's.
+        assert!(!image_is_under(r"C:\Users\x\AppData\Local\Photos for Proton Beta\app.exe", install));
+        assert!(!image_is_under(r"C:\Windows\explorer.exe", install));
+    }
+
+    #[test]
+    fn the_tree_follows_children_but_not_a_recycled_parent_id() {
+        // 10 is the app; 11 its WebView2 host; 12 a renderer of that host. 20 names 10 as
+        // its parent too, but was started before 10 existed: an older process whose
+        // parent id was recycled, which must never be killed with the app.
+        let parents = [(10, 1), (11, 10), (12, 11), (20, 10), (30, 1)];
+        let born = |pid: u32| match pid {
+            10 => Some(100),
+            11 => Some(110),
+            12 => Some(120),
+            20 => Some(50),
+            30 => Some(10),
+            _ => None,
+        };
+        let mut tree = process_tree(&[10], &parents, &born);
+        tree.sort();
+        assert_eq!(tree, vec![10, 11, 12]);
     }
 }
 
@@ -575,15 +637,28 @@ fn carry_data(data: &Path) -> bool {
     stale.is_some()
 }
 
+/// Runs one of the installer's long steps on a worker thread. A plain (non-async) Tauri
+/// command runs on the window's own thread, so an install, upgrade or uninstall that
+/// took a while froze the window outright — Windows marked it "Not responding" while
+/// the work went on, which reads exactly like a hang. Off that thread, the window keeps
+/// drawing its progress the whole time.
+async fn off_ui<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("the installer stopped unexpectedly: {e}"))?
+}
+
 #[tauri::command]
-fn install(
+async fn install(
     dir: String,
     desktop: bool,
     start_menu: bool,
     network_drive: bool,
     file_types: bool,
 ) -> Result<(), String> {
-    install_impl(dir, desktop, start_menu, network_drive, file_types)
+    off_ui(move || install_impl(dir, desktop, start_menu, network_drive, file_types)).await
 }
 
 fn install_impl(
@@ -647,6 +722,114 @@ fn drop_superseded_exe(install: &Path) {
     }
 }
 
+/// Where an upgrade unpacks the new payload, and where it parks the files that payload
+/// replaces until every one of them is in. Both live inside the install, so every move
+/// between them is a same-volume rename.
+const UPGRADE_STAGING: &str = ".pfp-upgrade";
+const UPGRADE_PREVIOUS: &str = ".pfp-previous";
+
+/// Every file under `dir`, relative to it, in a stable order.
+fn files_under(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        for entry in fs::read_dir(dir.join(&rel)).map_err(|e| format!("read the new version: {e}"))? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let child = rel.join(entry.file_name());
+            if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                stack.push(child);
+            } else {
+                out.push(child);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Move every file of `staging` into place under `install`, parking each file it
+/// replaces under `previous`. All or nothing: a move that fails puts back everything
+/// done so far — the new files return to `staging`, the parked ones to where they
+/// were — so the install is never left half one version and half the other, and the
+/// swap can simply be tried again.
+fn swap_in(staging: &Path, install: &Path, previous: &Path) -> Result<(), String> {
+    let files = files_under(staging)?;
+    let mut done: Vec<(&PathBuf, bool)> = Vec::new();
+    let mut moved = || -> Result<(), String> {
+        for rel in &files {
+            let target = install.join(rel);
+            let parked = previous.join(rel);
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let had = target.is_file();
+            if had {
+                if let Some(parent) = parked.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                // The payload-relative name only: this reaches the error screen.
+                fs::rename(&target, &parked).map_err(|e| format!("replace {}: {e}", rel.display()))?;
+            }
+            if let Err(e) = fs::rename(staging.join(rel), &target) {
+                if had {
+                    let _ = fs::rename(&parked, &target);
+                }
+                return Err(format!("replace {}: {e}", rel.display()));
+            }
+            done.push((rel, had));
+        }
+        Ok(())
+    };
+    let result = moved();
+    if result.is_err() {
+        for (rel, had) in done.into_iter().rev() {
+            let target = install.join(rel);
+            let _ = fs::rename(&target, staging.join(rel));
+            if had {
+                let _ = fs::rename(previous.join(rel), &target);
+            }
+        }
+    }
+    result
+}
+
+/// Put this installer's payload in place over an install, keeping the app down for as
+/// short a time as possible and never leaving it half-replaced.
+///
+/// It used to close the app first and then unpack the whole payload over the folder,
+/// so the app was gone for the length of the unpacking, and a file that stayed locked
+/// part-way through left the folder holding some of each version. Now the payload is
+/// unpacked beside the install while the app may still be running, which is the slow
+/// part; the app is closed only for the swap, which is one rename per file; and the
+/// swap is all or nothing (see `swap_in`), retried while anything still holds a file.
+fn lay_payload(install: &Path) -> Result<(), String> {
+    let staging = install.join(UPGRADE_STAGING);
+    let previous = install.join(UPGRADE_PREVIOUS);
+    // Whatever an earlier attempt left behind is not this upgrade's.
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_dir_all(&previous);
+    if let Err(e) = extract_payload(&staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+
+    kill_under_dir(install);
+    let mut swapped = swap_in(&staging, install, &previous);
+    for _ in 0..5 {
+        if swapped.is_ok() {
+            break;
+        }
+        // Something reopened a file (the app relaunched by hand, an antivirus scan):
+        // close what runs from the folder again and give the scan a moment.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        kill_under_dir(install);
+        swapped = swap_in(&staging, install, &previous);
+    }
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_dir_all(&previous);
+    swapped
+}
+
 /// Update an existing install in place: lay this (newer) exe's payload over its
 /// files. Shortcuts, data and prefs are kept — nothing is deleted, the payload is
 /// simply overwritten, so `<install>\data` comes through the upgrade untouched and
@@ -668,19 +851,7 @@ fn drop_superseded_exe(install: &Path) {
 #[cfg(windows)]
 fn upgrade_impl(install: &Path, relaunch: bool) -> Result<bool, String> {
     patch_allows(PATCH_FROM, read_installed_version().as_deref())?;
-    // Make sure nothing under the folder still holds a file, then overwrite the
-    // payload, retrying while the app finishes closing.
-    kill_under_dir(install);
-    std::thread::sleep(std::time::Duration::from_millis(1200));
-    let mut extracted = extract_payload(install);
-    let mut tries = 0;
-    while extracted.is_err() && tries < 5 {
-        tries += 1;
-        kill_under_dir(install);
-        std::thread::sleep(std::time::Duration::from_millis(800));
-        extracted = extract_payload(install);
-    }
-    extracted?;
+    lay_payload(install)?;
     // The data survived the overwrite by never being touched; all that is left is
     // whether this build can still read it.
     let reset = carry_data(&install_data_dir(install));
@@ -741,8 +912,8 @@ fn registered_install() -> Result<PathBuf, String> {
 /// screen. The app is not started again here: the installer is still on screen and
 /// offers Launch, the same way it does after a fresh install.
 #[tauri::command]
-fn upgrade() -> Result<bool, String> {
-    upgrade_impl(&registered_install()?, false)
+async fn upgrade() -> Result<bool, String> {
+    off_ui(|| upgrade_impl(&registered_install()?, false)).await
 }
 
 #[tauri::command]
@@ -924,6 +1095,31 @@ fn app_prefs_key() -> String {
     format!("Software\\{PACK_ID}")
 }
 
+/// The value that tells a running app it is being uninstalled. Must match the app's
+/// `cloud_mount::UNINSTALLING_VALUE`.
+#[cfg(windows)]
+const UNINSTALLING_VALUE: &str = "Uninstalling";
+
+/// Tell the still-running app to stand down before the sync root is settled under it.
+///
+/// The settling deletes every cloud-only placeholder, and to the app's folder watcher a
+/// placeholder vanishing from `Photos\` is the user deleting that photo in Explorer —
+/// which, with Explorer edits on (the default), moves it to the Proton trash. A whole
+/// library vanishing at once also overflowed the watcher, which answered by filling the
+/// folder again while the uninstaller was emptying it. With this set, the app lets each
+/// deletion through and acts on none of them. The key goes with the rest of the prefs
+/// further down, once the app is closed.
+#[cfg(windows)]
+fn mark_uninstalling() {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(app_prefs_key()) {
+        let _ = key.set_value(UNINSTALLING_VALUE, &1u32);
+    }
+}
+#[cfg(not(windows))]
+fn mark_uninstalling() {}
+
 #[cfg(windows)]
 fn remove_app_prefs() {
     use winreg::enums::HKEY_CURRENT_USER;
@@ -933,23 +1129,12 @@ fn remove_app_prefs() {
 #[cfg(not(windows))]
 fn remove_app_prefs() {}
 
-// PowerShell run by the uninstaller. These are templates (not `format!`) so the
-// many literal `{ }` of PowerShell stay out of Rust's brace-escaping; `__DIR__`
-// and `__PID__` are substituted below. `__DIR__` is single-quote-escaped first, so
-// it can never break out of the PowerShell string literal, and the match uses a
-// trailing separator (`__DIR__\`) so a sibling folder with the same prefix is not
-// caught. `taskkill /T` kills each match's whole child tree, which is what frees
-// the folder: the WebView2 helper processes run from the Edge runtime (not from
-// the install dir), so a plain per-image kill would leave them holding files.
-
-/// Kill every process whose image lives under the install folder, and their child
-/// trees, skipping this running uninstaller itself.
-#[cfg(windows)]
-const KILL_TEMPLATE: &str = r#"
-Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-  Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('__DIR__\', 'OrdinalIgnoreCase') -and $_.ProcessId -ne __PID__ } |
-  ForEach-Object { & taskkill /F /T /PID $_.ProcessId 2>$null }
-"#;
+// PowerShell run by the uninstaller once it has exited. A template (not `format!`)
+// so the many literal `{ }` of PowerShell stay out of Rust's brace-escaping; `__DIR__`,
+// `__SELF__` and `__PID__` are substituted below. Paths are single-quote-escaped
+// first, so they can never break out of the PowerShell string literal, and the match
+// uses a trailing separator (`__DIR__\`) so a sibling folder with the same prefix is
+// not caught.
 
 /// Wait for the uninstaller to exit, kill any straggler under the folder (tree and
 /// all), then remove the folder, retrying past the brief WebView2 file locks.
@@ -983,25 +1168,151 @@ L 'cleanup finished'
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 "#;
 
-#[cfg(windows)]
-fn build_script(template: &str, install: &Path) -> String {
-    let dir = install.display().to_string().replace('\'', "''");
-    template
-        .replace("__DIR__", &dir)
-        .replace("__PID__", &std::process::id().to_string())
+/// Whether `image` (a process's full executable path) lives under `install`. Matched
+/// with a trailing separator, so a sibling folder sharing the prefix is not caught, and
+/// without regard to case, as Windows paths are. Pure decision (unit-tested).
+fn image_is_under(image: &str, install: &Path) -> bool {
+    let mut prefix = install.display().to_string().to_lowercase();
+    // A `\\?\` verbatim prefix on either side would hide an otherwise equal path.
+    if let Some(rest) = prefix.strip_prefix(r"\\?\") {
+        prefix = rest.to_string();
+    }
+    if !prefix.ends_with('\\') {
+        prefix.push('\\');
+    }
+    let image = image.to_lowercase();
+    image.strip_prefix(r"\\?\").unwrap_or(&image).starts_with(&prefix)
 }
 
-/// Close the running app right now (synchronously): its WebView2 children hold
-/// files in the folder, and the user should see it exit the instant they confirm.
+/// The processes `roots` started, and theirs, down the whole tree. A parent id can be
+/// a recycled one, so a child counts only if it was created after the parent it names
+/// (`created` answers a process's creation time, None when it cannot be read). Pure
+/// over its inputs (unit-tested).
+fn process_tree(
+    roots: &[u32],
+    parents: &[(u32, u32)],
+    created: &dyn Fn(u32) -> Option<u64>,
+) -> Vec<u32> {
+    let mut out: Vec<u32> = roots.to_vec();
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i];
+        let parent_born = created(parent);
+        for &(pid, ppid) in parents {
+            if ppid != parent || pid == parent || out.contains(&pid) {
+                continue;
+            }
+            let younger = match (parent_born, created(pid)) {
+                (Some(p), Some(c)) => c >= p,
+                _ => false,
+            };
+            if younger {
+                out.push(pid);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Close the running app right now, and wait until it is really gone: every process
+/// whose image lives under the install folder, with its whole tree, which is what frees
+/// the folder — the WebView2 helpers run from the Edge runtime, not from the install,
+/// so a per-image kill would leave them holding files in it. This installer itself is
+/// never touched.
+///
+/// Native, where it used to start PowerShell and query WMI: that alone took seconds on
+/// an ordinary machine, ran twice or more on every upgrade, and was followed by a fixed
+/// sleep that guessed at how long the handles took to go. Each process is now waited on
+/// directly, so the step takes as long as the app takes to die and no longer.
 #[cfg(windows)]
 fn kill_under_dir(install: &Path) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let script = build_script(KILL_TEMPLATE, install);
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output(); // block until the kills finish
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+
+    /// How long the kill waits, in all, for the processes it ended to be gone.
+    const EXIT_WAIT_MS: u32 = 8_000;
+    let me = std::process::id();
+
+    // Every process and its parent, from one snapshot.
+    let mut parents: Vec<(u32, u32)> = Vec::new();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return;
+        };
+        let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                parents.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+
+    let open = |pid: u32, rights| unsafe { OpenProcess(rights, false, pid).ok() };
+    let image_of = |pid: u32| -> Option<String> {
+        let handle = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+        let mut buf = [0u16; 32_768];
+        let mut len = buf.len() as u32;
+        let ok = unsafe { QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) };
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        ok.ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    };
+    let created = |pid: u32| -> Option<u64> {
+        let handle = open(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
+        let (mut born, mut a, mut b, mut c) =
+            (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let ok = unsafe { GetProcessTimes(handle, &mut born, &mut a, &mut b, &mut c) };
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        ok.ok()?;
+        Some(((born.dwHighDateTime as u64) << 32) | born.dwLowDateTime as u64)
+    };
+
+    let roots: Vec<u32> = parents
+        .iter()
+        .map(|&(pid, _)| pid)
+        .filter(|&pid| pid != me && pid != 0)
+        .filter(|&pid| image_of(pid).is_some_and(|image| image_is_under(&image, install)))
+        .collect();
+    if roots.is_empty() {
+        return;
+    }
+
+    // Terminate the whole tree, keeping a handle to each so its exit can be awaited.
+    let doomed: Vec<HANDLE> = process_tree(&roots, &parents, &created)
+        .into_iter()
+        .filter(|&pid| pid != me)
+        .filter_map(|pid| {
+            let handle = open(pid, PROCESS_TERMINATE | PROCESS_SYNCHRONIZE)?;
+            unsafe {
+                let _ = TerminateProcess(handle, 1);
+            }
+            Some(handle)
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(EXIT_WAIT_MS as u64);
+    for handle in doomed {
+        let left = deadline.saturating_duration_since(std::time::Instant::now()).as_millis() as u32;
+        unsafe {
+            let _ = WaitForSingleObject(handle, left);
+            let _ = CloseHandle(handle);
+        }
+    }
 }
 #[cfg(not(windows))]
 fn kill_under_dir(_: &Path) {}
@@ -1072,16 +1383,19 @@ fn self_install_dir() -> Result<PathBuf, String> {
 
 /// Uninstall the copy this exe lives in (the installed `uninstall.exe`).
 #[tauri::command]
-fn uninstall() -> Result<(), String> {
-    uninstall_impl(&self_install_dir()?)
+async fn uninstall() -> Result<(), String> {
+    off_ui(|| uninstall_impl(&self_install_dir()?)).await
 }
 
 /// Uninstall an existing install located via the registry — used when the
 /// INSTALLER is launched while the app is already installed.
 #[tauri::command]
-fn uninstall_existing() -> Result<(), String> {
-    let loc = read_install_location().ok_or_else(|| "no existing installation found".to_string())?;
-    uninstall_impl(Path::new(&loc))
+async fn uninstall_existing() -> Result<(), String> {
+    off_ui(|| {
+        let loc = read_install_location().ok_or_else(|| "no existing installation found".to_string())?;
+        uninstall_impl(Path::new(&loc))
+    })
+    .await
 }
 
 /// Whether two paths name the same directory. Canonicalised, so path-form
@@ -1186,12 +1500,13 @@ fn uninstall_impl(install: &Path) -> Result<(), String> {
     // FIRST, while the app is still running and can still answer for its own
     // placeholders: resolve the sync root. After the kill below there is no provider
     // left, and a placeholder without one cannot even be deleted, which is what used
-    // to strand undeletable files in the folder after an uninstall.
+    // to strand undeletable files in the folder after an uninstall. The app is told
+    // first, so it serves those deletions without reading them as the user's.
+    mark_uninstalling();
     detach_sync_root();
-    // Close the running app (its WebView2 children hold files in the folder),
-    // then give the OS a moment to release those handles.
+    // Close the running app (its WebView2 children hold files in the folder). The
+    // kill waits for each process to be gone, so their handles are released here.
     kill_under_dir(install);
-    std::thread::sleep(std::time::Duration::from_millis(600));
     // Shortcuts.
     let _ = fs::remove_file(desktop_dir().join(format!("{APP_NAME}.lnk")));
     let _ = fs::remove_file(start_menu_dir().join(format!("{APP_NAME}.lnk")));
