@@ -23,7 +23,8 @@
 
 // What the Android app keeps in Proton Drive beside the photos: the people its face index
 // named and the labels put on photos, under `My files/Photos for Proton/`. Read here, to
-// show them; nothing is written back.
+// show them; the desktop's own face and search copies are written back beside them
+// (`saveMlCopy`), as one more device's.
 //
 // Each file is the Android app's encrypted, signed envelope ("PPMLSEAL") around either a
 // face snapshot ("PPMLSNAP", binary) or a label snapshot (JSON). The layouts follow the
@@ -33,6 +34,7 @@
 import { createHash } from "node:crypto";
 
 import { CryptoProxy } from "./crypto.ts";
+import { parseFacesSnapshot, parseSearchSnapshot, type FacesSnap, type SearchSnap } from "./mlSnapshot.ts";
 import { nodeName } from "./nodes.ts";
 
 export const APP_FOLDER = "Photos for Proton";
@@ -220,6 +222,64 @@ export async function openEnvelope(file: Buffer, decryptionKeys: any[], verifica
     if (e instanceof RangeError) return { ok: false, reason: "damaged" };
     throw e;
   }
+}
+
+/** The plaintext cut per chunk, the Android app's. */
+const DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024;
+
+/**
+ * Seals `plain` the way the Android app's MlSnapshotEnvelope does, so the phone opens it as
+ * any other device's copy: a fresh session key wrapped to `recipientKey` (the account's
+ * address key), every chunk encrypted under it as a bare data packet, and a trailer signed by
+ * `signingKey` over the header and the ordered chunk hashes. The session key is the plain,
+ * non-AEAD kind, which every Android build reads.
+ */
+export async function sealEnvelope(
+  plain: Buffer,
+  recipientKey: any,
+  signingKey: any,
+  chunkSize = DEFAULT_CHUNK_SIZE,
+): Promise<Buffer> {
+  const sessionKey = await CryptoProxy.generateSessionKey({
+    recipientKeys: [recipientKey],
+    config: { ignoreSEIPDv2FeatureFlag: true },
+  } as any);
+  const wrappedKey = Buffer.from(
+    (await CryptoProxy.encryptSessionKey({ ...(sessionKey as any), format: "binary", encryptionKeys: [recipientKey] } as any)) as unknown as Uint8Array,
+  );
+  const header = envelopeHeader(chunkSize, wrappedKey);
+  const out: Buffer[] = [header];
+  const hashes: Buffer[] = [];
+  for (let at = 0; at < plain.length; at += chunkSize) {
+    const { message } = await CryptoProxy.encryptMessage({
+      binaryData: plain.subarray(at, at + chunkSize),
+      sessionKey,
+      format: "binary",
+      config: { ignoreSEIPDv2FeatureFlag: true },
+    } as any);
+    const cipher = Buffer.from(message as unknown as Uint8Array);
+    const length = Buffer.alloc(5);
+    length[0] = TAG_CHUNK;
+    length.writeInt32BE(cipher.length, 1);
+    out.push(length, cipher);
+    hashes.push(createHash("sha256").update(cipher).digest());
+  }
+  const signature = Buffer.from(
+    (await CryptoProxy.signMessage({
+      binaryData: signedManifest(header, hashes),
+      signingKeys: [signingKey],
+      detached: true,
+      format: "armored",
+    } as any)) as unknown as string,
+    "utf8",
+  );
+  const trailer = Buffer.alloc(5);
+  trailer[0] = TAG_TRAILER;
+  trailer.writeInt32BE(hashes.length, 1);
+  const sigLength = Buffer.alloc(4);
+  sigLength.writeInt32BE(signature.length, 0);
+  out.push(trailer, ...hashes, sigLength, signature);
+  return Buffer.concat(out);
 }
 
 // ---- The face snapshot ----
@@ -625,6 +685,96 @@ async function download(client: any, uid: string): Promise<Buffer> {
   });
   await downloader.downloadToStream(sink).completion();
   return Buffer.concat(chunks);
+}
+
+/** The folder `My files/Photos for Proton/<name>`, made when `create` and missing. */
+async function appSubfolder(client: any, name: string, create: boolean): Promise<any | null> {
+  const root = await client.getMyFilesRootFolder();
+  let app = await childNamed(client, root.uid, APP_FOLDER);
+  if (!app && create) app = await client.createFolder(root.uid, APP_FOLDER);
+  if (!app) return null;
+  let sub = await childNamed(client, app.uid, name);
+  if (!sub && create) sub = await client.createFolder(app.uid, name);
+  return sub;
+}
+
+/**
+ * Stores `bytes` (an already sealed copy) as `My files/Photos for Proton/ML data/<name>`: a new
+ * revision of the file when this install saved one before, else a new file, as the Android
+ * app's MlDriveStore does. The folders are made on the first save.
+ */
+export async function saveMlCopy(client: any, name: string, bytes: Buffer): Promise<void> {
+  const folder = await appSubfolder(client, ML_FOLDER, true);
+  const existing = (await filesIn(client, folder.uid)).find((f) => f.name === name);
+  const metadata = {
+    mediaType: "application/octet-stream",
+    expectedSize: bytes.length,
+    expectedSha1: createHash("sha1").update(bytes).digest("hex"),
+    modificationTime: new Date(),
+  };
+  const uploader = existing
+    ? await client.getFileRevisionUploader(existing.uid, metadata)
+    : await client.getFileUploader(folder.uid, name, metadata);
+  const { Readable } = await import("node:stream");
+  const controller = await uploader.uploadFromStream(Readable.toWeb(Readable.from(bytes)) as any, []);
+  await controller.completion();
+}
+
+/** One device's copy read in full, for the desktop's own merged index. */
+export type FullCopy =
+  | { kind: "faces"; fileDevice: string; snap: FacesSnap }
+  | { kind: "search"; fileDevice: string; snap: SearchSnap };
+
+/**
+ * Every device's face and search copy in `ML data`, opened and read in full, the desktop's own
+ * included: what the desktop's index merges. A copy that will not open is counted and passed
+ * over. Reuses `cache` as `loadDriveData` does.
+ */
+export async function loadFullCopies(
+  client: any,
+  account: any,
+  cache: CopyCache | null,
+): Promise<{ copies: FullCopy[]; unreadable: number }> {
+  const out: FullCopy[] = [];
+  let unreadable = 0;
+  const folder = await appSubfolder(client, ML_FOLDER, false);
+  if (!folder) return { copies: out, unreadable };
+  const keys = await addressKeys(account);
+  for (const file of await filesIn(client, folder.uid)) {
+    const faces = facesFileDevice(file.name);
+    const search = searchFileDevice(file.name);
+    if (!faces && !search) continue;
+    try {
+      let bytes = cache?.get(file.uid, file.revision) ?? null;
+      if (!bytes) {
+        bytes = await download(client, file.uid);
+        cache?.put(file.uid, file.revision, bytes);
+      }
+      const opened = await openEnvelope(bytes, keys, keys);
+      if (!opened.ok) {
+        unreadable++;
+        continue;
+      }
+      if (faces) out.push({ kind: "faces", fileDevice: faces, snap: parseFacesSnapshot(opened.plain) });
+      else out.push({ kind: "search", fileDevice: search!, snap: parseSearchSnapshot(opened.plain) });
+    } catch (e) {
+      process.stderr.write(`[drive-data] a copy could not be read: ${(e as Error).name}\n`);
+      unreadable++;
+    }
+  }
+  return { copies: out, unreadable };
+}
+
+/** Every key of every address, primary ones first, so a copy sealed before a key rotation or
+ *  a change of primary address still opens. The first is the one new copies are sealed with. */
+export async function addressKeys(account: any): Promise<any[]> {
+  const keys: any[] = [];
+  for (const address of await account.getOwnAddresses()) {
+    const own = [...(address.keys ?? [])];
+    const primary = own.splice(address.primaryKeyIndex ?? 0, 1);
+    keys.push(...primary.map((k: any) => k.key), ...own.map((k: any) => k.key));
+  }
+  return keys;
 }
 
 /** What a read brings: the people and labels, and the search copies that share the text

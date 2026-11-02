@@ -121,6 +121,9 @@ export function toPlanes(rgb: Uint8Array, side = FACE_INPUT): Float32Array {
 
 const model = pinnedModel(FACE_MODEL, "faces");
 
+/** The detector on disk, which the library index runs as well. */
+export const faceDetectorModel = model;
+
 export const faceModelStatus = () => model.status();
 export const startFaceModelDownload = () => model.startDownload();
 export const removeFaceModel = () => {

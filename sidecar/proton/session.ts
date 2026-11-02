@@ -84,6 +84,7 @@ import {
   type SearchSnapshot,
 } from "./driveData.ts";
 import { encodeText, rank, SEARCH_MODEL_ID } from "./semantic.ts";
+import { MlService, type EditRequest } from "./mlService.ts";
 import { isTransient, withRetry } from "./transient.ts";
 import { nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
@@ -423,6 +424,18 @@ export class ProtonSession {
   private driveCollections: { kinds: string; run: Promise<DriveReply> } | null = null;
   /** The search copies the last read brought, in the text encoder's space. */
   private searchCopies: SearchSnapshot[] = [];
+  /** The desktop's own face and search index, merged with every device's copy. */
+  private ml = new MlService({
+    myFiles: () => this.myFilesClient(),
+    account: () => {
+      if (!this.sdkBase) throw new Error("Not signed in");
+      return this.sdkBase.account;
+    },
+    copyCache: () => driveCopyCache(),
+    timeline: async () =>
+      (await this.getTimeline()).map((it) => ({ uid: it.uid, video: it.tags.includes(PhotoTag.Videos) })),
+    previews: (uids) => this.previewBytes(uids),
+  });
   private photos: any = null;
   /** Which sign-in a pending-step timer belongs to; a newer attempt disarms older ones. */
   private attempt = 0;
@@ -716,8 +729,9 @@ export class ProtonSession {
    * many photos the search can reach. Read once a session; `refresh` looks again, and only a
    * copy whose revision changed on Drive is downloaded again.
    */
-  getDriveCollections(refresh: boolean, kinds: DriveKinds): Promise<DriveReply> {
-    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+  /** The client for My files, built on first use. */
+  private myFilesClient(): any {
+    if (!this.sdkBase) throw new Error("Not signed in");
     if (!this.myFiles) {
       this.myFiles = new ProtonDriveClient({
         ...this.sdkBase,
@@ -725,6 +739,13 @@ export class ProtonSession {
         cryptoCache: new BoundedCache(CRYPTO_CACHE_LIMIT),
       } as any);
     }
+    return this.myFiles;
+  }
+
+  getDriveCollections(refresh: boolean, kinds: DriveKinds): Promise<DriveReply> {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    this.myFilesClient();
+    if (refresh) void this.ml.refresh(true).catch(() => {});
     const key = `${kinds.faces}:${kinds.labels}:${kinds.search}`;
     if (refresh || !this.driveCollections || this.driveCollections.kinds !== key) {
       const run = loadDriveData(this.myFiles, this.sdkBase.account, kinds, driveCopyCache(), SEARCH_MODEL_ID).then(
@@ -753,10 +774,105 @@ export class ProtonSession {
    * phone saved to Drive: their link ids and scores. Empty without the text model or an index.
    */
   async semanticSearch(query: string, limit?: number): Promise<{ key: string; score: number }[]> {
-    if (!query.trim() || this.searchCopies.length === 0) return [];
+    if (!query.trim()) return [];
+    // Every device's vectors and this PC's own, merged; the phone's copies alone while the
+    // merged index cannot be read.
+    let copies = this.searchCopies;
+    try {
+      const merged = await this.ml.searchVectors();
+      const keys: string[] = [];
+      const vectors = new Uint16Array([...merged.values()].filter((v) => v).length * 512);
+      for (const [key, v] of merged) {
+        if (!v) continue;
+        vectors.set(v, keys.length * 512);
+        keys.push(key);
+      }
+      if (keys.length > 0) copies = [{ keys, vectors }] as any;
+    } catch {
+      /* the phone's copies, as read */
+    }
+    if (copies.length === 0) return [];
     const vector = await encodeText(query);
     if (!vector) return [];
-    return rank(this.searchCopies, vector, limit);
+    return rank(copies, vector, limit);
+  }
+
+  // ---- The desktop's own face and search index ----
+
+  mlView() {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    return this.ml.view();
+  }
+
+  mlEdit(req: EditRequest) {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    return this.ml.edit(req);
+  }
+
+  mlSuggestions(name: string) {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    return this.ml.suggestionsFor(name);
+  }
+
+  async mlRefresh() {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    await this.ml.refresh(true);
+    return this.ml.syncStatus();
+  }
+
+  mlSync() {
+    return this.ml.syncStatus();
+  }
+
+  mlSaveNow() {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    return this.ml.saveNow();
+  }
+
+  mlModels() {
+    return this.ml.modelsStatus();
+  }
+
+  mlModelsDownload() {
+    return this.ml.downloadModels();
+  }
+
+  mlIndexStart() {
+    if (!this.photos) throw new Error("Not signed in");
+    return this.ml.startIndex();
+  }
+
+  mlIndexStatus() {
+    return this.ml.indexStatus();
+  }
+
+  mlIndexCancel() {
+    return this.ml.cancelIndex();
+  }
+
+  /** The HD previews of `uids` for the library scan: the cached ones, then the rest fetched
+   *  and not kept, so a whole-library scan does not fill the disk with previews. */
+  private async *previewBytes(uids: string[]): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+    if (!this.photos) throw new Error("Not signed in");
+    const missing: string[] = [];
+    for (const uid of uids) {
+      const cached = thumbGet(uid, ThumbnailType.Type2);
+      if (cached) yield { uid, bytes: cached };
+      else missing.push(uid);
+    }
+    if (missing.length === 0) return;
+    // A preview that never comes (a stall) is skipped, not marked: the next scan asks again.
+    try {
+      for await (const r of withStallGuard(
+        this.photos.iterateThumbnails(missing, ThumbnailType.Type2),
+        THUMBNAIL_STALL_MS,
+        "iterateThumbnails(index)",
+      )) {
+        yield { uid: (r as any).nodeUid, bytes: (r as any).ok ? Buffer.from((r as any).thumbnail) : null };
+      }
+    } catch (e) {
+      if (!isStall(e)) throw e;
+    }
   }
 
   /** Tries again to resume a session that `offline` left waiting for the network. */
@@ -872,6 +988,7 @@ export class ProtonSession {
     this.myFiles = null;
     this.driveCollections = null;
     this.searchCopies = [];
+    this.ml.reset();
     this.email = "";
     this.password = "";
     this.keyPassword = "";

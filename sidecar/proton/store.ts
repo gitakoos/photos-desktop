@@ -76,6 +76,8 @@ export const ALBUM_MEMBERS_FILE = "album-members.enc";
 /** The phone's copies on Drive as last downloaded (people, labels, search), each under the
  *  revision it was read at. The account's own data, so `wipeCache` takes it. */
 export const DRIVE_COPIES_DIR = "drive-copies";
+/** The desktop's own face and search index and the edits made to it, sealed. */
+export const ML_DIR = "ml";
 
 let dataDir: string | null = null;
 let dataKey: Buffer | null = null;
@@ -182,6 +184,7 @@ export function wipeCache(): void {
     rmSync(join(dataDir, SESSION_FILE), { force: true });
     rmSync(join(dataDir, ALBUM_MEMBERS_FILE), { force: true });
     discardDir(join(dataDir, DRIVE_COPIES_DIR));
+    discardDir(join(dataDir, ML_DIR));
   } catch {
     /* best-effort */
   }

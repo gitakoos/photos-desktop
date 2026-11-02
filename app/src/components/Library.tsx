@@ -46,8 +46,9 @@ export type DriveCollections = {
   searchOtherModel?: number;
 };
 
-/** A person or label with its photos found in this library, newest first. */
-export type LibraryEntry = { name: string; uids: string[]; cover: string | null; box: FaceBox | null };
+/** A person or label with its photos found in this library, newest first. `id` tells apart
+ *  entries that share a name, such as the People groups still to be named. */
+export type LibraryEntry = { name: string; uids: string[]; cover: string | null; box: FaceBox | null; id?: string };
 
 export type LibraryKind = "people" | "labels";
 
@@ -179,7 +180,7 @@ export function EntryGrid({
   return (
     <div className="lib-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))` }}>
       {entries.map((entry) => (
-        <EntryCard key={entry.name} entry={entry} cover={entry.cover ? covers[entry.cover] : null} onOpen={onOpen} />
+        <EntryCard key={entry.id ?? entry.name} entry={entry} cover={entry.cover ? covers[entry.cover] : null} onOpen={onOpen} />
       ))}
     </div>
   );

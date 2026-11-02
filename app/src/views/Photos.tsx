@@ -110,6 +110,18 @@ import {
 import { MapView, type MapPoint } from "../components/MapView";
 import { ImportReview } from "../components/ImportReview";
 import { AlbumAddPhotos } from "../components/AlbumAddPhotos";
+import { PeopleLibrary, PersonActions, PersonNameDialog, SuggestionCard } from "../components/People";
+import {
+  editPeople,
+  linkOf,
+  loadPeople,
+  personUids,
+  suggestionsFor,
+  type MlEdit,
+  type MlPerson,
+  type MlSuggestion,
+  type MlView,
+} from "../lib/people";
 import { Lightbox } from "../components/Lightbox";
 import { Confirm } from "../components/Confirm";
 import { ContextMenu, type MenuAction, type MenuAt } from "../components/ContextMenu";
@@ -308,6 +320,8 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     name: string;
     uids: Set<string>;
     back: LibraryPageKind | "albums";
+    /** The People index's id of the person shown, whose page offers their own actions. */
+    person?: string;
   } | null>(null);
   // The photos that carry a place, read in batches the first time the map is opened.
   const [places, setPlaces] = useState<{ points: MapPoint[]; done: number; total: number; finished: boolean } | null>(
@@ -342,7 +356,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     setView(next);
   };
   /** The timeline narrowed to a set of photos, with a way back to where they were picked. */
-  const openFiltered = (filter: { name: string; uids: Set<string>; back: LibraryPageKind | "albums" }) => {
+  const openFiltered = (filter: { name: string; uids: Set<string>; back: LibraryPageKind | "albums"; person?: string }) => {
     goToView("photos");
     setUidFilter(filter);
   };
@@ -396,6 +410,12 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const [downloading, setDownloading] = useState(false);
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // The desktop's own People index: every device's copy merged with this PC's scans and edits.
+  const [ml, setMl] = useState<MlView | null>(null);
+  const [mlBusy, setMlBusy] = useState(false);
+  const [personDialog, setPersonDialog] = useState<"name" | "merge" | "move" | "add" | null>(null);
+  const [confirmHide, setConfirmHide] = useState(false);
+  const [personSuggestion, setPersonSuggestion] = useState<MlSuggestion | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Escape belongs to the lightbox while it is open.
   const sel = useSelection(scrollRef, lightboxIdx === null);
@@ -917,7 +937,78 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         .filter((e) => e.uids.length > 0),
     [byLinkId],
   );
-  const peopleEntries = useMemo(() => toEntries(drive?.data?.people), [toEntries, drive]);
+  const mlEntry = useCallback(
+    (p: MlPerson): LibraryEntry => {
+      const uids = personUids(p.keys, byLinkId);
+      const cover = p.cover ? (byLinkId.get(p.cover.key)?.uid ?? null) : null;
+      return { id: p.id, name: p.name ?? t("people.unnamed"), uids, cover: cover ?? uids[0] ?? null, box: cover ? (p.cover?.box ?? null) : null };
+    },
+    [byLinkId, t],
+  );
+  // The merged index once it is read; until then the phone's copies as they were read.
+  const peopleEntries = useMemo(
+    () =>
+      ml
+        ? ml.people.filter((p) => p.name).map(mlEntry).filter((e) => e.uids.length > 0)
+        : toEntries(drive?.data?.people),
+    [ml, mlEntry, toEntries, drive],
+  );
+  const groupEntries = useMemo(
+    () => (ml ? ml.people.filter((p) => !p.name).map(mlEntry).filter((e) => e.uids.length >= 2) : []),
+    [ml, mlEntry],
+  );
+  /** The person whose page is open, as the index knows them now. */
+  const person = useMemo(
+    () => (uidFilter?.person && ml ? (ml.people.find((p) => p.id === uidFilter.person) ?? null) : null),
+    [uidFilter, ml],
+  );
+  /** Takes a new view of the index in, and keeps an open person's page on them: under their
+   *  new id after a rename or a merge, or back to People when they are gone. */
+  const applyMl = useCallback(
+    (next: MlView, nextPerson?: string) => {
+      setMl(next);
+      setUidFilter((f) => {
+        if (!f?.person) return f;
+        const p = next.people.find((x) => x.id === (nextPerson ?? f.person));
+        if (!p) {
+          setView("albums");
+          setLibraryPage("people");
+          return null;
+        }
+        return { ...f, person: p.id, name: p.name ?? t("people.unnamed"), uids: new Set(personUids(p.keys, byLinkId)) };
+      });
+    },
+    [byLinkId, t],
+  );
+  const runEdit = useCallback(
+    async (edit: MlEdit, nextPerson?: string) => {
+      setMlBusy(true);
+      try {
+        applyMl(await editPeople(edit), nextPerson);
+        return true;
+      } catch {
+        setToast(t("people.failed"));
+        return false;
+      } finally {
+        setMlBusy(false);
+      }
+    },
+    [applyMl, t],
+  );
+  // A named person's page offers the closest group that may be them too.
+  useEffect(() => {
+    setPersonSuggestion(null);
+    if (!person?.name) return;
+    let live = true;
+    suggestionsFor(person.name).then((list) => live && setPersonSuggestion(list[0] ?? null), () => {});
+    return () => {
+      live = false;
+    };
+  }, [person?.name, ml]);
+  const suggestionUids = useCallback(
+    (sg: MlSuggestion) => personUids([...new Set(sg.faces.map((id) => id.slice(0, id.lastIndexOf("#"))))], byLinkId),
+    [byLinkId],
+  );
   const { lang } = useLang();
   const memoryEntries = useMemo(() => {
     const plural = new Intl.PluralRules(lang);
@@ -1041,6 +1132,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         .catch(() =>
           setDrive((d) => (d?.data ? { ...d, state: "ready" } : { state: "failed", data: null, at: d?.at ?? 0 })),
         );
+      if (settings.driveFaces) loadPeople().then(setMl, () => {});
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [driveKinds],
@@ -2355,6 +2447,14 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             <span className="g-crumbcount">
               {t(filtered.length === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: filtered.length })}
             </span>
+            {person && (
+              <PersonActions
+                named={!!person.name}
+                onName={() => setPersonDialog("name")}
+                onMerge={() => setPersonDialog("merge")}
+                onHide={() => setConfirmHide(true)}
+              />
+            )}
             <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
           </>
         )}
@@ -2825,6 +2925,18 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                   onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "collection" })}
                 />
               )
+            ) : libraryPage === "people" && ml && (peopleEntries.length > 0 || groupEntries.length > 0) ? (
+              <PeopleLibrary
+                named={peopleEntries}
+                groups={groupEntries}
+                suggestions={ml.suggestions.map((sg) => ({ suggestion: sg, uids: suggestionUids(sg) })).filter((sg) => sg.uids.length > 0)}
+                cardSize={Math.round((albumCellSize * 140) / 190)}
+                busy={mlBusy}
+                onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "people", person: entry.id })}
+                onAnswer={(sg, yes) =>
+                  void runEdit({ action: yes ? "acceptSuggestion" : "dismissSuggestion", group: sg.group, name: sg.name })
+                }
+              />
             ) : libraryPage ? (
               <LibraryPage
                 kind={libraryPage}
@@ -2947,6 +3059,23 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             {error && <div className="g-error">{error}</div>}
 
             {((loading && items.length === 0) || !hidingKnown) && <PhotoGridSkeleton count={30} cellSize={cellSize} />}
+
+            {person && personSuggestion && (
+              <div className="pp-onpage">
+                <SuggestionCard
+                  suggestion={personSuggestion}
+                  uids={suggestionUids(personSuggestion)}
+                  busy={mlBusy}
+                  onAnswer={(yes) =>
+                    void runEdit({
+                      action: yes ? "acceptSuggestion" : "dismissSuggestion",
+                      group: personSuggestion.group,
+                      name: personSuggestion.name,
+                    })
+                  }
+                />
+              </div>
+            )}
 
             {albumMatches.length > 0 && (
               <section className="g-sres">
@@ -3095,6 +3224,33 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               allSelectedOffline ? () => void runSelection(offlineRemoveSelected) : undefined
             }
             onTrash={() => setConfirmTrash(true)}
+            onAddToPerson={!person && ml && settings.driveFaces ? () => setPersonDialog("add") : undefined}
+            onMoveToPerson={person ? () => setPersonDialog("move") : undefined}
+            onRemoveFromPerson={
+              person
+                ? () =>
+                    void runSelection(async () => {
+                      const keys = [...selected].map(linkOf);
+                      if (await runEdit({ action: "removePhotos", person: person.id, keys })) {
+                        setToast(
+                          t(keys.length === 1 ? "people.removed.one" : "people.removed.other", {
+                            count: keys.length,
+                            name: person.name ?? t("people.unnamed"),
+                          }),
+                        );
+                        sel.clear();
+                      }
+                    })
+                : undefined
+            }
+            onSetCover={
+              person?.name && selected.size === 1
+                ? () =>
+                    void runSelection(async () => {
+                      if (await runEdit({ action: "setCover", name: person.name!, key: [...selected][0] })) sel.clear();
+                    })
+                : undefined
+            }
           />
         </>
       )}
@@ -3389,6 +3545,67 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             else setFixDates(null);
           }}
           onConfirm={() => void runSelection(applyFixDates)}
+        />
+      )}
+
+      {personDialog && (person || personDialog === "add") && ml && (
+        <PersonNameDialog
+          title={t(
+            personDialog === "name"
+              ? person?.name
+                ? "people.renameTitle"
+                : "people.nameTitle"
+              : personDialog === "merge"
+                ? "people.mergeTitle"
+                : personDialog === "move"
+                  ? "people.moveTitle"
+                  : "people.addTitle",
+          )}
+          confirmLabel={t(
+            personDialog === "move" ? "people.move" : personDialog === "add" ? "people.add" : personDialog === "merge" ? "people.merge" : "people.save",
+          )}
+          initial={personDialog === "name" ? (person?.name ?? "") : ""}
+          names={ml.names}
+          current={personDialog === "name" || personDialog === "merge" ? (person?.name ?? null) : undefined}
+          busy={mlBusy}
+          onCancel={() => setPersonDialog(null)}
+          onConfirm={(name) =>
+            void (async () => {
+              let ok = false;
+              if (personDialog === "add") {
+                ok = await runEdit({ action: "addPhotos", name, keys: [...selected] });
+              } else if (personDialog === "move" && person) {
+                ok = await runEdit({ action: "movePhotos", person: person.id, keys: [...selected].map(linkOf), name });
+              } else if (person) {
+                ok = await runEdit({ action: "name", person: person.id, name }, "n:" + name);
+              }
+              if (ok) {
+                setPersonDialog(null);
+                if (personDialog === "add" || personDialog === "move") sel.clear();
+              }
+            })()
+          }
+        />
+      )}
+
+      {confirmHide && person && (
+        <Confirm
+          title={t("people.hideTitle")}
+          message={t("people.hideMessage")}
+          confirmLabel={t("people.hide")}
+          danger
+          busy={mlBusy}
+          onCancel={() => setConfirmHide(false)}
+          onConfirm={() =>
+            void runEdit({ action: "hide", person: person.id }).then((ok) => {
+              setConfirmHide(false);
+              if (ok) {
+                setUidFilter(null);
+                setView("albums");
+                setLibraryPage("people");
+              }
+            })
+          }
         />
       )}
 

@@ -36,6 +36,7 @@ import {
   readLabelsSnapshot,
   readSearchSnapshot,
   searchFileDevice,
+  sealEnvelope,
   type CopyCache,
 } from "./driveData.ts";
 
@@ -165,6 +166,28 @@ beforeAll(async () => {
   key = await CryptoProxy.generateKey({ userIDs: [{ name: "Owner", email: "owner@example.com" }] } as any);
   otherKey = await CryptoProxy.generateKey({ userIDs: [{ name: "Other", email: "other@example.com" }] } as any);
 }, 30_000);
+
+describe("the envelope this device writes", () => {
+  it("opens as the phone's does, across chunks", async () => {
+    const plain = Buffer.from("p".repeat(300) + "end");
+    expect(await openEnvelope(await sealEnvelope(plain, key, key, 64), [key], [key])).toEqual({ ok: true, plain });
+  });
+
+  it("seals each chunk as a bare, non-AEAD data packet, the kind every Android build reads", async () => {
+    const file = await sealEnvelope(Buffer.from("q".repeat(10)), key, key, 64);
+    const wrapped = file.readInt32BE(16);
+    const chunk = file.subarray(20 + wrapped + 5);
+    // A new-format packet header for tag 18 (SEIPD), then version 1: no key packet, no AEAD.
+    expect(chunk[0]).toBe(0xc0 | 18);
+    const lengthBytes = chunk[1] < 192 ? 1 : chunk[1] < 224 ? 2 : 5;
+    expect(chunk[1 + lengthBytes]).toBe(1);
+  });
+
+  it("is refused under another account's keys", async () => {
+    const file = await sealEnvelope(Buffer.from("r"), key, key);
+    expect(await openEnvelope(file, [otherKey], [otherKey])).toEqual({ ok: false, reason: "wrong-key" });
+  });
+});
 
 describe("the envelope the Android app writes", () => {
   it("opens, in several chunks, with the account's key", async () => {

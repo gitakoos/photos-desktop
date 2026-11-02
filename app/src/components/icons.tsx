@@ -564,6 +564,50 @@ export function PersonAddIcon({ size = 16 }: Props) {
   );
 }
 
+/** A person with a minus, outlined: off this person. */
+export function PersonRemoveIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M16 21v-2a4 4 0 0 0 -4 -4H6a4 4 0 0 0 -4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M22 11h-6" />
+    </svg>
+  );
+}
+
+/** A person with an arrow, outlined: onto another person. */
+export function PersonMoveIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M16 21v-2a4 4 0 0 0 -4 -4H6a4 4 0 0 0 -4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M17 11h5M20 8l3 3 -3 3" />
+    </svg>
+  );
+}
+
+/** Two people becoming one: a merge. */
+export function MergeIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M6 3v4a5 5 0 0 0 5 5h2a5 5 0 0 1 5 5v4" />
+      <path d="M18 3v4a5 5 0 0 1 -5 5" />
+      <path d="M15 18l3 3 3 -3" />
+    </svg>
+  );
+}
+
+/** An eye struck through: hidden. */
+export function HideIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1 -2.4 3.3M6.6 6.6A17.4 17.4 0 0 0 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4 -1.6" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+      <path d="M3 3l18 18" />
+    </svg>
+  );
+}
+
 /*
  * The left navigation's own marks. Unlike the filled Material set above, these are drawn
  * as light, even outlines on the same 24x24 grid, so the sidebar rail reads the way the

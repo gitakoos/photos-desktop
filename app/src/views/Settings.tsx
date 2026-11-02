@@ -20,6 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { PeopleIndexSettings } from "../components/PeopleIndexSettings";
 import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
@@ -1513,6 +1514,8 @@ function PhonePane({
           </div>
         )}
       </div>
+
+      {settings.driveFaces && <PeopleIndexSettings />}
 
       <div className="st-rows st-rows-gap">
         <div className="st-row off">

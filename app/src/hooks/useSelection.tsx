@@ -37,6 +37,9 @@ import {
   DeleteForeverIcon,
   DownloadIcon,
   ImageIcon,
+  PersonAddIcon,
+  PersonMoveIcon,
+  PersonRemoveIcon,
   LibraryAddIcon,
   LibraryRemoveIcon,
   MoreHorizIcon,
@@ -410,6 +413,9 @@ export function SelectionBar({
   onRemoveFromAlbum,
   onSetCover,
   onFixDates,
+  onAddToPerson,
+  onRemoveFromPerson,
+  onMoveToPerson,
 }: {
   count: number;
   /** True while one of the actions below is still working. */
@@ -436,6 +442,12 @@ export function SelectionBar({
    * only where the photos are the user's own cloud photos the replace can rewrite.
    */
   onFixDates?: () => void;
+  /** Adds the selected photos to a person by hand. */
+  onAddToPerson?: () => void;
+  /** Takes the selected photos off the person whose page this is. */
+  onRemoveFromPerson?: () => void;
+  /** Moves the selected photos from this person to another. */
+  onMoveToPerson?: () => void;
 }) {
   const t = useT();
   const barRef = useRef<HTMLDivElement>(null);
@@ -462,6 +474,9 @@ export function SelectionBar({
     add(onRestore, "restore", <RefreshIcon size={18} />, "primary");
     add(onAddToAlbum, "addToAlbum", <LibraryAddIcon size={18} />);
     add(onSetCover, "setCover", <ImageIcon size={18} />);
+    add(onAddToPerson, "addToPerson", <PersonAddIcon size={18} />);
+    add(onMoveToPerson, "moveToPerson", <PersonMoveIcon size={18} />);
+    add(onRemoveFromPerson, "removeFromPerson", <PersonRemoveIcon size={18} />);
     add(onDownload, "download", <DownloadIcon size={18} />);
     // After everything the selection keeps, and before what it lets go of: a date fix
     // keeps every pixel and only moves the photo to the day its own name records.
@@ -485,6 +500,9 @@ export function SelectionBar({
     onRemoveFromAlbum,
     onTrash,
     onDeleteForever,
+    onAddToPerson,
+    onMoveToPerson,
+    onRemoveFromPerson,
   ]);
 
   const [fit, setFit] = useState<Fit>({ tier: "full", shown: actions.length });

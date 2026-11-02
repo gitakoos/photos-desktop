@@ -181,6 +181,13 @@ fn priority_for(method: &str) -> Priority {
         "startFixDatesFromName" | "dateFixStatus" | "cancelFixDatesFromName"
         | "dateFixResults" => Priority::Background,
 
+        // The People index's scan and Drive copy: a start, a stop and progress polls that
+        // answer at once, and the reads of every device's copy. The scan itself runs inside
+        // the sidecar and never holds the channel, so like the date fix these only have to
+        // stay reachable while a long walk holds the foreground lane.
+        "mlIndexStart" | "mlIndexStatus" | "mlIndexCancel" | "mlModels" | "mlModelsDownload"
+        | "mlSync" | "mlSaveNow" | "mlRefresh" => Priority::Background,
+
         // The names of a selection the user is acting on (Fix dates). The same lookup as
         // `getMetadata`, which sits under the warmer as `Enumerate`: with the Explorer
         // folder off nothing had cached those names, so the call starved there behind a

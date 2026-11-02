@@ -1,0 +1,122 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+.pp-page {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pp-section {
+  margin-top: 18px;
+}
+.pp-section:first-child {
+  margin-top: 0;
+}
+.pp-heading {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+.pp-left {
+  margin: -4px 0 12px;
+  text-align: left;
+}
+.pp-hint {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+
+/* "Is this <name>?" */
+.pp-suggest-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.pp-suggest {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg2);
+}
+.pp-suggest-thumbs {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 4px;
+}
+.pp-suggest-thumbs > * {
+  aspect-ratio: 1;
+  width: 100%;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface-2);
+}
+.pp-suggest-text {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--fg-primary);
+}
+.pp-suggest-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.pp-onpage {
+  max-width: 520px;
+  margin: 0 0 16px;
+}
+
+/* A person's own actions, in the page's head. */
+.pp-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: 12px;
+}
+.pp-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.pp-action:hover {
+  border-color: var(--fg-mute);
+}
+@media (max-width: 900px) {
+  .pp-action span {
+    display: none;
+  }
+}

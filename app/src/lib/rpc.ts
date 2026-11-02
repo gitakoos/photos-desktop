@@ -69,6 +69,12 @@ const TIMEOUT_MS: Record<string, number> = {
   warmThumbnails: 3 * MINUTE,
 
   // Whole files: a video crosses as one payload, and an update is an installer.
+  // The People index: its first read downloads every device's copy, a save uploads this one.
+  mlView: 5 * MINUTE,
+  mlEdit: 2 * MINUTE,
+  mlRefresh: 5 * MINUTE,
+  mlSaveNow: 5 * MINUTE,
+
   getVideo: 15 * MINUTE,
   downloadUpdate: 15 * MINUTE,
 

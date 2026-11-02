@@ -32,6 +32,7 @@
 import "@protontech/crypto/polyfill";
 import { VERSION } from "@protontech/drive-sdk";
 import { session } from "./proton/session.ts";
+import type { EditRequest } from "./proton/mlService.ts";
 import { initStore } from "./proton/store.ts";
 import { modelStatus as semanticModelStatus, removeModel, startModelDownload } from "./proton/semantic.ts";
 import { detectFaces, faceModelStatus, startFaceModelDownload } from "./proton/faces.ts";
@@ -85,6 +86,31 @@ process.on("uncaughtException", (err) => {
 type Request = { id: number; method: string; params?: any };
 
 let initialised = false;
+
+/** A People edit from the window, taken field by field so nothing else rides along. */
+function editRequest(p: any): EditRequest {
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const keys = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 100_000) : []);
+  switch (p?.action) {
+    case "name":
+      return { action: "name", person: str(p.person), name: str(p.name) };
+    case "removePhotos":
+      return { action: "removePhotos", person: str(p.person), keys: keys(p.keys) };
+    case "movePhotos":
+      return { action: "movePhotos", person: str(p.person), keys: keys(p.keys), name: str(p.name) };
+    case "addPhotos":
+      return { action: "addPhotos", name: str(p.name), keys: keys(p.keys) };
+    case "setCover":
+      return { action: "setCover", name: str(p.name), key: str(p.key) };
+    case "hide":
+      return { action: "hide", person: str(p.person) };
+    case "acceptSuggestion":
+    case "dismissSuggestion":
+      return { action: p.action, group: str(p.group), name: str(p.name) };
+    default:
+      throw new Error("Unknown edit");
+  }
+}
 
 const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   // Sent by the Rust host before anything else: the app directory, and the key
@@ -212,6 +238,17 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
       String(p?.query ?? "").slice(0, 500),
       Math.min(1000, Math.max(1, Math.floor(Number(p?.limit) || 200))),
     ),
+  mlView: () => session.mlView(),
+  mlEdit: (p) => session.mlEdit(editRequest(p)),
+  mlSuggestions: (p) => session.mlSuggestions(String(p?.name ?? "")),
+  mlRefresh: () => session.mlRefresh(),
+  mlSync: () => session.mlSync(),
+  mlSaveNow: () => session.mlSaveNow(),
+  mlModels: () => session.mlModels(),
+  mlModelsDownload: () => session.mlModelsDownload(),
+  mlIndexStart: () => session.mlIndexStart(),
+  mlIndexStatus: () => session.mlIndexStatus(),
+  mlIndexCancel: () => session.mlIndexCancel(),
   semanticModelStatus: () => semanticModelStatus(),
   semanticModelDownload: () => startModelDownload(),
   semanticModelRemove: () => removeModel(),
