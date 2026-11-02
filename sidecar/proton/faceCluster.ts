@@ -131,64 +131,117 @@ export function centroid(vectors: Float32Array[]): Float32Array {
 
 export type FaceSample = { embedding: Float32Array; score: number; confident: boolean; confirmed: boolean };
 
-class ExemplarCluster {
-  anchors: Float32Array[] = [];
-  scores: number[] = [];
-  constructor(first: Float32Array, score: number) {
-    this.anchors.push(first);
-    this.scores.push(score);
-  }
-  similarityTo(e: Float32Array): number {
-    let best = -Infinity;
-    for (const a of this.anchors) best = Math.max(best, dot(e, a));
-    return best;
-  }
-  add(e: Float32Array, score: number): void {
-    if (this.anchors.length < EXEMPLARS) {
-      this.anchors.push(e);
-      this.scores.push(score);
-      return;
-    }
-    let weakest = 0;
-    for (let i = 1; i < this.scores.length; i++) if (this.scores[i] < this.scores[weakest]) weakest = i;
-    if (score > this.scores[weakest]) {
-      this.anchors[weakest] = e;
-      this.scores[weakest] = score;
-    }
-  }
-}
+/** What the base pass did with each face: its group (-1 for none) and whether it opened it. */
+export type BasePass = { assignment: Int32Array; opened: Uint8Array };
 
 /**
- * Groups faces into identities, clearest first: a confident face joins at the threshold, a
- * weak one at the threshold plus the strict delta, and only a confident or confirmed face may
- * open a group. Groups whose mean directions meet the merge floor are then folded together.
- * Returns the group per face in input order, -1 for a face left unassigned.
+ * The base pass, clearest face first: a confident face joins the group whose best anchor it
+ * matches at the threshold, a weak one at the threshold plus the strict delta, and only a
+ * confident or confirmed face may open a group. Each group keeps its five clearest faces as
+ * anchors. The anchors sit in one flat array and every comparison is one tight loop, which is
+ * what makes a library of thousands of faces group in a fraction of a second.
  */
-export function clusterFaces(samples: FaceSample[], threshold = CLUSTER_THRESHOLD, mergeThreshold = MERGE_THRESHOLD): Int32Array {
+export function basePass(samples: FaceSample[], threshold = CLUSTER_THRESHOLD): BasePass {
+  const dim = samples[0]?.embedding.length ?? EMBEDDING_DIM;
   const order = samples.map((_, i) => i).sort((a, b) => samples[b].score - samples[a].score);
-  const clusters: ExemplarCluster[] = [];
   const assignment = new Int32Array(samples.length).fill(-1);
+  const opened = new Uint8Array(samples.length);
+  let anchors = new Float32Array(Math.max(1, Math.min(samples.length, MAX_CLUSTERS)) * EXEMPLARS * dim);
+  const anchorScores: number[] = [];
+  const counts: number[] = [];
+  let clusters = 0;
   for (const index of order) {
     const s = samples[index];
+    const e = s.embedding;
     const need = s.confident ? threshold : threshold + STRICT_DELTA;
     let best = -1;
     let bestSim = -Infinity;
-    for (let c = 0; c < clusters.length; c++) {
-      const sim = clusters[c].similarityTo(s.embedding);
-      if (sim > bestSim) {
-        bestSim = sim;
-        best = c;
+    for (let c = 0; c < clusters; c++) {
+      const base = c * EXEMPLARS * dim;
+      for (let a = 0; a < counts[c]; a++) {
+        const at = base + a * dim;
+        let s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        let i = 0;
+        for (; i + 3 < dim; i += 4) {
+          s0 += e[i] * anchors[at + i];
+          s1 += e[i + 1] * anchors[at + i + 1];
+          s2 += e[i + 2] * anchors[at + i + 2];
+          s3 += e[i + 3] * anchors[at + i + 3];
+        }
+        for (; i < dim; i++) s0 += e[i] * anchors[at + i];
+        const sim = s0 + s1 + s2 + s3;
+        if (sim > bestSim) {
+          bestSim = sim;
+          best = c;
+        }
       }
     }
     if (best >= 0 && bestSim >= need) {
-      clusters[best].add(s.embedding, s.score);
       assignment[index] = best;
-    } else if ((s.confident || s.confirmed) && clusters.length < MAX_CLUSTERS) {
-      assignment[index] = clusters.length;
-      clusters.push(new ExemplarCluster(s.embedding, s.score));
+      // A full group swaps its weakest anchor for a clearer newcomer.
+      const scores = anchorScores.slice(best * EXEMPLARS, best * EXEMPLARS + counts[best]);
+      let slot = counts[best];
+      if (slot >= EXEMPLARS) {
+        let weakest = 0;
+        for (let i = 1; i < EXEMPLARS; i++) if (scores[i] < scores[weakest]) weakest = i;
+        slot = s.score > scores[weakest] ? weakest : -1;
+      } else {
+        counts[best]++;
+      }
+      if (slot >= 0) {
+        anchors.set(e, (best * EXEMPLARS + slot) * dim);
+        anchorScores[best * EXEMPLARS + slot] = s.score;
+      }
+    } else if ((s.confident || s.confirmed) && clusters < MAX_CLUSTERS) {
+      if ((clusters + 1) * EXEMPLARS * dim > anchors.length) {
+        const grown = new Float32Array(Math.min(MAX_CLUSTERS, clusters * 2 + 1) * EXEMPLARS * dim);
+        grown.set(anchors);
+        anchors = grown;
+      }
+      assignment[index] = clusters;
+      opened[index] = 1;
+      anchors.set(e, clusters * EXEMPLARS * dim);
+      anchorScores[clusters * EXEMPLARS] = s.score;
+      counts.push(1);
+      clusters++;
     }
   }
-  return mergeSimilar(assignment, samples, mergeThreshold);
+  return { assignment, opened };
+}
+
+/**
+ * Whether a base pass made over `before` holds for `after` too, without running it again: the
+ * same faces in the same order, and any face whose right to open a group changed (a weak face
+ * confirmed by hand, or no longer) neither opened a group nor was left out. Such a face joined
+ * a group that existed before it was reached, and every face before it is unchanged, so it
+ * joins that group again; what follows it then sees the same groups. This is what lets a "yes"
+ * to a suggestion, which confirms faces already grouped, skip the whole pass.
+ */
+export function baseStillHolds(before: FaceSample[], pass: BasePass, after: FaceSample[]): boolean {
+  if (before.length !== after.length) return false;
+  for (let i = 0; i < after.length; i++) {
+    const a = before[i];
+    const b = after[i];
+    if (a.embedding !== b.embedding || a.score !== b.score || a.confident !== b.confident) return false;
+    const seedBefore = a.confident || a.confirmed;
+    const seedAfter = b.confident || b.confirmed;
+    if (seedBefore !== seedAfter && (pass.opened[i] || pass.assignment[i] < 0)) return false;
+  }
+  return true;
+}
+
+/**
+ * Groups faces into identities: the base pass, then groups whose mean directions meet the
+ * merge floor are folded together. Returns the group per face in input order, -1 for a face
+ * left unassigned.
+ */
+export function clusterFaces(samples: FaceSample[], threshold = CLUSTER_THRESHOLD, mergeThreshold = MERGE_THRESHOLD): Int32Array {
+  return mergeSimilar(basePass(samples, threshold).assignment, samples, mergeThreshold);
+}
+
+/** The merge pass alone, over a base pass already made. */
+export function mergePass(pass: BasePass, samples: FaceSample[], mergeThreshold = MERGE_THRESHOLD): Int32Array {
+  return mergeSimilar(pass.assignment, samples, mergeThreshold);
 }
 
 function mergeSimilar(assignment: Int32Array, samples: FaceSample[], mergeThreshold: number): Int32Array {

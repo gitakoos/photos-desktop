@@ -322,6 +322,8 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     back: LibraryPageKind | "albums";
     /** The People index's id of the person shown, whose page offers their own actions. */
     person?: string;
+    /** The suggestion this group was opened from, asked again over its photos. */
+    suggestion?: MlSuggestion;
   } | null>(null);
   // The photos that carry a place, read in batches the first time the map is opened.
   const [places, setPlaces] = useState<{ points: MapPoint[]; done: number; total: number; finished: boolean } | null>(
@@ -356,7 +358,13 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     setView(next);
   };
   /** The timeline narrowed to a set of photos, with a way back to where they were picked. */
-  const openFiltered = (filter: { name: string; uids: Set<string>; back: LibraryPageKind | "albums"; person?: string }) => {
+  const openFiltered = (filter: {
+    name: string;
+    uids: Set<string>;
+    back: LibraryPageKind | "albums";
+    person?: string;
+    suggestion?: MlSuggestion;
+  }) => {
     goToView("photos");
     setUidFilter(filter);
   };
@@ -1009,6 +1017,17 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     (sg: MlSuggestion) => personUids([...new Set(sg.faces.map((id) => id.slice(0, id.lastIndexOf("#"))))], byLinkId),
     [byLinkId],
   );
+  /** A suggestion's group opened as a page of its own, the question asked again over it. */
+  const openSuggestion = (sg: MlSuggestion) =>
+    openFiltered({
+      name: t("people.suggestQuestion", { name: sg.name }),
+      uids: new Set(suggestionUids(sg)),
+      back: "people",
+      person: sg.group,
+      suggestion: sg,
+    });
+  /** The question on a person's page: the one it was opened for, else the closest group. */
+  const pageSuggestion = uidFilter?.suggestion ?? (person ? personSuggestion : null);
   const { lang } = useLang();
   const memoryEntries = useMemo(() => {
     const plural = new Intl.PluralRules(lang);
@@ -2936,6 +2955,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 onAnswer={(sg, yes) =>
                   void runEdit({ action: yes ? "acceptSuggestion" : "dismissSuggestion", group: sg.group, name: sg.name })
                 }
+                onOpenSuggestion={openSuggestion}
               />
             ) : libraryPage ? (
               <LibraryPage
@@ -3060,18 +3080,29 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
 
             {((loading && items.length === 0) || !hidingKnown) && <PhotoGridSkeleton count={30} cellSize={cellSize} />}
 
-            {person && personSuggestion && (
+            {pageSuggestion && (person || uidFilter?.suggestion) && (
               <div className="pp-onpage">
                 <SuggestionCard
-                  suggestion={personSuggestion}
-                  uids={suggestionUids(personSuggestion)}
+                  suggestion={pageSuggestion}
+                  uids={suggestionUids(pageSuggestion)}
                   busy={mlBusy}
+                  // On the group's own page its photos are already the page; elsewhere it opens them.
+                  onOpen={uidFilter?.suggestion ? undefined : () => openSuggestion(pageSuggestion)}
                   onAnswer={(yes) =>
-                    void runEdit({
-                      action: yes ? "acceptSuggestion" : "dismissSuggestion",
-                      group: personSuggestion.group,
-                      name: personSuggestion.name,
-                    })
+                    void (async () => {
+                      const fromGroup = !!uidFilter?.suggestion;
+                      const ok = await runEdit({
+                        action: yes ? "acceptSuggestion" : "dismissSuggestion",
+                        group: pageSuggestion.group,
+                        name: pageSuggestion.name,
+                      });
+                      // Answered over the group's own photos: back to where the question came from.
+                      if (ok && fromGroup) {
+                        setUidFilter(null);
+                        setView("albums");
+                        setLibraryPage("people");
+                      }
+                    })()
                   }
                 />
               </div>

@@ -53,7 +53,10 @@ import {
   MIN_FACES_TO_SHOW,
   attractToNamed,
   centroid,
-  clusterFaces,
+  basePass,
+  baseStillHolds,
+  mergePass,
+  type BasePass,
   dot,
   isConfident,
   resolveClusterNames,
@@ -155,6 +158,14 @@ export class Replica {
   localSearch: SearchSnap;
   ops: Op[] = [];
   private cache: Merged | null = null;
+  /** Bumped whenever the faces themselves change (a copy read, a photo scanned), as opposed to
+   *  what is decided about them. */
+  private facesVersion = 0;
+  /** The last grouping, kept for the next merge to reuse when the faces did not change. */
+  clusterCache: { version: number; ids: string[]; samples: FaceSample[]; pass: BasePass; merged: Int32Array } | null = null;
+  get faceVersion(): number {
+    return this.facesVersion;
+  }
 
   constructor(
     readonly deviceId: string,
@@ -173,9 +184,16 @@ export class Replica {
   /** Replaces what Drive holds. This device's own copy is left out: what it says is already
    *  here, first-hand, and taking it back would date old values as new. */
   setCopies(faces: FacesSnap[], search: SearchSnap[]): void {
-    this.copies = faces.filter((s) => s.deviceId !== this.deviceId);
-    this.searchCopies = search.filter((s) => s.deviceId !== this.deviceId && s.modelId === this.searchModelId);
+    const own = faces.filter((s) => s.deviceId !== this.deviceId);
+    const ownSearch = search.filter((s) => s.deviceId !== this.deviceId && s.modelId === this.searchModelId);
+    // A periodic look at Drive mostly finds the very copies already read: keeping them as they
+    // are keeps the grouping too, rather than redoing it for nothing.
+    const sig = (list: { deviceId: string; createdAt: number }[]) => list.map((s) => `${s.deviceId}@${s.createdAt}`).sort().join(",");
+    if (sig(own) === sig(this.copies) && sig(ownSearch) === sig(this.searchCopies) && this.facesVersion > 0) return;
+    this.copies = own;
+    this.searchCopies = ownSearch;
     this.facts = this.copies.flatMap((s) => ingest(s, this.seen));
+    this.facesVersion++;
     this.cache = null;
   }
 
@@ -205,6 +223,7 @@ export class Replica {
     this.local.createdAt = now;
     this.localSearch.vectors.set(key, vector);
     this.localSearch.createdAt = now;
+    this.facesVersion++;
     this.cache = null;
   }
 
@@ -650,7 +669,25 @@ function merge(r: Replica): Merged {
     confident: isConfident(f.score, f.blur, sideways(f.points)),
     confirmed: confirmedOf[i] !== null,
   }));
-  let assignment = clusterFaces(samples);
+  // The grouping of the faces themselves is the costly part of a merge. An edit that only
+  // confirms faces already grouped (a "yes" to a suggestion, a name, a rename) leaves it as it
+  // was, provably (baseStillHolds), so it is reused rather than redone.
+  const ids = kept.map((f) => f.id);
+  const cached = r.clusterCache;
+  let assignment: Int32Array;
+  if (
+    cached &&
+    cached.version === r.faceVersion &&
+    cached.ids.length === ids.length &&
+    cached.ids.every((id, i) => id === ids[i]) &&
+    baseStillHolds(cached.samples, cached.pass, samples)
+  ) {
+    assignment = cached.merged;
+  } else {
+    const pass = basePass(samples);
+    assignment = mergePass(pass, samples);
+    r.clusterCache = { version: r.faceVersion, ids, samples, pass, merged: assignment };
+  }
   const voted = resolveClusterNames(carriedOf, confirmedOf, assignment);
   const split = splitOutUnclaimedNames(confirmedOf, assignment, voted);
   assignment = attractToNamed(

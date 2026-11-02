@@ -127,23 +127,36 @@ export function SuggestionCard({
   uids,
   busy,
   onAnswer,
+  onOpen,
 }: {
   suggestion: MlSuggestion;
   /** The group's photos as timeline uids. */
   uids: string[];
   busy?: boolean;
   onAnswer: (yes: boolean) => void;
+  /** Opens the group's photos in full, to look before answering. */
+  onOpen?: () => void;
 }) {
   const t = useT();
   const shown = useMemo(() => uids.slice(0, 6), [uids]);
   const thumbs = useThumbnails(shown);
+  const see = t(uids.length === 1 ? "people.suggestSee.one" : "people.suggestSee.other", { count: uids.length });
   return (
     <div className="pp-suggest">
       <div className="pp-suggest-thumbs">
-        {shown.map((uid) => (thumbs[uid] ? <img key={uid} src={thumbs[uid]!} alt="" draggable={false} /> : <span key={uid} />))}
+        {shown.map((uid) => (
+          <button key={uid} className="pp-suggest-thumb" disabled={!onOpen} onClick={onOpen} title={onOpen ? see : undefined}>
+            {thumbs[uid] ? <img src={thumbs[uid]!} alt="" draggable={false} /> : null}
+          </button>
+        ))}
       </div>
       <div className="pp-suggest-text">{t("people.suggestQuestion", { name: suggestion.name })}</div>
       <div className="pp-suggest-actions">
+        {onOpen && (
+          <button className="cf-btn pp-suggest-see" onClick={onOpen}>
+            {see}
+          </button>
+        )}
         <button className="cf-btn" disabled={busy} onClick={() => onAnswer(false)}>
           {t("people.suggestNo")}
         </button>
@@ -164,6 +177,7 @@ export function PeopleLibrary({
   busy,
   onOpen,
   onAnswer,
+  onOpenSuggestion,
 }: {
   named: LibraryEntry[];
   groups: LibraryEntry[];
@@ -172,6 +186,7 @@ export function PeopleLibrary({
   busy?: boolean;
   onOpen: (entry: LibraryEntry) => void;
   onAnswer: (suggestion: MlSuggestion, yes: boolean) => void;
+  onOpenSuggestion: (suggestion: MlSuggestion) => void;
 }) {
   const t = useT();
   return (
@@ -181,7 +196,7 @@ export function PeopleLibrary({
           <h2 className="pp-heading">{t("people.suggestions")}</h2>
           <div className="pp-suggest-row">
             {suggestions.slice(0, 4).map((s) => (
-              <SuggestionCard key={`${s.suggestion.group}:${s.suggestion.name}`} suggestion={s.suggestion} uids={s.uids} busy={busy} onAnswer={(yes) => onAnswer(s.suggestion, yes)} />
+              <SuggestionCard key={`${s.suggestion.group}:${s.suggestion.name}`} suggestion={s.suggestion} uids={s.uids} busy={busy} onAnswer={(yes) => onAnswer(s.suggestion, yes)} onOpen={() => onOpenSuggestion(s.suggestion)} />
             ))}
           </div>
         </section>

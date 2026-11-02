@@ -218,3 +218,46 @@ function blend(a: number, b: number, w: number): Float32Array {
   v[b] = Math.sqrt(1 - w * w);
   return v;
 }
+
+describe("reusing the grouping across edits", () => {
+  it("answers exactly what a fresh merge does, edit after edit", () => {
+    let seed = 3;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+    const faces: SnapFace[] = [];
+    for (let i = 0; i < 120; i++) {
+      const axis = rnd() < 0.8 ? 1 + Math.floor(rnd() * 6) : 20 + i;
+      // A mix of clear and weak faces, so confirming weak ones is exercised too.
+      faces.push(face(`k${i}`, 0, axis, { score: 0.55 + rnd() * 0.4, blur: rnd() < 0.3 ? 5 : 40, embedding: identity(axis, i % 50) }));
+    }
+    const copy = phone(1000, faces);
+    const warm = replica();
+    warm.setCopies([copy], []);
+    const edits: ((r: Replica) => void)[] = [
+      (r) => r.apply({ t: 2000, kind: "confirm", faces: r.refs(r.view().people.find((p) => !p.name)!.faces), name: "Ana" }),
+      (r) => r.apply({ t: 3000, kind: "confirm", faces: r.refs(r.view().people.filter((p) => !p.name)[0].faces), name: "Bia" }),
+      (r) => r.apply({ t: 4000, kind: "alias", from: "Bia", to: "Ana" }),
+      (r) => r.apply({ t: 5000, kind: "confirm", faces: r.refs(["k7#0", "k9#0"]), name: "Caio" }),
+    ];
+    warm.view();
+    const first = warm.clusterCache;
+    let reused = 0;
+    for (const edit of edits) {
+      const had = warm.clusterCache;
+      edit(warm);
+      warm.view();
+      if (warm.clusterCache === had) reused++;
+      const cold = replica();
+      cold.setCopies([copy], []);
+      cold.ops = [...warm.ops];
+      expect(warm.view()).toEqual(cold.view());
+    }
+    // Naming and merging groups never needed the faces grouped again.
+    expect(reused).toBeGreaterThanOrEqual(3);
+    expect(first).not.toBeNull();
+    // And looking at the same copies again keeps the grouping it already has.
+    const before = warm.clusterCache;
+    warm.setCopies([copy], []);
+    warm.view();
+    expect(warm.clusterCache).toBe(before);
+  });
+});
