@@ -62,6 +62,7 @@ import {
   resolveClusterNames,
   sideways,
   splitOutUnclaimedNames,
+  SUGGEST_THRESHOLD,
   suggestMatches,
   type FaceSample,
 } from "./faceCluster.ts";
@@ -192,8 +193,11 @@ export class Replica {
   /** Replaces what Drive holds. This device's own copy is left out: what it says is already
    *  here, first-hand, and taking it back would date old values as new. */
   setCopies(faces: FacesSnap[], search: SearchSnap[]): void {
-    const own = faces.filter((s) => s.deviceId !== this.deviceId);
-    const ownSearch = search.filter((s) => s.deviceId !== this.deviceId && s.modelId === this.searchModelId);
+    // In one fixed order, whatever order Drive lists them in: the grouping takes the faces in
+    // the order the copies give them, so the same copies always group the same way.
+    const byDevice = (a: { deviceId: string }, b: { deviceId: string }) => (a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0);
+    const own = faces.filter((s) => s.deviceId !== this.deviceId).sort(byDevice);
+    const ownSearch = search.filter((s) => s.deviceId !== this.deviceId && s.modelId === this.searchModelId).sort(byDevice);
     // A periodic look at Drive mostly finds the very copies already read: keeping them as they
     // are keeps the grouping too, rather than redoing it for nothing.
     const sig = (list: { deviceId: string; createdAt: number }[]) => list.map((s) => `${s.deviceId}@${s.createdAt}`).sort().join(",");
@@ -235,6 +239,10 @@ export class Replica {
   }
   inLibrary(key: string): boolean {
     return !this.library || this.library.has(key);
+  }
+  /** Whether the library's photos are known yet. */
+  get libraryKnown(): boolean {
+    return this.library !== null;
   }
 
   apply(op: Op): void {
@@ -387,12 +395,42 @@ export class Replica {
       const faces = g.faces.filter((id) => !m.blocked.get(id)?.has(name));
       if (faces.length === 0) continue;
       const score = dot(mine, centroid(faces.map((id) => m.faces.get(id)!.embedding)));
-      if (score >= 0.45) out.push({ name, group: g.id, score, faces });
+      if (score >= SUGGEST_THRESHOLD) out.push({ name, group: g.id, score, faces });
     }
     return out
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
       .map((s) => ({ ...s, boxes: this.boxesOf(s.faces) }));
+  }
+
+  /**
+   * One pass of the automatic merge, as on Android: every unnamed group whose centre clears the
+   * suggestion floor against a named person's, the same match "Is this <name>?" offers, goes
+   * to that person. A group close to two people goes to the nearer, a group holding a face
+   * marked as not that person is never taken by them, and named people are never combined.
+   * Returns the faces to confirm, per name.
+   */
+  autoMergePairs(): { name: string; faces: FaceRef[] }[] {
+    const m = this.merged();
+    const named = m.people.filter((p) => p.name && p.faces.length > 0);
+    if (named.length === 0) return [];
+    const centres = named.map((p) => ({ name: p.name!, centre: centroid(p.faces.map((id) => m.faces.get(id)!.embedding)) }));
+    const claim = new Map<string, { name: string; score: number; faces: string[] }>();
+    for (const g of m.groups) {
+      if (g.name) continue;
+      const centre = centroid(g.faces.map((id) => m.faces.get(id)!.embedding));
+      for (const n of centres) {
+        if (g.faces.some((id) => m.blocked.get(id)?.has(n.name))) continue;
+        const score = dot(n.centre, centre);
+        if (score <= SUGGEST_THRESHOLD) continue;
+        const prior = claim.get(g.id);
+        if (!prior || score > prior.score) claim.set(g.id, { name: n.name, score, faces: g.faces });
+      }
+    }
+    // Only unnamed groups fold, into names that were there before the pass: nothing chains.
+    return [...claim]
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([, c]) => ({ name: c.name, faces: this.refs(c.faces) }));
   }
 
   /** Whether `name` was renamed away and now stands for another name. */

@@ -113,6 +113,9 @@ type Fetched = { bytes: Buffer } | { none: true } | { missing: true };
 
 const linkOf = (uid: string) => uid.slice(uid.indexOf("~") + 1);
 
+/** How many passes one automatic merge makes at most: each regroups the library. */
+const AUTO_MERGE_PASSES = 5;
+
 export class MlService {
   private replica: Replica | null = null;
   private loading: Promise<void> | null = null;
@@ -122,6 +125,8 @@ export class MlService {
   private job: IndexStatus = idleJob();
   private cancel = false;
   private running: Promise<void> = Promise.resolve();
+  /** Whether likely matches are merged into named people without asking, as on Android. */
+  private autoMergeOn = false;
 
   constructor(private readonly deps: MlDeps) {}
 
@@ -184,6 +189,11 @@ export class MlService {
         }
         r.ops = this.readJson<Op[]>("ops.json") ?? [];
         r.seen = this.readJson<Seen>("seen.json") ?? {};
+        // The library as last told, so the counts read at start are the ones read before quitting,
+        // not every photo any device ever indexed until the timeline arrives.
+        const library = this.readJson<string[]>("library.json");
+        if (library) r.setLibrary(library);
+        this.autoMergeOn = this.readJson<{ autoMerge?: boolean }>("prefs.json")?.autoMerge === true;
         const saved = this.readJson<{ at: number; hash: string }>("saved.json");
         this.sync.savedAt = saved?.at ?? null;
         this.replica = r;
@@ -224,6 +234,7 @@ export class MlService {
       if (!this.current(r)) return;
       r.setCopies(faces, search);
       this.writeJson("seen.json", r.seen);
+      this.autoMerge(r);
       this.sync.unreadable = unreadable;
       this.sync.sources = [
         ...faces.filter((s) => s.deviceId !== r.deviceId).map((s) => ({ device: s.deviceLabel, kind: "faces" as const, savedAt: s.createdAt })),
@@ -316,8 +327,51 @@ export class MlService {
   /** Tells the index which photos the library holds, by link id, so only those are grouped. */
   async setLibrary(keys: string[]): Promise<{ ok: true }> {
     const r = await this.ready();
+    const before = r.faceVersion;
     r.setLibrary(keys);
+    if (r.faceVersion !== before && this.current(r)) {
+      this.writeJson("library.json", keys);
+      this.autoMerge(r);
+    }
     return { ok: true };
+  }
+
+  // ---- Merging likely matches on their own ----
+
+  async autoMergeStatus(): Promise<{ on: boolean }> {
+    await this.ready();
+    return { on: this.autoMergeOn };
+  }
+
+  /** Turns the automatic merge on or off; turning it on merges at once. */
+  async setAutoMerge(on: boolean): Promise<{ on: boolean; merged: number }> {
+    const r = await this.ready();
+    this.autoMergeOn = on;
+    this.writeJson("prefs.json", { autoMerge: on });
+    return { on, merged: on ? this.autoMerge(r) : 0 };
+  }
+
+  /**
+   * Folds every unnamed group that clearly looks like a named person into them, pass after
+   * pass until none is left, as "yes" to each suggestion would: ordinary confirmations, saved
+   * and synced like any edit. Only once the library is known, so it never acts on photos since
+   * deleted. Returns how many groups were merged.
+   */
+  private autoMerge(r: Replica): number {
+    if (!this.autoMergeOn || !r.libraryKnown || !this.current(r)) return 0;
+    let merged = 0;
+    for (let pass = 0; pass < AUTO_MERGE_PASSES; pass++) {
+      const pairs = r.autoMergePairs();
+      if (pairs.length === 0) break;
+      const t = r.clock();
+      for (const p of pairs) r.apply({ t, kind: "confirm", faces: p.faces, name: p.name });
+      merged += pairs.length;
+    }
+    if (merged > 0) {
+      this.writeJson("ops.json", r.ops);
+      this.scheduleSave(r);
+    }
+    return merged;
   }
 
   /** The faces on one photo, by its link id, for the viewer's tags. */
@@ -600,6 +654,7 @@ export class MlService {
       r.fresh();
     }
     if (!this.current(r)) return;
+    this.autoMerge(r);
     this.job.phase = "saving";
     await this.save(r).catch(() => {});
   }

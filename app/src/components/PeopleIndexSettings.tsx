@@ -27,7 +27,7 @@ import { useEffect, useState } from "react";
 import { useLang, useT } from "../lib/i18n";
 import type { IndexStatus, ModelsStatus, SyncStatus } from "../lib/people";
 import { rpc } from "../lib/rpc";
-import { CloudIcon, FaceIcon, SearchIcon } from "./icons";
+import { CloudIcon, FaceIcon, MergeIcon, SearchIcon } from "./icons";
 
 const megabytes = (n: number) => `${Math.round(n / 1_000_000)} MB`;
 
@@ -66,6 +66,27 @@ export function PeopleIndexSettings() {
   const [job, setJob] = usePolled<IndexStatus>("mlIndexStatus", (v) => !!v?.running, 1000);
   const [sync, setSync] = usePolled<SyncStatus>("mlSync", (v) => !!v && (v.saving || v.pending), 3000);
   const [error, setError] = useState<string | null>(null);
+  // Null until the sidecar answers, so the switch never shows a guess.
+  const [autoMerge, setAutoMerge] = useState<boolean | null>(null);
+  const [merging, setMerging] = useState(false);
+  const [mergedNow, setMergedNow] = useState<number | null>(null);
+  useEffect(() => {
+    rpc<{ on: boolean }>("mlAutoMerge").then((v) => setAutoMerge(v.on), () => {});
+  }, []);
+  const toggleAutoMerge = async (on: boolean) => {
+    setError(null);
+    setMerging(true);
+    setMergedNow(null);
+    try {
+      const v = await rpc<{ on: boolean; merged: number }>("mlAutoMerge", { on });
+      setAutoMerge(v.on);
+      if (v.on) setMergedNow(v.merged);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setMerging(false);
+    }
+  };
   const [scanned, setScanned] = useState<number | null>(null);
   // How many photos any device has looked at, read again whenever a scan ends.
   useEffect(() => {
@@ -181,6 +202,26 @@ export function PeopleIndexSettings() {
             </button>
           )}
         </div>
+        <label className="st-row">
+          <span className="st-row-ico" aria-hidden>
+            <MergeIcon size={18} />
+          </span>
+          <div className="st-text">
+            <div className="st-label">{t("settings.mlAutoMerge")}</div>
+            <div className="st-desc">{t("settings.mlAutoMergeDesc")}</div>
+            {merging && <div className="st-desc st-status">{t("settings.mlAutoMergeRunning")}</div>}
+            {!merging && mergedNow !== null && (
+              <div className="st-desc st-status">{t("settings.mlAutoMergeDone", { count: mergedNow.toLocaleString(lang) })}</div>
+            )}
+          </div>
+          <input
+            className="st-switch"
+            type="checkbox"
+            checked={autoMerge === true}
+            disabled={autoMerge === null || merging}
+            onChange={(e) => void toggleAutoMerge(e.currentTarget.checked)}
+          />
+        </label>
         <div className="st-row off">
           <span className="st-row-ico" aria-hidden>
             <CloudIcon size={18} />

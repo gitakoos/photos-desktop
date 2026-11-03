@@ -315,3 +315,40 @@ describe("the faces known on a photo, read without a merge", () => {
     expect(r.knownFaces("p9")).toEqual([]);
   });
 });
+
+describe("merging likely matches on their own", () => {
+  it("folds a look-alike group into the named person, never one marked as not them, nor two names", () => {
+    const r = replica();
+    r.setCopies([phone(1000, [
+      face("a1", 0, 1, { confirmed: "Ana" }), face("a2", 0, 1, { confirmed: "Ana" }),
+      face("b1", 0, 3, { confirmed: "Bia" }), face("b2", 0, 3, { confirmed: "Bia" }),
+      // Looks like Ana.
+      { ...face("p3", 0, 1), embedding: blend(1, 9, 0.55) }, { ...face("p4", 0, 1), embedding: blend(1, 9, 0.55) },
+      // Looks like Bia, but one of its faces was marked as not Bia.
+      { ...face("q1", 0, 3), embedding: blend(3, 11, 0.55) }, { ...face("q2", 0, 3), embedding: blend(3, 11, 0.55) },
+      // Looks like no one.
+      face("z1", 0, 20), face("z2", 0, 20),
+    ], { notPerson: [{ name: "Bia", key: "q1", index: 0 }] })], []);
+
+    const pairs = r.autoMergePairs();
+    expect(pairs.map((p) => [p.name, p.faces.map((f) => f.id.split("#")[0]).sort()])).toEqual([["Ana", ["p3", "p4"]]]);
+    for (const p of pairs) r.apply({ t: r.clock(), kind: "confirm", faces: p.faces, name: p.name });
+    expect(named(r)).toEqual([["Ana", ["a1", "a2", "p3", "p4"]], ["Bia", ["b1", "b2"]]]);
+    // Nothing left to fold: a second pass merges nothing.
+    expect(r.autoMergePairs()).toEqual([]);
+  });
+});
+
+describe("the same copies, in any order", () => {
+  it("group the same way, whatever order Drive lists them in", () => {
+    const other = (createdAt: number, faces: SnapFace[]) => ({ ...phone(createdAt, faces), deviceId: "cccccccc-0000-0000-0000-000000000003" });
+    const a = phone(1000, [face("p1", 0, 1, { confirmed: "Ana" }), face("p2", 0, 1), face("p3", 0, 2)]);
+    const b = other(2000, [face("p4", 0, 1), face("p5", 0, 2), face("p6", 0, 2)]);
+    const one = replica();
+    one.setCopies([a, b], []);
+    const two = replica();
+    two.setCopies([b, a], []);
+    const people = (r: Replica) => r.view().people.map((p) => [p.name, [...p.keys].sort()]);
+    expect(people(two)).toEqual(people(one));
+  });
+});

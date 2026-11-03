@@ -830,6 +830,12 @@ export class ProtonSession {
     return this.ml.setLibrary(uids.map((u) => u.slice(u.indexOf("~") + 1)));
   }
 
+  /** Reads, or with `on` sets, whether likely matches are merged into named people on their own. */
+  mlAutoMerge(on?: boolean) {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    return on === undefined ? this.ml.autoMergeStatus() : this.ml.setAutoMerge(on);
+  }
+
   mlPhotoFaces(uid: string) {
     if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
     return this.ml.photoFaces(uid.slice(uid.indexOf("~") + 1));

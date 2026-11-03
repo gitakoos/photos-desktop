@@ -275,6 +275,8 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const t = useT();
   const [items, setItems] = useState<TimelineItem[]>([]);
   const [loading, setLoading] = useState(true);
+  // Whether the timeline last read came whole: one cut short by an error is not the library.
+  const [timelineWhole, setTimelineWhole] = useState(false);
   const [error, setError] = useState("");
   // Timeline content filter (view state, not persisted): multi-select categories
   // combined OR, plus a single media type. Both drive the grid in real time.
@@ -818,6 +820,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         // first screen at once and no single answer carries the whole timeline.
         const { run } = await rpc<{ run: number }>("startTimeline");
         const all: TimelineItem[] = [];
+        let whole = false;
         let shown = 0;
         let shownAt = 0;
         for (;;) {
@@ -829,6 +832,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           for (const item of page.items) all.push(item);
           if (page.done) {
             if (page.error && all.length === 0) throw new Error(page.error);
+            whole = !page.error;
             break;
           }
           // Each paint recounts the months and the filters over everything so far, so
@@ -845,6 +849,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         }
         timelineShown.current = true;
         setItems(all);
+        setTimelineWhole(whole);
         setLoading(false);
         // Thumbnails load lazily per visible cell (see thumbStore), so a large
         // library does not pull every thumbnail into memory up front.
@@ -1006,7 +1011,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // The index groups only the photos the library holds: a phone's copy also carries the faces
   // of photos since trashed or deleted, which otherwise made suggestions with nothing to show.
   // Told once the timeline stops arriving, and read again after.
-  const libraryKeys = useMemo(() => items.map((it) => it.uid), [items]);
+  // Only a whole timeline: told every page as it painted, People counted over part of the
+  // library and showed a different number from one start to the next.
+  const libraryKeys = useMemo(() => (loading || !timelineWhole ? [] : items.map((it) => it.uid)), [items, loading, timelineWhole]);
   useEffect(() => {
     if (!settings.driveFaces || libraryKeys.length === 0) return;
     const timer = window.setTimeout(() => {

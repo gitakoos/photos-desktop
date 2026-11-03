@@ -146,7 +146,10 @@ fn priority_for(method: &str) -> Priority {
         // channel). On the background lane they sat behind a whole-library sweep for minutes,
         // and the progress read as stuck.
         | "mlIndexStart" | "mlIndexStatus" | "mlIndexCancel" | "mlModels" | "mlModelsDownload"
-        | "mlSync" => Priority::Interactive,
+        | "mlSync"
+        // Which photos the library holds, which People counts over: behind a sweep it arrived
+        // late or never, and the counts read differently from one start to the next.
+        | "mlLibrary" | "mlAutoMerge" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
         // even though the user is looking at that photo: the transfer itself runs inside
@@ -189,7 +192,7 @@ fn priority_for(method: &str) -> Priority {
 
         // The People index's work that nobody waits on: a save, a read of every device's copy,
         // the library's list of photos.
-        "mlSaveNow" | "mlRefresh" | "mlLibrary" => Priority::Background,
+        "mlSaveNow" | "mlRefresh" => Priority::Background,
 
         // The names of a selection the user is acting on (Fix dates). The same lookup as
         // `getMetadata`, which sits under the warmer as `Enumerate`: with the Explorer

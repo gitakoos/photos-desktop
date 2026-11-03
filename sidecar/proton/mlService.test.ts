@@ -288,3 +288,44 @@ describe("looking at the library", () => {
     expect(service.indexStatus()).toMatchObject({ firstLooks: 1, secondLooks: 0, retryLater: 1 });
   }, 60_000);
 });
+
+describe("what a fresh start reads", () => {
+  it("counts over the library told before quitting, and merges likely matches once turned on", async () => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-ml-lib-")));
+    setDataKey(randomBytes(32));
+    const drive = memoryDrive();
+    const near = (k: string) => ({ ...face(k, 1, null), embedding: (() => {
+      const v = new Float32Array(512);
+      v[1] = 0.55;
+      v[9] = Math.sqrt(1 - 0.55 * 0.55);
+      return v;
+    })() });
+    const phoneCopy = {
+      ...emptyFaces(PHONE, "Pixel 8"),
+      createdAt: 1000,
+      modelSha256: FACE_EMBED_SHA256,
+      // p9 was deleted since the phone looked at it.
+      faces: [face("p1", 1, "Ana"), face("p2", 1, "Ana"), face("p9", 1, "Ana"), near("p3"), near("p4")],
+      markers: ["p1", "p2", "p9", "p3", "p4"].map((k) => ({ key: k, hiRes: false })),
+    };
+    await drive.put(["Photos for Proton", "ML data"], `faces-${PHONE}.pfpml`, await sealEnvelope(writeFacesSnapshot(phoneCopy), key, key));
+
+    const ml = service(drive);
+    await ml.view();
+    await ml.setLibrary(["p1", "p2", "p3", "p4"]);
+    const ana = (v: Awaited<ReturnType<MlService["view"]>>) => [...(v.people.find((p) => p.name === "Ana")?.keys ?? [])].sort();
+    expect(ana(await ml.view())).toEqual(["p1", "p2"]);
+
+    // Started again, before the timeline has come: the same count, not one with p9 in it.
+    const again = service(drive);
+    expect(ana(await again.view())).toEqual(["p1", "p2"]);
+
+    // Turned on, the look-alike group joins Ana at once, and stays after a restart.
+    expect(await again.autoMergeStatus()).toEqual({ on: false });
+    expect((await again.setAutoMerge(true)).merged).toBe(1);
+    expect(ana(await again.view())).toEqual(["p1", "p2", "p3", "p4"]);
+    const third = service(drive);
+    expect(await third.autoMergeStatus()).toEqual({ on: true });
+    expect(ana(await third.view())).toEqual(["p1", "p2", "p3", "p4"]);
+  }, 60_000);
+});

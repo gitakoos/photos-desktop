@@ -246,6 +246,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   mlPhotoFaces: (p) => session.mlPhotoFaces(String(p?.uid ?? "")),
   mlLibrary: (p) =>
     session.mlLibrary(Array.isArray(p?.uids) ? p.uids.filter((x: unknown): x is string => typeof x === "string") : []),
+  mlAutoMerge: (p) => session.mlAutoMerge(typeof p?.on === "boolean" ? p.on : undefined),
   mlRefresh: () => session.mlRefresh(),
   mlSync: () => session.mlSync(),
   mlSaveNow: () => session.mlSaveNow(),
