@@ -644,9 +644,13 @@ export interface CopyCache {
   keepOnly(uids: Set<string>): void;
 }
 
+/** A node still in place: one in the trash is passed over, as the Android app does, or a copy
+ *  went on being saved into the trash where no device would read it. */
+const live = (node: any) => !node?.trashTime;
+
 async function childNamed(client: any, parentUid: string, name: string): Promise<any | null> {
   for await (const node of client.iterateFolderChildren(parentUid)) {
-    if (node?.type === "folder" && nodeName(node) === name) return node;
+    if (node?.type === "folder" && live(node) && nodeName(node) === name) return node;
   }
   return null;
 }
@@ -663,7 +667,7 @@ function revisionOf(node: any): string {
 async function filesIn(client: any, folderUid: string): Promise<DriveFile[]> {
   const out: DriveFile[] = [];
   for await (const node of client.iterateFolderChildren(folderUid)) {
-    if (node?.type === "file") out.push({ uid: node.uid, name: nodeName(node), revision: revisionOf(node) });
+    if (node?.type === "file" && live(node)) out.push({ uid: node.uid, name: nodeName(node), revision: revisionOf(node) });
   }
   return out;
 }
@@ -703,7 +707,23 @@ async function appSubfolder(client: any, name: string, create: boolean): Promise
  * revision of the file when this install saved one before, else a new file, as the Android
  * app's MlDriveStore does. The folders are made on the first save.
  */
-export async function saveMlCopy(client: any, name: string, bytes: Buffer): Promise<void> {
+/** One upload at a time, as on the phone: two saves at once raced on the same file. */
+let uploading: Promise<unknown> = Promise.resolve();
+
+export function saveMlCopy(client: any, name: string, bytes: Buffer, onProgress?: (sent: number) => void): Promise<void> {
+  const run = uploading.then(() => uploadMlCopy(client, name, bytes, onProgress));
+  uploading = run.catch(() => {});
+  return run;
+}
+
+/** The names of the copies in `ML data` right now, trash left out. */
+export async function mlCopyNames(client: any): Promise<Set<string>> {
+  const folder = await appSubfolder(client, ML_FOLDER, false);
+  if (!folder) return new Set();
+  return new Set((await filesIn(client, folder.uid)).map((f) => f.name));
+}
+
+async function uploadMlCopy(client: any, name: string, bytes: Buffer, onProgress?: (sent: number) => void): Promise<void> {
   const folder = await appSubfolder(client, ML_FOLDER, true);
   const existing = (await filesIn(client, folder.uid)).find((f) => f.name === name);
   const metadata = {
@@ -716,9 +736,12 @@ export async function saveMlCopy(client: any, name: string, bytes: Buffer): Prom
     ? await client.getFileRevisionUploader(existing.uid, metadata)
     : await client.getFileUploader(folder.uid, name, metadata);
   const { Readable } = await import("node:stream");
-  const controller = await uploader.uploadFromStream(Readable.toWeb(Readable.from(bytes)) as any, []);
+  const controller = await uploader.uploadFromStream(Readable.toWeb(Readable.from(bytes)) as any, [], onProgress);
   await controller.completion();
 }
+
+/** What a read of `ML data` found, in counts: for the log, when a device's copy goes missing. */
+export type CopyListing = { folder: boolean; files: number; trashed: number; otherNames: number; sealedApart: number };
 
 /** One device's copy read in full, for the desktop's own merged index. */
 export type FullCopy =
@@ -734,16 +757,26 @@ export async function loadFullCopies(
   client: any,
   account: any,
   cache: CopyCache | null,
-): Promise<{ copies: FullCopy[]; unreadable: number }> {
+): Promise<{ copies: FullCopy[]; unreadable: number; seen: CopyListing }> {
   const out: FullCopy[] = [];
   let unreadable = 0;
+  const seen: CopyListing = { folder: false, files: 0, trashed: 0, otherNames: 0, sealedApart: 0 };
   const folder = await appSubfolder(client, ML_FOLDER, false);
-  if (!folder) return { copies: out, unreadable };
+  if (!folder) return { copies: out, unreadable, seen };
+  seen.folder = true;
+  for await (const node of client.iterateFolderChildren(folder.uid)) {
+    if (node?.type !== "file") continue;
+    if (node.trashTime) seen.trashed++;
+    else seen.files++;
+  }
   const keys = await addressKeys(account);
   for (const file of await filesIn(client, folder.uid)) {
     const faces = facesFileDevice(file.name);
     const search = searchFileDevice(file.name);
-    if (!faces && !search) continue;
+    if (!faces && !search) {
+      seen.otherNames++;
+      continue;
+    }
     try {
       let bytes = cache?.get(file.uid, file.revision) ?? null;
       if (!bytes) {
@@ -753,6 +786,8 @@ export async function loadFullCopies(
       const opened = await openEnvelope(bytes, keys, keys);
       if (!opened.ok) {
         unreadable++;
+        seen.sealedApart++;
+        process.stderr.write(`[drive-data] a copy would not open: ${JSON.stringify(opened).slice(0, 120)}\n`);
         continue;
       }
       if (faces) out.push({ kind: "faces", fileDevice: faces, snap: parseFacesSnapshot(opened.plain) });
@@ -762,7 +797,7 @@ export async function loadFullCopies(
       unreadable++;
     }
   }
-  return { copies: out, unreadable };
+  return { copies: out, unreadable, seen };
 }
 
 /** Every key of every address, primary ones first, so a copy sealed before a key rotation or

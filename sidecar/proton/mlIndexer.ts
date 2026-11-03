@@ -104,8 +104,6 @@ const CLIP_STD = [0.26862954, 0.26130258, 0.27577711];
 const DETECT_SIDE = 640;
 const ROW = 16;
 const SCORE_THRESHOLD = 0.6;
-/** The Android app's sensitive setting, for its "find more photos" sweep, used by a thorough look. */
-const SENSITIVE_THRESHOLD = 0.5;
 /** A photo at least this wide or tall is also looked at in four overlapping quarters. */
 const TILE_FROM_SIDE = 1000;
 /** How far each quarter reaches past the middle, so a face on a seam is whole in one of them. */
@@ -207,11 +205,28 @@ export function detectionRows(
   return hits;
 }
 
-/** The faces big enough to keep, each once: the surest of any overlapping pair wins. */
+/** How much of the smaller of two boxes may lie inside the other before it is the same face:
+ *  a half face found on a quarter's edge sits inside the whole one found elsewhere. */
+const CONTAINED = 0.6;
+
+/**
+ * The faces big enough to keep, each once: the surest of any overlapping pair wins. Each box is
+ * first held to the picture, as on the phone, so a face cut by the edge is measured by what
+ * shows of it.
+ */
 export function keepFaces(rows: Hit[], w: number, h: number): Hit[] {
   const minEdge = Math.max(MIN_FACE_PX, MIN_FACE_FRACTION * Math.min(w, h));
-  const hits = rows.filter((r) => Math.min(r.box[2] - r.box[0], r.box[3] - r.box[1]) >= minEdge);
+  const clamp = (v: number, hi: number) => Math.min(hi, Math.max(0, v));
+  const hits = rows
+    .map((r) => ({ ...r, box: [clamp(r.box[0], w), clamp(r.box[1], h), clamp(r.box[2], w), clamp(r.box[3], h)] }))
+    .filter((r) => Math.min(r.box[2] - r.box[0], r.box[3] - r.box[1]) >= minEdge);
   hits.sort((a, b) => b.score - a.score);
+  const inside = (a: number[], b: number[]) => {
+    const iw = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
+    const ih = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+    const smaller = Math.min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]));
+    return smaller > 0 ? (iw * ih) / smaller : 0;
+  };
   const iou = (a: number[], b: number[]) => {
     const iw = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
     const ih = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
@@ -219,8 +234,22 @@ export function keepFaces(rows: Hit[], w: number, h: number): Hit[] {
     return u > 0 ? (iw * ih) / u : 0;
   };
   const kept: typeof hits = [];
-  for (const h of hits) if (!kept.some((k) => iou(k.box, h.box) >= NMS_IOU)) kept.push(h);
+  for (const h of hits) if (!kept.some((k) => iou(k.box, h.box) >= NMS_IOU || inside(k.box, h.box) >= CONTAINED)) kept.push(h);
   return kept;
+}
+
+/**
+ * The rows of one region with any box that reaches an edge the region shares with no edge of
+ * the picture left out: a face there was cut by the region, and is whole in another one.
+ */
+export function awayFromSeams(rows: Hit[], region: { x: number; y: number; w: number; h: number }, w: number, h: number): Hit[] {
+  const margin = 2;
+  return rows.filter(({ box }) =>
+    !((region.x > 0 && box[0] <= region.x + margin) ||
+      (region.y > 0 && box[1] <= region.y + margin) ||
+      (region.x + region.w < w && box[2] >= region.x + region.w - margin) ||
+      (region.y + region.h < h && box[3] >= region.y + region.h - margin)),
+  );
 }
 
 /** The detector's rows that pass, in the source picture's pixels, after suppression. */
@@ -337,9 +366,13 @@ export class Analyzer {
   }
 
   private async faces(img: Rgb, thorough: boolean): Promise<FoundFace[]> {
-    const threshold = thorough ? SENSITIVE_THRESHOLD : SCORE_THRESHOLD;
+    // The phone's own floor, also for a thorough look: the library is not reviewed face by face,
+    // and what the sensitive floor adds is mostly not a face. The quarters find the small ones.
+    const threshold = SCORE_THRESHOLD;
     const rows: Hit[] = [];
-    for (const region of detectRegions(img.w, img.h, thorough)) rows.push(...(await this.detect(img, region, threshold)));
+    for (const region of detectRegions(img.w, img.h, thorough)) {
+      rows.push(...awayFromSeams(await this.detect(img, region, threshold), region, img.w, img.h));
+    }
     const found: FoundFace[] = [];
     for (const hit of keepFaces(rows, img.w, img.h)) {
       const crop = alignFace(img, hit.pts);

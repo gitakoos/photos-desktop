@@ -204,6 +204,9 @@ export class Replica {
     if (sig(own) === sig(this.copies) && sig(ownSearch) === sig(this.searchCopies) && this.facesVersion > 0) return;
     this.copies = own;
     this.searchCopies = ownSearch;
+    this.otherModelSearch = search
+      .filter((s) => s.deviceId !== this.deviceId && s.modelId !== this.searchModelId)
+      .map((s) => ({ device: s.deviceLabel, vectors: s.vectors.size }));
     this.facts = this.copies.flatMap((s) => ingest(s, this.seen));
     this.facesVersion++;
     this.cache = null;
@@ -258,13 +261,20 @@ export class Replica {
    */
   addScan(
     key: string,
-    faces: Omit<SnapFace, "key" | "index" | "person" | "confirmed" | "rejected">[],
+    faces: (Omit<SnapFace, "key" | "index" | "person" | "confirmed" | "rejected"> & { index?: number })[],
     vector: Uint16Array | null | undefined,
     now = Date.now(),
     hiRes = false,
   ): void {
     this.local.faces = this.local.faces.filter((f) => f.key !== key);
-    faces.forEach((f, index) => this.local.faces.push({ ...f, key, index, person: null, confirmed: null, rejected: false }));
+    // A face already known keeps its number, so whatever was decided about it by that number
+    // still finds it; a new one is numbered after them.
+    let next = 0;
+    for (const f of faces) if (f.index !== undefined && f.index >= next) next = f.index + 1;
+    for (const f of faces) {
+      const { index, ...rest } = f;
+      this.local.faces.push({ ...rest, key, index: index ?? next++, person: null, confirmed: null, rejected: false });
+    }
     this.local.markers = this.local.markers.filter((m) => m.key !== key);
     this.local.markers.push({ key, hiRes });
     const idx = this.indexes.get(this.local);
@@ -284,12 +294,81 @@ export class Replica {
     this.stale = true;
   }
 
+  /** Records a photo's search vector alone, leaving the faces any device found on it as they are. */
+  setVector(key: string, vector: Uint16Array | null, now = Date.now()): void {
+    this.localSearch.vectors.set(key, vector);
+    this.localSearch.createdAt = now;
+    this.stale = true;
+  }
+
+  /** Search copies made with another model, which this build cannot rank with. */
+  otherModelSearch: { device: string; vectors: number }[] = [];
+
+  /**
+   * What went into the index and what comes out of it, in counts only: each copy read, what
+   * this device added, and the merged whole. What a save is checked against, and what the log
+   * shows when a copy seems smaller than it should be.
+   */
+  report() {
+    this.fresh();
+    const m = this.merged();
+    const photos = new Set<string>();
+    for (const f of m.faces.values()) photos.add(f.key);
+    let confirmed = 0;
+    let rejected = 0;
+    for (const v of m.identity.values()) {
+      if (v.kind === "confirmed") confirmed++;
+      else if (v.kind === "rejected") rejected++;
+    }
+    let notPerson = 0;
+    for (const names of m.blocked.values()) notPerson += names.size;
+    const usable = (s: FacesSnap) => s.faces.filter((f) => f.embedding.length === EMBEDDING_DIM).length;
+    return {
+      copies: this.copies.map((s) => ({
+        device: s.deviceLabel,
+        savedAt: s.createdAt,
+        compatible: fullyCompatible(s),
+        faces: s.faces.length,
+        usableFaces: usable(s),
+        markers: s.markers.length,
+        confirmed: s.faces.filter((f) => f.confirmed).length,
+        manual: s.manual.length,
+        notPerson: s.notPerson.length,
+      })),
+      searchCopies: [
+        ...this.searchCopies.map((s) => ({ device: s.deviceLabel, vectors: s.vectors.size, sameModel: true })),
+        ...this.otherModelSearch.map((s) => ({ ...s, sameModel: false })),
+      ],
+      local: { faces: this.local.faces.length, markers: this.local.markers.length, vectors: this.localSearch.vectors.size, edits: this.ops.length },
+      merged: {
+        faces: m.faces.size,
+        photosWithFaces: photos.size,
+        scanned: m.markers.size,
+        people: m.people.filter((p) => p.name).length,
+        confirmed,
+        rejected,
+        notPerson,
+        manual: m.manual.size,
+        covers: m.covers.size,
+        vectors: m.searchKeys,
+      },
+    };
+  }
+
+  /** What the last grouping named each face: the next one leans on it, as the phone leans on
+   *  each face's person, so a scan or an edit does not redraw who is who. Kept on disk. */
+  lastNames = new Map<string, string>();
+
   /** The photos any device scanned for faces (true where the look was the thorough one), and
    *  the photos with a search vector. */
   covered(): { faces: Map<string, boolean>; search: Set<string> } {
     this.fresh();
     const m = this.merged();
-    return { faces: new Map(m.markers), search: new Set(m.search.keys()) };
+    // Only a real vector counts. A photo marked unreadable is looked at again: an older build
+    // marked every photo with no HD preview, or slow to arrive, that way for good.
+    const search = new Set<string>();
+    for (const [key, v] of m.search) if (v) search.add(key);
+    return { faces: new Map(m.markers), search };
   }
 
   /**
@@ -392,7 +471,8 @@ export class Replica {
     const out: Suggestion[] = [];
     for (const g of m.groups) {
       if (g.name) continue;
-      const faces = g.faces.filter((id) => !m.blocked.get(id)?.has(name));
+      if (g.faces.some((id) => m.blocked.get(id)?.has(name))) continue;
+      const faces = g.faces;
       if (faces.length === 0) continue;
       const score = dot(mine, centroid(faces.map((id) => m.faces.get(id)!.embedding)));
       if (score >= SUGGEST_THRESHOLD) out.push({ name, group: g.id, score, faces });
@@ -653,7 +733,8 @@ export function ingest(snap: FacesSnap, seen: Seen): Fact[] {
     const t = date(`${dev}i${SEP}${f.key}#${f.index}`, value, f.box);
     if (t !== NO_TIME) facts.push({ kind: "identity", key: f.key, index: f.index, box: f.box, value, t });
   }
-  const boxOf = (key: string, index: number) => snap.faces.find((f) => f.key === key && f.index === index)?.box;
+  const boxes = new Map(snap.faces.map((f) => [faceId(f.key, f.index), f.box]));
+  const boxOf = (key: string, index: number) => boxes.get(faceId(key, index));
   for (const n of snap.notPerson) {
     const box = boxOf(n.key, n.index) ?? seen[`${dev}n${SEP}${n.name}${SEP}${n.key}#${n.index}`]?.b;
     const t = date(`${dev}n${SEP}${n.name}${SEP}${n.key}#${n.index}`, "1", box);
@@ -845,12 +926,22 @@ function merge(r: Replica): Merged {
   for (const v of search.values()) if (v) searchKeys++;
 
   // Grouping, over every face not removed from People.
-  const kept = [...faces.values()].filter((f) => identityOut.get(f.id)?.kind !== "rejected" && r.inLibrary(f.key));
+  // In face id order, as the phone takes them, so a tie in score always falls the same way.
+  const kept = [...faces.values()]
+    .filter((f) => identityOut.get(f.id)?.kind !== "rejected" && r.inLibrary(f.key))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const confirmedOf = kept.map((f) => {
     const v = identityOut.get(f.id);
     return v?.kind === "confirmed" ? v.name : null;
   });
-  const carriedOf = kept.map((f) => carried.get(f.id)?.value || null);
+  // A face's name from another device, else the name the last grouping here gave it. A face
+  // whose name a device took away (an edit's empty value) carries none.
+  const carriedOf = kept.map((f) => {
+    const reg = carried.get(f.id);
+    if (reg && reg.value !== undefined) return reg.value || null;
+    const last = r.lastNames.get(f.id);
+    return last ? resolve(last, Infinity) : null;
+  });
   const blockedOf = kept.map((f) => blockedOut.get(f.id) ?? new Set<string>());
   const samples: FaceSample[] = kept.map((f, i) => ({
     embedding: f.embedding,
@@ -932,8 +1023,12 @@ function merge(r: Replica): Merged {
     people.filter((p) => p.name && p.faces.length).map((p) => ({ name: p.name!, centroid: centroids(p.faces) })),
     unnamedShown.map((p) => ({ id: p.id, centroid: centroids(p.faces) })),
   )
-    .map((s) => ({ name: s.name, group: s.id, score: s.score, faces: unnamedShown.find((p) => p.id === s.id)!.faces.filter((id) => !blockedOut.get(id)?.has(s.name)) }))
-    .filter((s) => s.faces.length > 0);
+    .map((s) => ({ name: s.name, group: s.id, score: s.score, faces: unnamedShown.find((p) => p.id === s.id)!.faces }))
+    // A group holding a face marked as not that person is not offered again, as on the phone.
+    .filter((s) => s.faces.length > 0 && !s.faces.some((id) => blockedOut.get(id)?.has(s.name)));
+
+  r.lastNames = new Map();
+  for (const g of groups) if (g.name) for (const id of g.faces) r.lastNames.set(id, g.name);
 
   return {
     faces, markers, identity: identityOut, blocked: blockedOut, manual: manualOut, covers: coversOut,

@@ -72,7 +72,11 @@ export function previewCacheSize(): number {
   return cache.size;
 }
 
-export function loadPreview(uid: string): Promise<string | null> {
+/**
+ * The HD preview of one photo. `method` is "getFacePreview" for a face cut out of it on the
+ * People pages: the same picture, asked for below the photo the user opened and below an edit.
+ */
+export function loadPreview(uid: string, method: "getPreview" | "getFacePreview" = "getPreview"): Promise<string | null> {
   const hit = cache.get(uid);
   if (hit !== undefined) {
     touch(uid, hit);
@@ -90,7 +94,7 @@ export function loadPreview(uid: string): Promise<string | null> {
     if (inFlight.get(uid)?.controller === controller) inFlight.delete(uid);
   };
 
-  const request = rpc<string | null>("getPreview", { uid }, { signal: controller.signal })
+  const request = rpc<string | null>(method, { uid }, { signal: controller.signal })
     .then((url) => {
       touch(uid, url);
       settle();

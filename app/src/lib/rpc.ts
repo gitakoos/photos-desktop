@@ -71,6 +71,9 @@ const TIMEOUT_MS: Record<string, number> = {
   // Whole files: a video crosses as one payload, and an update is an installer.
   // The People index: its first read downloads every device's copy, a save uploads this one.
   mlView: 5 * MINUTE,
+  // Each regroups the whole library, the automatic merge several times over.
+  mlAutoMerge: 5 * MINUTE,
+  mlLibrary: 5 * MINUTE,
   mlEdit: 2 * MINUTE,
   mlRefresh: 5 * MINUTE,
   mlSaveNow: 5 * MINUTE,

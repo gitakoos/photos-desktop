@@ -147,6 +147,9 @@ fn priority_for(method: &str) -> Priority {
         // and the progress read as stuck.
         | "mlIndexStart" | "mlIndexStatus" | "mlIndexCancel" | "mlModels" | "mlModelsDownload"
         | "mlSync"
+        // The People pages and their edits: one "yes" queued behind a page of face previews
+        // for over two minutes and failed.
+        | "mlView" | "mlEdit" | "mlSuggestions" | "mlPhotoFaces"
         // Which photos the library holds, which People counts over: behind a sweep it arrived
         // late or never, and the counts read differently from one start to the next.
         | "mlLibrary" | "mlAutoMerge" => Priority::Interactive,

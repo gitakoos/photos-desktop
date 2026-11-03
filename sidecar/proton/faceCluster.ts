@@ -322,7 +322,10 @@ export function splitOutUnclaimedNames(
   const unclaimed = [...new Set(confirmed.filter((n): n is string => !!n && !claimed.has(n)))].sort(compare);
   if (unclaimed.length === 0) return { assignment: result, names };
   const out = new Map(names);
-  let next = Math.max(-1, ...result, ...names.keys()) + 1;
+  let next = -1;
+  for (const v of result) if (v > next) next = v;
+  for (const k of names.keys()) if (k > next) next = k;
+  next++;
   const byName = new Map<string, number>();
   for (const name of unclaimed) {
     byName.set(name, next);
@@ -357,24 +360,46 @@ export function attractToNamed(
     const target = confirmed[i] ? byName.get(confirmed[i]!) : undefined;
     if (target !== undefined) result[i] = target;
   }
-  const anchors = new Map<number, Float32Array[]>();
-  for (const c of byName.values()) {
-    const members = [...result.keys()].filter((i) => result[i] === c);
-    anchors.set(c, members.sort((a, b) => scores[b] - scores[a]).slice(0, EXEMPLARS).map((i) => embeddings[i]));
+  // Each named group's clearest faces, gathered in one walk and laid out in one flat array, so
+  // every face is compared in one tight loop: the same rule, a fraction of the time.
+  const membersOf = new Map<number, number[]>();
+  for (const c of byName.values()) membersOf.set(c, []);
+  for (let i = 0; i < result.length; i++) membersOf.get(result[i])?.push(i);
+  const ids = [...membersOf.keys()].sort((a, b) => a - b);
+  const dim = embeddings[0]?.length ?? EMBEDDING_DIM;
+  const flat = new Float32Array(Math.max(1, ids.length * EXEMPLARS) * dim);
+  const groupOf: number[] = [];
+  for (const c of ids) {
+    const top = membersOf.get(c)!.sort((a, b) => scores[b] - scores[a]).slice(0, EXEMPLARS);
+    for (const i of top) {
+      flat.set(embeddings[i], groupOf.length * dim);
+      groupOf.push(c);
+    }
   }
-  const ids = [...anchors.keys()].sort((a, b) => a - b);
+  const nameOfGroup = new Map(ids.map((c) => [c, names.get(c)!]));
   for (let i = 0; i < result.length; i++) {
     if (confirmed[i] || names.has(result[i])) continue;
+    const e = embeddings[i];
+    const no = blocked[i];
     let best = -1;
     let bestSim = -Infinity;
-    for (const c of ids) {
-      if (blocked[i]?.has(names.get(c)!)) continue;
-      for (const a of anchors.get(c)!) {
-        const sim = dot(embeddings[i], a);
-        if (sim > bestSim) {
-          bestSim = sim;
-          best = c;
-        }
+    for (let a = 0; a < groupOf.length; a++) {
+      const c = groupOf[a];
+      if (no?.size && no.has(nameOfGroup.get(c)!)) continue;
+      const at = a * dim;
+      let s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+      let k = 0;
+      for (; k + 3 < dim; k += 4) {
+        s0 += e[k] * flat[at + k];
+        s1 += e[k + 1] * flat[at + k + 1];
+        s2 += e[k + 2] * flat[at + k + 2];
+        s3 += e[k + 3] * flat[at + k + 3];
+      }
+      for (; k < dim; k++) s0 += e[k] * flat[at + k];
+      const sim = s0 + s1 + s2 + s3;
+      if (sim > bestSim) {
+        bestSim = sim;
+        best = c;
       }
     }
     if (best >= 0 && bestSim >= threshold) result[i] = best;

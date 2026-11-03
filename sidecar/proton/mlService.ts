@@ -29,7 +29,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { addressKeys, loadFullCopies, saveMlCopy, sealEnvelope, type CopyCache } from "./driveData.ts";
+import { addressKeys, loadFullCopies, mlCopyNames, saveMlCopy, sealEnvelope, type CopyCache } from "./driveData.ts";
 import { Analyzer, indexModelsStatus, startIndexModelsDownload, type ModelsStatus } from "./mlIndexer.ts";
 import { Replica, type Op, type PhotoFace, type ReplicaView, type Seen, type Suggestion } from "./mlReplica.ts";
 import { parseFacesSnapshot, parseSearchSnapshot, withoutSaveTime, writeFacesSnapshot, writeSearchSnapshot } from "./mlSnapshot.ts";
@@ -74,6 +74,10 @@ export type SyncStatus = {
   /** The other devices' copies merged in. */
   sources: { device: string; kind: "faces" | "search"; savedAt: number }[];
   unreadable: number;
+  /** A save under way: getting the copy ready, then sending it, in bytes. */
+  progress: { phase: "preparing" | "uploading"; sent: number; total: number } | null;
+  /** What the last save, or the last look at whether one was needed, came to. */
+  last: { outcome: "saved" | "upToDate"; faces: number; photos: number; people: number; vectors: number } | null;
 };
 
 /** One edit the People pages ask for. */
@@ -84,8 +88,8 @@ export type EditRequest =
   | { action: "addPhotos"; name: string; keys: string[] }
   | { action: "setCover"; name: string; key: string }
   | { action: "hide"; person: string }
-  | { action: "acceptSuggestion"; group: string; name: string }
-  | { action: "dismissSuggestion"; group: string; name: string }
+  | { action: "acceptSuggestion"; group: string; name: string; faces?: string[] }
+  | { action: "dismissSuggestion"; group: string; name: string; faces?: string[] }
   | { action: "nameFaces"; faces: string[]; name: string };
 
 export type MlDeps = {
@@ -114,19 +118,21 @@ type Fetched = { bytes: Buffer } | { none: true } | { missing: true };
 const linkOf = (uid: string) => uid.slice(uid.indexOf("~") + 1);
 
 /** How many passes one automatic merge makes at most: each regroups the library. */
-const AUTO_MERGE_PASSES = 5;
+const AUTO_MERGE_PASSES = 1;
 
 export class MlService {
   private replica: Replica | null = null;
   private loading: Promise<void> | null = null;
   private refreshed: Promise<void> | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  private sync: SyncStatus = { savedAt: null, saving: false, pending: false, error: null, sources: [], unreadable: 0 };
+  private sync: SyncStatus = { savedAt: null, saving: false, pending: false, error: null, sources: [], unreadable: 0, progress: null, last: null };
   private job: IndexStatus = idleJob();
   private cancel = false;
   private running: Promise<void> = Promise.resolve();
   /** Whether likely matches are merged into named people without asking, as on Android. */
   private autoMergeOn = false;
+  /** Whether Drive was read once this session. */
+  private readOnce = false;
 
   constructor(private readonly deps: MlDeps) {}
 
@@ -136,9 +142,10 @@ export class MlService {
     this.saveTimer = null;
     this.cancel = true;
     this.replica = null;
+    this.readOnce = false;
     this.loading = null;
     this.refreshed = null;
-    this.sync = { savedAt: null, saving: false, pending: false, error: null, sources: [], unreadable: 0 };
+    this.sync = { savedAt: null, saving: false, pending: false, error: null, sources: [], unreadable: 0, progress: null, last: null };
     this.job = idleJob();
   }
 
@@ -194,6 +201,9 @@ export class MlService {
         const library = this.readJson<string[]>("library.json");
         if (library) r.setLibrary(library);
         this.autoMergeOn = this.readJson<{ autoMerge?: boolean }>("prefs.json")?.autoMerge === true;
+        // Who each face was grouped as when the app last ran: the first grouping leans on it.
+        const names = this.readJson<Record<string, string>>("names.json");
+        if (names) r.lastNames = new Map(Object.entries(names));
         const saved = this.readJson<{ at: number; hash: string }>("saved.json");
         this.sync.savedAt = saved?.at ?? null;
         this.replica = r;
@@ -214,6 +224,12 @@ export class MlService {
     return this.replica === r;
   }
 
+  /** Who the grouping made each face, for the next start to lean on. */
+  private persistNames(r: Replica): void {
+    if (!this.current(r) || r.lastNames.size === 0) return;
+    this.writeJson("names.json", Object.fromEntries(r.lastNames));
+  }
+
   private persistScans(r: Replica): void {
     if (!this.current(r)) return;
     mkdirSync(this.dir(), { recursive: true });
@@ -228,11 +244,24 @@ export class MlService {
     if (this.refreshed && !force) return this.refreshed;
     const run = (async () => {
       const r = await this.ready();
-      const { copies, unreadable } = await loadFullCopies(this.deps.myFiles(), this.deps.account(), this.deps.copyCache());
+      const { copies, unreadable, seen } = await loadFullCopies(this.deps.myFiles(), this.deps.account(), this.deps.copyCache());
+      process.stderr.write(`[ml] drive: ${JSON.stringify({
+        ...seen,
+        copies: copies.map((c) => ({
+          kind: c.kind,
+          own: c.snap.deviceId === r.deviceId,
+          device: c.snap.deviceLabel,
+          savedAt: c.snap.createdAt,
+          ...(c.kind === "faces"
+            ? { faces: c.snap.faces.length, markers: c.snap.markers.length, modelVersion: c.snap.modelVersion, dim: c.snap.dim }
+            : { vectors: c.snap.vectors.size, sameModel: c.snap.modelId === SEARCH_MODEL_ID }),
+        })),
+      })}\n`);
       const faces = copies.flatMap((c) => (c.kind === "faces" ? [c.snap] : []));
       const search = copies.flatMap((c) => (c.kind === "search" ? [c.snap] : []));
       if (!this.current(r)) return;
       r.setCopies(faces, search);
+      this.readOnce = true;
       this.writeJson("seen.json", r.seen);
       this.autoMerge(r);
       this.sync.unreadable = unreadable;
@@ -256,71 +285,135 @@ export class MlService {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
+      this.persistNames(r);
       void this.save(r).catch(() => {});
     }, SAVE_DELAY_MS);
   }
 
   /** Saves now, when there is anything to save that Drive does not already hold. */
+  /**
+   * Starts a save now and answers at once: the page follows it through `syncStatus`, its
+   * progress included. Asked for by hand, it also checks the copies are still in Drive (not
+   * deleted or in the trash), and sends them again when they are not.
+   */
   async saveNow(): Promise<SyncStatus> {
     const r = await this.ready();
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = null;
-    await this.save(r).catch(() => {});
+    if (!this.sync.saving) {
+      this.sync.progress = { phase: "preparing", sent: 0, total: 0 };
+      this.saveRun = this.save(r, true).catch(() => {});
+    }
     return this.syncStatus();
   }
 
-  private async save(r: Replica): Promise<void> {
+  /** Resolves once the save `saveNow` started has ended. */
+  async saveIdle(): Promise<void> {
+    await this.saveRun;
+  }
+  private saveRun: Promise<void> = Promise.resolve();
+
+  /** Lets the event loop breathe between the heavy steps of a save, so progress is read. */
+  private breathe(): Promise<void> {
+    return new Promise((done) => setImmediate(done));
+  }
+
+  private async save(r: Replica, byHand = false): Promise<void> {
     if (!this.current(r)) return;
     if (this.sync.saving) {
       this.scheduleSave(r);
       return;
     }
-    // Only a device that added something of its own, a scan or an edit, has a copy to save:
-    // reading the phone's alone writes nothing to Drive.
-    if (r.local.markers.length === 0 && r.ops.length === 0) {
-      this.sync.pending = false;
-      return;
-    }
-    // Each copy is written once; the hash that tells an unchanged index from a changed one
-    // reads it with the save time blanked, so saving again with nothing new uploads nothing.
-    const now = Date.now();
-    const facesPlain = writeFacesSnapshot(r.exportFaces(now));
-    const searchPlain = writeSearchSnapshot(r.exportSearch(now));
-    const hash = createHash("sha256").update(withoutSaveTime(facesPlain)).update(withoutSaveTime(searchPlain)).digest("hex");
-    const last = this.readJson<{ at: number; hash: string }>("saved.json");
-    if (last?.hash === hash) {
-      this.sync.pending = false;
-      return;
-    }
     this.sync.saving = true;
     this.sync.error = null;
+    this.sync.progress = { phase: "preparing", sent: 0, total: 0 };
     try {
+      // Only a device that added something of its own, a scan or an edit, has a copy to save:
+      // reading the phone's alone writes nothing to Drive.
+      if (r.local.markers.length === 0 && r.ops.length === 0) {
+        this.sync.pending = false;
+        return;
+      }
+      await this.breathe();
+      const report = r.report();
+      const now = Date.now();
+      const facesSnap = r.exportFaces(now);
+      const searchSnap = r.exportSearch(now);
+      const facesPlain = writeFacesSnapshot(facesSnap);
+      const searchPlain = writeSearchSnapshot(searchSnap);
+      await this.breathe();
+      // Read back before it leaves: the copy must hold every face, decision and vector the
+      // index has, or it is not sent.
+      const back = parseFacesSnapshot(facesPlain);
+      const backSearch = parseSearchSnapshot(searchPlain);
+      let vectors = 0;
+      for (const v of backSearch.vectors.values()) if (v) vectors++;
+      const shortBy = [
+        back.faces.length < report.merged.faces ? `faces ${back.faces.length}/${report.merged.faces}` : "",
+        back.markers.length < report.merged.scanned ? `scanned ${back.markers.length}/${report.merged.scanned}` : "",
+        vectors < report.merged.vectors ? `vectors ${vectors}/${report.merged.vectors}` : "",
+      ].filter(Boolean);
+      process.stderr.write(`[ml] index: ${JSON.stringify({ ...report, copy: { faces: back.faces.length, scanned: back.markers.length, manual: back.manual.length, notPerson: back.notPerson.length, covers: back.covers.length, vectors, facesBytes: facesPlain.length, searchBytes: searchPlain.length } })}\n`);
+      if (shortBy.length) throw new Error(`the copy came out short (${shortBy.join(", ")})`);
+      const summary = {
+        faces: back.faces.length,
+        photos: report.merged.photosWithFaces,
+        people: report.merged.people,
+        vectors,
+      };
+
+      // Each copy is written once; the hash that tells an unchanged index from a changed one
+      // reads it with the save time blanked, so saving again with nothing new uploads nothing.
+      const hash = createHash("sha256").update(withoutSaveTime(facesPlain)).update(withoutSaveTime(searchPlain)).digest("hex");
+      const last = this.readJson<{ at: number; hash: string }>("saved.json");
+      const client = this.deps.myFiles();
+      const names = [`faces-${r.deviceId}.pfpml`, `search-${r.deviceId}.pfpml`];
+      if (last?.hash === hash) {
+        const inDrive = byHand ? await mlCopyNames(client) : null;
+        if (!inDrive || names.every((n) => inDrive.has(n))) {
+          this.sync.pending = false;
+          this.sync.last = { outcome: "upToDate", ...summary };
+          return;
+        }
+      }
       const keys = await addressKeys(this.deps.account());
       if (keys.length === 0) throw new Error("no address key");
-      const client = this.deps.myFiles();
-      await saveMlCopy(client, `faces-${r.deviceId}.pfpml`, await sealEnvelope(facesPlain, keys[0], keys[0]));
-      await saveMlCopy(client, `search-${r.deviceId}.pfpml`, await sealEnvelope(searchPlain, keys[0], keys[0]));
+      const sealedFaces = await sealEnvelope(facesPlain, keys[0], keys[0]);
+      await this.breathe();
+      const sealedSearch = await sealEnvelope(searchPlain, keys[0], keys[0]);
+      const total = sealedFaces.length + sealedSearch.length;
+      this.sync.progress = { phase: "uploading", sent: 0, total };
+      await saveMlCopy(client, names[0], sealedFaces, (sent) => {
+        this.sync.progress = { phase: "uploading", sent: Math.min(sent, sealedFaces.length), total };
+      });
+      await saveMlCopy(client, names[1], sealedSearch, (sent) => {
+        this.sync.progress = { phase: "uploading", sent: sealedFaces.length + Math.min(sent, sealedSearch.length), total };
+      });
       this.writeJson("saved.json", { at: now, hash });
       this.sync.savedAt = now;
       this.sync.pending = false;
+      this.sync.last = { outcome: "saved", ...summary };
     } catch (e) {
       this.sync.error = (e as Error).message || "save failed";
-      process.stderr.write(`[ml] saving to Drive failed: ${(e as Error).name}\n`);
+      process.stderr.write(`[ml] saving to Drive failed: ${(e as Error).name}: ${(e as Error).message}\n`);
       throw e;
     } finally {
       this.sync.saving = false;
+      this.sync.progress = null;
     }
   }
 
   syncStatus(): SyncStatus {
-    return { ...this.sync, sources: [...this.sync.sources] };
+    return { ...this.sync, sources: [...this.sync.sources], progress: this.sync.progress && { ...this.sync.progress } };
   }
 
   // ---- What the pages read ----
 
   async view(): Promise<ReplicaView & { names: string[] }> {
     const r = await this.ready();
-    await this.refresh().catch(() => {});
+    // Waits for Drive only the first time. A later forced read runs on its own: waiting on it
+    // held the page, and every edit queued behind it, for a whole download.
+    if (!this.readOnce) await this.refresh().catch(() => {});
     return { ...r.view(), names: r.names() };
   }
 
@@ -461,16 +554,30 @@ export class MlService {
         break;
       case "acceptSuggestion":
       case "dismissSuggestion": {
-        const s = r.suggestionsFor(name, 50).find((x) => x.group === req.group) ?? r.view().suggestions.find((x) => x.group === req.group && x.name === name);
-        if (!s) throw new Error("That suggestion is gone");
+        // The faces the card showed, when the page sent them: the answer is about those, even
+        // when the groups were redrawn since (an automatic merge, a scan, another edit).
+        const shown = req.faces?.length ? r.refs(req.faces) : [];
+        const s = shown.length
+          ? null
+          : r.suggestionsFor(name, 50).find((x) => x.group === req.group) ?? r.view().suggestions.find((x) => x.group === req.group && x.name === name);
+        let faces = shown.length ? shown : s ? r.refs(s.faces) : [];
+        // A "no" leaves alone a face that is already this person: an automatic merge may have
+        // taken it in since the card was drawn, and the two answers would fight.
+        if (req.action === "dismissSuggestion") {
+          const own = new Set(r.person(`n:${name}`)?.faces ?? []);
+          faces = faces.filter((f) => !own.has(f.id));
+        }
+        // Gone with nothing to act on: the page is brought up to date rather than told no.
+        if (faces.length === 0) break;
         ops.push(
           req.action === "acceptSuggestion"
-            ? { t, kind: "confirm", faces: r.refs(s.faces), name }
-            : { t, kind: "notPerson", faces: r.refs(s.faces), name, on: true },
+            ? { t, kind: "confirm", faces, name }
+            : { t, kind: "notPerson", faces, name, on: true },
         );
         break;
       }
     }
+    if (ops.length === 0) return { ...r.view(), names: r.names() };
     for (const op of ops) r.apply(op);
     this.writeJson("ops.json", r.ops);
     this.scheduleSave(r);
@@ -542,7 +649,7 @@ export class MlService {
       const needsVector = !covered.search.has(key);
       const scanned = covered.faces.get(key);
       if (needsVector || (!it.video && scanned === undefined)) {
-        first.push({ uid: it.uid, video: it.video, vector: needsVector, faces: !it.video, second: false });
+        first.push({ uid: it.uid, video: it.video, vector: needsVector, faces: !it.video && scanned !== true, second: false });
       } else if (!it.video && scanned === false) {
         second.push({ uid: it.uid, video: false, vector: false, faces: true, second: true });
       }
@@ -577,11 +684,13 @@ export class MlService {
     const lookAt = async (t: Todo, fetched: Fetched, lastTry: boolean): Promise<boolean> => {
       if ("missing" in fetched && !lastTry) return false;
       const key = linkOf(t.uid);
-      // The HD preview first; with none, the grid thumbnail, then the original itself.
+      // The HD preview first. A photo with none is one of 1920 pixels or less, which the phone
+      // uploads without one: its original is small, and far sharper than the 512-pixel grid
+      // thumbnail, which comes last.
       const sources: (() => Promise<Buffer | null>)[] = [];
       if ("bytes" in fetched) sources.push(async () => fetched.bytes);
-      sources.push(() => this.deps.thumbnail(t.uid).catch(() => null));
       if (!t.video) sources.push(() => this.deps.original(t.uid).catch(() => null));
+      sources.push(() => this.deps.thumbnail(t.uid).catch(() => null));
       let gotAny = false;
       for (const source of sources) {
         const bytes = await source();
@@ -591,10 +700,16 @@ export class MlService {
           const look = await analyzer.look(bytes, t.faces, true, t.vector);
           // What the second look finds joins what was known; a face already known stays as it
           // was, with every decision about it.
-          const known = t.faces ? r.knownFaces(key) : [];
+          // A look for the search vector alone (a video the phone already looked at for faces)
+          // leaves its faces as they are.
+          if (!t.faces) {
+            if (t.vector) r.setVector(key, look.vector);
+            return true;
+          }
+          const known = r.knownFaces(key);
           const added = look.faces.filter((f) => !known.some((k) => overlap(k.box, f.box) >= SAME_FACE));
-          const faces = [...known.map(({ box, score, blur, points, embedding }) => ({ box, score, blur, points, embedding })), ...added];
-          r.addScan(key, faces, t.vector ? look.vector : undefined, Date.now(), t.faces);
+          const faces = [...known.map(({ index, box, score, blur, points, embedding }) => ({ index, box, score, blur, points, embedding })), ...added];
+          r.addScan(key, faces, t.vector ? look.vector : undefined, Date.now(), true);
           this.job.faces += added.length;
           if (faces.length > 0) this.job.withFaces++;
           else if (t.faces) this.job.noFaces++;
@@ -606,8 +721,12 @@ export class MlService {
       if (gotAny) {
         // Every picture there is came and none would decode: nothing a later try can change.
         // What other devices found on it stays.
-        const known = r.knownFaces(key).map(({ box, score, blur, points, embedding }) => ({ box, score, blur, points, embedding }));
-        r.addScan(key, known, t.vector ? null : undefined, Date.now(), true);
+        if (!t.faces) {
+          if (t.vector) r.setVector(key, null);
+        } else {
+          const known = r.knownFaces(key).map(({ index, box, score, blur, points, embedding }) => ({ index, box, score, blur, points, embedding }));
+          r.addScan(key, known, t.vector ? null : undefined, Date.now(), true);
+        }
         this.job.unreadable++;
         this.job.failed++;
         return true;
@@ -650,6 +769,7 @@ export class MlService {
     } finally {
       await analyzer.close();
       this.persistScans(r);
+      this.persistNames(r);
       // What the pages read caught up with every photo the run looked at.
       r.fresh();
     }

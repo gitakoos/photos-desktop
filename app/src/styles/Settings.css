@@ -601,3 +601,15 @@ label.st-row:hover,
   background: var(--accent);
   transition: width 0.3s ease;
 }
+/* Getting a save ready has no measure yet: a band that moves says it is working. */
+.st-progress-busy > div {
+  width: 35% !important;
+  animation: st-progress-busy 1.2s ease-in-out infinite;
+}
+@keyframes st-progress-busy {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(290%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .st-progress-busy > div { animation: none; width: 100% !important; opacity: 0.5; }
+}

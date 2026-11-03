@@ -64,7 +64,7 @@ function face(k: string, axis: number, confirmed: string | null): SnapFace {
 
 /** A Drive with My files in memory: folders, files and their revisions. */
 function memoryDrive() {
-  type Node = { uid: string; type: "file" | "folder"; name: string; parent: string; revisions: Buffer[] };
+  type Node = { uid: string; type: "file" | "folder"; name: string; parent: string; revisions: Buffer[]; trashTime?: Date };
   const nodes = new Map<string, Node>([["root", { uid: "root", type: "folder", name: "", parent: "", revisions: [] }]]);
   let next = 0;
   const view = (n: Node) => ({
@@ -73,6 +73,7 @@ function memoryDrive() {
     name: { ok: true, value: n.name },
     activeRevision: { ok: true, value: { uid: `${n.uid}@${n.revisions.length}` } },
     modificationTime: new Date(n.revisions.length),
+    trashTime: n.trashTime,
   });
   const uploader = (write: (bytes: Buffer) => void) => ({
     async uploadFromStream(stream: ReadableStream<Uint8Array>) {
@@ -164,6 +165,7 @@ describe("the People index against Drive", () => {
 
     // Reading alone writes nothing to Drive.
     await ml.saveNow();
+    await ml.saveIdle();
     expect(drive.files()).toHaveLength(1);
 
     // Name the group, then take a photo off Ana.
@@ -175,7 +177,10 @@ describe("the People index against Drive", () => {
       ["Ana", ["p1"]],
     ]);
 
-    const sync = await ml.saveNow();
+    await ml.saveNow();
+    await ml.saveIdle();
+    const sync = ml.syncStatus();
+    await ml.saveIdle();
     expect(sync.error).toBeNull();
     expect(sync.savedAt).not.toBeNull();
     const mine = drive.files().filter((f) => f.name.startsWith("faces-") && !f.name.includes(PHONE));
@@ -193,9 +198,22 @@ describe("the People index against Drive", () => {
     expect(confirmedOf("p2")).toBeNull();
     expect(snap.notPerson).toEqual([{ name: "Ana", key: "p2", index: 0 }]);
 
-    // Saving again with nothing new uploads nothing new.
+    // Saving again with nothing new uploads nothing new, and says so with what the copy holds.
     await ml.saveNow();
+    await ml.saveIdle();
     expect(mine[0].revisions).toHaveLength(1);
+    expect(ml.syncStatus().last).toMatchObject({ outcome: "upToDate", faces: 4, people: 2 });
+    expect(ml.syncStatus().progress).toBeNull();
+
+    // Put in the trash, the copy is no longer there for any device: saving by hand sends it
+    // again as a new file, rather than a revision nobody would read.
+    mine[0].trashTime = new Date();
+    await ml.saveNow();
+    await ml.saveIdle();
+    const live = drive.files().filter((f) => f.name.startsWith("faces-") && !f.name.includes(PHONE) && !f.trashTime);
+    expect(live).toHaveLength(1);
+    expect(live[0]).not.toBe(mine[0]);
+    expect(ml.syncStatus().last?.outcome).toBe("saved");
 
     // A fresh start of the app reads the edits back from disk.
     const again = service(drive);
@@ -282,10 +300,11 @@ describe("looking at the library", () => {
     const faces = await service.photoFaces("p6");
     expect(faces.map((f) => f.name)).toEqual(["Ana", null]);
 
-    // A second run looks only at what is left.
+    // A second run looks only at what is left: p4, never fetched, and p5, whose picture would
+    // not decode, tried again for its search vector, as an older build left many marked so.
     service.startIndex();
     await service.indexDone();
-    expect(service.indexStatus()).toMatchObject({ firstLooks: 1, secondLooks: 0, retryLater: 1 });
+    expect(service.indexStatus()).toMatchObject({ firstLooks: 2, secondLooks: 0, retryLater: 1 });
   }, 60_000);
 });
 

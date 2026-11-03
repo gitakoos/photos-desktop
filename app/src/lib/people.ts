@@ -55,8 +55,8 @@ export type MlEdit =
   | { action: "addPhotos"; name: string; keys: string[] }
   | { action: "setCover"; name: string; key: string }
   | { action: "hide"; person: string }
-  | { action: "acceptSuggestion"; group: string; name: string }
-  | { action: "dismissSuggestion"; group: string; name: string }
+  | { action: "acceptSuggestion"; group: string; name: string; faces?: string[] }
+  | { action: "dismissSuggestion"; group: string; name: string; faces?: string[] }
   | { action: "nameFaces"; faces: string[]; name: string };
 
 /** One face on a photo, for the viewer: who it is (a person id and name), if anyone. */
@@ -88,6 +88,8 @@ export type SyncStatus = {
   error: string | null;
   sources: { device: string; kind: "faces" | "search"; savedAt: number }[];
   unreadable: number;
+  progress: { phase: "preparing" | "uploading"; sent: number; total: number } | null;
+  last: { outcome: "saved" | "upToDate"; faces: number; photos: number; people: number; vectors: number } | null;
 };
 
 export const loadPeople = () => rpc<MlView>("mlView");

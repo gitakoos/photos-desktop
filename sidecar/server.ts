@@ -106,7 +106,7 @@ function editRequest(p: any): EditRequest {
       return { action: "hide", person: str(p.person) };
     case "acceptSuggestion":
     case "dismissSuggestion":
-      return { action: p.action, group: str(p.group), name: str(p.name) };
+      return { action: p.action, group: str(p.group), name: str(p.name), faces: Array.isArray(p.faces) ? keys(p.faces) : undefined };
     case "nameFaces":
       return { action: "nameFaces", faces: keys(p.faces), name: str(p.name) };
     default:
@@ -149,6 +149,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getThumbnails: (p) => session.getThumbnails(p.uids),
   warmThumbnails: (p) => session.warmThumbnails(p.uids),
   getPreview: (p) => session.getPreview(p.uid),
+  // The same preview, for a face on the People pages: asked for at a lower priority.
+  getFacePreview: (p) => session.getPreview(p.uid),
   getOriginal: (p) => session.getOriginal(p.uid),
   releaseOriginal: (p) => session.releaseOriginal(p?.uid),
   readOriginalBytes: (p) => session.readOriginalBytes(p.token),

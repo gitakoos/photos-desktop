@@ -177,7 +177,7 @@ describe("merging the phone's copy", () => {
     r.setCopies([phone(1000, [face("p1", 0, 1, { confirmed: "Ana" }), face("p2", 0, 1, { confirmed: "Ana" })])], []);
     r.addScan("p1", [{ ...face("p1", 5, 1), box: [0.01, 0.1, 0.21, 0.4] }], null, 2000);
     const ana = r.person("n:Ana")!;
-    expect(ana.faces.sort()).toEqual(["p1#0", "p2#0"]);
+    expect(ana.faces.sort()).toEqual(["p1#5", "p2#0"]);
     expect(r.view().scanned).toBe(2);
   });
 
@@ -350,5 +350,30 @@ describe("the same copies, in any order", () => {
     two.setCopies([b, a], []);
     const people = (r: Replica) => r.view().people.map((p) => [p.name, [...p.keys].sort()]);
     expect(people(two)).toEqual(people(one));
+  });
+});
+
+describe("a grouping that holds", () => {
+  it("keeps a face under the name the last grouping gave it, and a known face keeps its number", () => {
+    const r = replica();
+    r.setCopies([phone(1000, [face("p1", 0, 1, { confirmed: "Ana" }), face("p2", 0, 1), face("p3", 0, 1)])], []);
+    expect(named(r)).toEqual([["Ana", ["p1", "p2", "p3"]]]);
+    // A fresh replica that remembers the last grouping names the same faces the same way.
+    const again = replica();
+    again.lastNames = new Map(r.lastNames);
+    again.setCopies([phone(1000, [face("p1", 0, 1, { confirmed: "Ana" }), face("p2", 0, 1), face("p3", 0, 1)])], []);
+    expect(named(again)).toEqual(named(r));
+    // A second look keeps the phone's number 3 for the face it knew and numbers the new one after.
+    again.addScan("p2", [{ ...face("p2", 0, 1), index: 3 }, { ...face("p2", 9, 7), index: undefined }], undefined, 2000, true);
+    expect(again.local.faces.filter((f) => f.key === "p2").map((f) => f.index)).toEqual([3, 4]);
+  });
+
+  it("does not offer again a group holding a face marked as not that person", () => {
+    const r = replica();
+    r.setCopies([phone(1000, [
+      face("a1", 0, 1, { confirmed: "Ana" }), face("a2", 0, 1, { confirmed: "Ana" }),
+      { ...face("p3", 0, 1), embedding: blend(1, 9, 0.55) }, { ...face("p4", 0, 1), embedding: blend(1, 9, 0.55) },
+    ], { notPerson: [{ name: "Ana", key: "p3", index: 0 }] })], []);
+    expect(r.suggestionsFor("Ana")).toEqual([]);
   });
 });

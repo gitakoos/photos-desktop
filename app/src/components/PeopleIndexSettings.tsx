@@ -23,13 +23,14 @@
 // Settings for the desktop's own People and search index: the four models, the scan of the
 // library on a button, and where this PC's copy in Drive stands.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLang, useT } from "../lib/i18n";
 import type { IndexStatus, ModelsStatus, SyncStatus } from "../lib/people";
 import { rpc } from "../lib/rpc";
 import { CloudIcon, FaceIcon, MergeIcon, SearchIcon } from "./icons";
 
 const megabytes = (n: number) => `${Math.round(n / 1_000_000)} MB`;
+const megabytesOne = (n: number) => `${(n / 1_000_000).toFixed(1)} MB`;
 
 /** Polls `method` while `active` says the answer is still moving. */
 function usePolled<T>(method: string, active: (v: T | null) => boolean, ms: number): [T | null, (v: T) => void] {
@@ -64,7 +65,10 @@ export function PeopleIndexSettings() {
   const date = new Intl.DateTimeFormat(lang, { dateStyle: "medium", timeStyle: "short" });
   const [models, setModels] = usePolled<ModelsStatus>("mlModels", (v) => !!v?.downloading, 700);
   const [job, setJob] = usePolled<IndexStatus>("mlIndexStatus", (v) => !!v?.running, 1000);
+  // Read often while a save runs, so its bar moves; slowly while changes only wait.
   const [sync, setSync] = usePolled<SyncStatus>("mlSync", (v) => !!v && (v.saving || v.pending), 3000);
+  const [saveSync, setSaveSync] = usePolled<SyncStatus>("mlSync", (v) => !!v?.saving, 500);
+  const shown = saveSync?.saving ? saveSync : sync;
   const [error, setError] = useState<string | null>(null);
   // Null until the sidecar answers, so the switch never shows a guess.
   const [autoMerge, setAutoMerge] = useState<boolean | null>(null);
@@ -81,6 +85,7 @@ export function PeopleIndexSettings() {
       const v = await rpc<{ on: boolean; merged: number }>("mlAutoMerge", { on });
       setAutoMerge(v.on);
       if (v.on) setMergedNow(v.merged);
+      if (v.merged > 0) window.dispatchEvent(new Event("pfp:people-changed"));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -94,6 +99,15 @@ export function PeopleIndexSettings() {
     rpc<{ scanned: number }>("mlView").then((v) => setScanned(v.scanned), () => {});
   }, [job?.running]);
 
+  // A scan that just ended: People reads what it found.
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (job?.running) wasRunning.current = true;
+    else if (job && wasRunning.current) {
+      wasRunning.current = false;
+      window.dispatchEvent(new Event("pfp:people-changed"));
+    }
+  }, [job]);
   // A scan that just ended has saved, or is about to: read where the copy stands again.
   useEffect(() => {
     if (job && !job.running) rpc<SyncStatus>("mlSync").then(setSync, () => {});
@@ -146,13 +160,26 @@ export function PeopleIndexSettings() {
             .join(" ");
   }
 
+  const n = (v: number) => v.toLocaleString(lang);
+  const progress = shown?.saving ? shown.progress : null;
   let syncLine = "";
-  if (sync?.saving) syncLine = t("settings.mlSyncSaving");
-  else if (sync?.error) syncLine = t("settings.mlSyncFailed");
-  else if (sync?.pending) syncLine = t("settings.mlSyncPending");
-  else if (sync?.savedAt) syncLine = t("settings.mlSyncSaved", { date: date.format(new Date(sync.savedAt)) });
-  else if (sync) syncLine = t("settings.mlSyncNever");
-  const devices = [...new Set((sync?.sources ?? []).map((s) => s.device))];
+  if (progress?.phase === "uploading") {
+    syncLine = t("settings.mlSyncUploading", { sent: megabytesOne(progress.sent), total: megabytesOne(progress.total) });
+  } else if (shown?.saving) syncLine = t("settings.mlSyncPreparing");
+  else if (shown?.error) syncLine = t("settings.mlSyncFailed", { error: shown.error });
+  else if (shown?.pending) syncLine = t("settings.mlSyncPending");
+  else if (shown?.savedAt) syncLine = t("settings.mlSyncSaved", { date: date.format(new Date(shown.savedAt)) });
+  else if (shown) syncLine = t("settings.mlSyncNever");
+  const lastLine =
+    !shown?.saving && shown?.last
+      ? t(shown.last.outcome === "saved" ? "settings.mlSyncLastSaved" : "settings.mlSyncLastUpToDate", {
+          faces: n(shown.last.faces),
+          photos: n(shown.last.photos),
+          people: n(shown.last.people),
+          vectors: n(shown.last.vectors),
+        })
+      : "";
+  const devices = [...new Set((shown?.sources ?? []).map((s) => s.device))];
 
   return (
     <>
@@ -229,12 +256,21 @@ export function PeopleIndexSettings() {
           <div className="st-text">
             <div className="st-label">{t("settings.mlSync")}</div>
             {syncLine && <div className="st-desc">{syncLine}</div>}
+            {shown?.saving && (
+              <div className={`st-progress${progress?.phase === "uploading" ? "" : " st-progress-busy"}`}>
+                <div style={{ width: progress?.phase === "uploading" ? `${Math.round((progress.sent / Math.max(1, progress.total)) * 100)}%` : "100%" }} />
+              </div>
+            )}
+            {lastLine && <div className="st-desc st-status">{lastLine}</div>}
             {devices.length > 0 && <div className="st-desc st-status">{t("settings.mlSyncMerged", { devices: devices.join(", ") })}</div>}
           </div>
           <button
             className="st-row-btn"
-            disabled={!!sync?.saving}
-            onClick={() => void call<SyncStatus>("mlSaveNow", setSync)}
+            disabled={!!shown?.saving}
+            onClick={() => void call<SyncStatus>("mlSaveNow", (v) => {
+              setSync(v);
+              setSaveSync(v);
+            })}
           >
             {t("settings.mlSaveNow")}
           </button>

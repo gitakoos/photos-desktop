@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { ChevronRightIcon } from "./icons";
 import { cachedPreview, loadPreview } from "../lib/previewStore";
@@ -78,6 +78,35 @@ export function LibraryTiles({ tiles }: { tiles: Tile[] }) {
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 const FACE_ZOOM_OUT = 1.4;
 
+/** How many face previews are asked for at once. Each is a few hundred milliseconds in the
+ *  sidecar; a page of people asking for all of theirs together queued an edit for minutes. */
+const FACE_PREVIEWS_AT_ONCE = 3;
+const faceQueue: { uid: string; done: (url: string | null) => void }[] = [];
+let facesFetching = 0;
+
+function pumpFaces(): void {
+  while (facesFetching < FACE_PREVIEWS_AT_ONCE && faceQueue.length > 0) {
+    const next = faceQueue.shift()!;
+    facesFetching++;
+    void loadPreview(next.uid, "getFacePreview").then((url) => {
+      facesFetching--;
+      next.done(url);
+      pumpFaces();
+    });
+  }
+}
+
+/** Queues one face's preview; the returned function takes it back out if not yet asked for. */
+function queueFacePreview(uid: string, done: (url: string | null) => void): () => void {
+  const entry = { uid, done };
+  faceQueue.push(entry);
+  pumpFaces();
+  return () => {
+    const at = faceQueue.indexOf(entry);
+    if (at >= 0) faceQueue.splice(at, 1);
+  };
+}
+
 /**
  * The cover cut to the face: the picture is scaled and moved so a square FACE_ZOOM_OUT times
  * the face fills its square frame, kept inside the picture. Until the picture's own shape is
@@ -89,16 +118,37 @@ export function FaceCover({ uid, thumb, box, hd = true }: { uid: string; thumb: 
   // the larger preview takes its place once it is in. A long strip of faces keeps to the
   // thumbnails, so opening a person does not fetch a preview per face.
   const [preview, setPreview] = useState<string | null>(() => cachedPreview(uid) ?? null);
+  // Asked for only once the face is on screen, a few at a time.
+  const ref = useRef<HTMLImageElement>(null);
+  const [seen, setSeen] = useState(false);
   useEffect(() => {
-    if (!hd) return;
+    if (!hd || seen || preview) return;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setSeen(true);
+      return;
+    }
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        setSeen(true);
+        io.disconnect();
+      }
+    }, { rootMargin: "200px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hd, seen, preview]);
+  useEffect(() => {
+    if (!hd || !seen || preview) return;
     let live = true;
-    void loadPreview(uid).then((url) => {
+    const drop = queueFacePreview(uid, (url) => {
       if (live && url) setPreview(url);
     });
     return () => {
       live = false;
+      drop();
     };
-  }, [uid, hd]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, hd, seen]);
   const src = preview ?? thumb;
   let style: CSSProperties | undefined;
   if (box && aspect) {
@@ -116,6 +166,7 @@ export function FaceCover({ uid, thumb, box, hd = true }: { uid: string; thumb: 
   }
   return (
     <img
+      ref={ref}
       src={src}
       alt=""
       draggable={false}

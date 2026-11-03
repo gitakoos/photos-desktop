@@ -993,20 +993,41 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     },
     [byLinkId, t],
   );
+  // Background reads go through the same path as edits, so an open person's page follows them.
+  const applyMlRef = useRef(applyMl);
+  applyMlRef.current = applyMl;
+  const reloadPeople = useCallback(() => {
+    loadPeople().then((v) => applyMlRef.current(v), () => {});
+  }, []);
+  // Settings changes People in the sidecar (an automatic merge, the end of a scan) while this
+  // page stays open: read it again, or its cards answer for groups that no longer exist.
+  useEffect(() => {
+    if (!settings.driveFaces) return;
+    window.addEventListener("pfp:people-changed", reloadPeople);
+    return () => window.removeEventListener("pfp:people-changed", reloadPeople);
+  }, [settings.driveFaces, reloadPeople]);
+  const editing = useRef(false);
   const runEdit = useCallback(
     async (edit: MlEdit, nextPerson?: string) => {
+      // One edit at a time: a second click before the first answers would act on stale ids.
+      if (editing.current) return false;
+      editing.current = true;
       setMlBusy(true);
       try {
         applyMl(await editPeople(edit), nextPerson);
         return true;
-      } catch {
+      } catch (e) {
+        console.warn("[people] edit failed", edit.action, e);
         setToast(t("people.failed"));
+        // What is on screen may be what failed: an edit that timed out may still land.
+        reloadPeople();
         return false;
       } finally {
+        editing.current = false;
         setMlBusy(false);
       }
     },
-    [applyMl, t],
+    [applyMl, reloadPeople, t],
   );
   // The index groups only the photos the library holds: a phone's copy also carries the faces
   // of photos since trashed or deleted, which otherwise made suggestions with nothing to show.
@@ -1014,29 +1035,48 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // Only a whole timeline: told every page as it painted, People counted over part of the
   // library and showed a different number from one start to the next.
   const libraryKeys = useMemo(() => (loading || !timelineWhole ? [] : items.map((it) => it.uid)), [items, loading, timelineWhole]);
+  // Told only when the set of photos changed: a favourite remaps the timeline without changing
+  // which photos are in it, and telling it again regrouped the whole library for nothing.
+  const librarySent = useRef("");
   useEffect(() => {
     if (!settings.driveFaces || libraryKeys.length === 0) return;
     const timer = window.setTimeout(() => {
-      rpc("mlLibrary", { uids: libraryKeys })
-        .then(() => loadPeople())
-        .then(setMl, () => {});
+      const sorted = [...libraryKeys].sort();
+      let hash = 0;
+      for (const k of sorted) for (let i = 0; i < k.length; i++) hash = (Math.imul(hash, 31) + k.charCodeAt(i)) | 0;
+      const signature = `${sorted.length}:${hash}`;
+      if (signature === librarySent.current) return;
+      rpc("mlLibrary", { uids: libraryKeys }).then(
+        () => {
+          librarySent.current = signature;
+          reloadPeople();
+        },
+        () => {},
+      );
     }, 1500);
     return () => window.clearTimeout(timer);
-  }, [libraryKeys, settings.driveFaces]);
+  }, [libraryKeys, settings.driveFaces, reloadPeople]);
   // A named person's page offers the closest group that may be them too, among the groups
   // with a photo here to show.
+  // Cleared only when the person changes, so the card does not blink at every refresh.
+  const suggestionFor = useRef<string | null>(null);
+  const byLinkIdRef = useRef(byLinkId);
+  byLinkIdRef.current = byLinkId;
   useEffect(() => {
-    setPersonSuggestion(null);
+    if (suggestionFor.current !== (person?.name ?? null)) {
+      suggestionFor.current = person?.name ?? null;
+      setPersonSuggestion(null);
+    }
     if (!person?.name) return;
     let live = true;
     suggestionsFor(person.name).then(
-      (list) => live && setPersonSuggestion(list.find((sg) => sg.faces.some((id) => byLinkId.has(id.slice(0, id.lastIndexOf("#"))))) ?? null),
+      (list) => live && setPersonSuggestion(list.find((sg) => sg.faces.some((id) => byLinkIdRef.current.has(id.slice(0, id.lastIndexOf("#"))))) ?? null),
       () => {},
     );
     return () => {
       live = false;
     };
-  }, [person?.name, ml, byLinkId]);
+  }, [person?.name, ml]);
   const suggestionUids = useCallback(
     (sg: MlSuggestion) => personUids([...new Set(sg.faces.map((id) => id.slice(0, id.lastIndexOf("#"))))], byLinkId),
     [byLinkId],
@@ -1191,11 +1231,15 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         labels: settings.driveLabels,
         search: settings.semanticSearch,
       })
-        .then((data) => setDrive({ state: "ready", data, at: Date.now() }))
+        .then((data) => {
+          setDrive({ state: "ready", data, at: Date.now() });
+          // People's own read of Drive ran beside this one and is in by now, or nearly.
+          if (settings.driveFaces) reloadPeople();
+        })
         .catch(() =>
           setDrive((d) => (d?.data ? { ...d, state: "ready" } : { state: "failed", data: null, at: d?.at ?? 0 })),
         );
-      if (settings.driveFaces) loadPeople().then(setMl, () => {});
+      if (settings.driveFaces) reloadPeople();
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [driveKinds],
@@ -3013,7 +3057,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 busy={mlBusy}
                 onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "people", person: entry.id })}
                 onAnswer={(sg, yes) =>
-                  void runEdit({ action: yes ? "acceptSuggestion" : "dismissSuggestion", group: sg.group, name: sg.name })
+                  void runEdit({ action: yes ? "acceptSuggestion" : "dismissSuggestion", group: sg.group, name: sg.name, faces: sg.faces })
                 }
                 onOpenSuggestion={openSuggestion}
               />
@@ -3166,6 +3210,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                         action: yes ? "acceptSuggestion" : "dismissSuggestion",
                         group: pageSuggestion.group,
                         name: pageSuggestion.name,
+                        faces: pageSuggestion.faces,
                       });
                       // Answered over the group's own photos: back to where the question came from.
                       if (ok && fromGroup) {
