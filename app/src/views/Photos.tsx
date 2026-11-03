@@ -1005,16 +1005,33 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     },
     [applyMl, t],
   );
-  // A named person's page offers the closest group that may be them too.
+  // The index groups only the photos the library holds: a phone's copy also carries the faces
+  // of photos since trashed or deleted, which otherwise made suggestions with nothing to show.
+  // Told once the timeline stops arriving, and read again after.
+  const libraryKeys = useMemo(() => items.map((it) => it.uid), [items]);
+  useEffect(() => {
+    if (!settings.driveFaces || libraryKeys.length === 0) return;
+    const timer = window.setTimeout(() => {
+      rpc("mlLibrary", { uids: libraryKeys })
+        .then(() => loadPeople())
+        .then(setMl, () => {});
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [libraryKeys, settings.driveFaces]);
+  // A named person's page offers the closest group that may be them too, among the groups
+  // with a photo here to show.
   useEffect(() => {
     setPersonSuggestion(null);
     if (!person?.name) return;
     let live = true;
-    suggestionsFor(person.name).then((list) => live && setPersonSuggestion(list[0] ?? null), () => {});
+    suggestionsFor(person.name).then(
+      (list) => live && setPersonSuggestion(list.find((sg) => sg.faces.some((id) => byLinkId.has(id.slice(0, id.lastIndexOf("#"))))) ?? null),
+      () => {},
+    );
     return () => {
       live = false;
     };
-  }, [person?.name, ml]);
+  }, [person?.name, ml, byLinkId]);
   const suggestionUids = useCallback(
     (sg: MlSuggestion) => personUids([...new Set(sg.faces.map((id) => id.slice(0, id.lastIndexOf("#"))))], byLinkId),
     [byLinkId],
@@ -3121,7 +3138,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               />
             )}
 
-            {pageSuggestion && (person || uidFilter?.suggestion) && (
+            {pageSuggestion && (person || uidFilter?.suggestion) && suggestionUids(pageSuggestion).length > 0 && (
               <div className="pp-onpage">
                 <SuggestionCard
                   suggestion={pageSuggestion}

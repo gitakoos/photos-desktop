@@ -244,6 +244,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   mlEdit: (p) => session.mlEdit(editRequest(p)),
   mlSuggestions: (p) => session.mlSuggestions(String(p?.name ?? "")),
   mlPhotoFaces: (p) => session.mlPhotoFaces(String(p?.uid ?? "")),
+  mlLibrary: (p) =>
+    session.mlLibrary(Array.isArray(p?.uids) ? p.uids.filter((x: unknown): x is string => typeof x === "string") : []),
   mlRefresh: () => session.mlRefresh(),
   mlSync: () => session.mlSync(),
   mlSaveNow: () => session.mlSaveNow(),

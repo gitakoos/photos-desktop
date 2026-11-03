@@ -215,6 +215,26 @@ export class Replica {
     return max;
   }
 
+  /**
+   * The photos the library holds now, by link id, or null while it is not known. A device's
+   * copy keeps the faces of photos since trashed or deleted, and of photos this account no
+   * longer sees; grouped, they made people and suggestions with nothing to show. They stay in
+   * the copy this device saves, so nothing another device knows is thrown away, but only the
+   * photos in the library are grouped and shown.
+   */
+  private library: Set<string> | null = null;
+  setLibrary(keys: Iterable<string> | null): void {
+    const next = keys ? new Set(keys) : null;
+    const same = next && this.library ? next.size === this.library.size && [...next].every((k) => this.library!.has(k)) : next === this.library;
+    if (same) return;
+    this.library = next;
+    this.facesVersion++;
+    this.cache = null;
+  }
+  inLibrary(key: string): boolean {
+    return !this.library || this.library.has(key);
+  }
+
   apply(op: Op): void {
     this.ops.push(op);
     this.cache = null;
@@ -704,7 +724,7 @@ function merge(r: Replica): Merged {
   for (const v of search.values()) if (v) searchKeys++;
 
   // Grouping, over every face not removed from People.
-  const kept = [...faces.values()].filter((f) => identityOut.get(f.id)?.kind !== "rejected");
+  const kept = [...faces.values()].filter((f) => identityOut.get(f.id)?.kind !== "rejected" && r.inLibrary(f.key));
   const confirmedOf = kept.map((f) => {
     const v = identityOut.get(f.id);
     return v?.kind === "confirmed" ? v.name : null;
@@ -763,7 +783,7 @@ function merge(r: Replica): Merged {
   const manualByName = new Map<string, string[]>();
   for (const k of manualOut.keys()) {
     const [name, key] = splitPair(k);
-    (manualByName.get(name) ?? manualByName.set(name, []).get(name)!).push(key);
+    if (r.inLibrary(key)) (manualByName.get(name) ?? manualByName.set(name, []).get(name)!).push(key);
   }
   const keyOf = (id: string) => id.slice(0, id.lastIndexOf("#"));
   const people: Person[] = [];

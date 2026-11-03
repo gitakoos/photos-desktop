@@ -186,7 +186,7 @@ fn priority_for(method: &str) -> Priority {
         // the sidecar and never holds the channel, so like the date fix these only have to
         // stay reachable while a long walk holds the foreground lane.
         "mlIndexStart" | "mlIndexStatus" | "mlIndexCancel" | "mlModels" | "mlModelsDownload"
-        | "mlSync" | "mlSaveNow" | "mlRefresh" => Priority::Background,
+        | "mlSync" | "mlSaveNow" | "mlRefresh" | "mlLibrary" => Priority::Background,
 
         // The names of a selection the user is acting on (Fix dates). The same lookup as
         // `getMetadata`, which sits under the warmer as `Enumerate`: with the Explorer

@@ -273,6 +273,13 @@ export class MlService {
     return { ...r.view(), names: r.names() };
   }
 
+  /** Tells the index which photos the library holds, by link id, so only those are grouped. */
+  async setLibrary(keys: string[]): Promise<{ ok: true }> {
+    const r = await this.ready();
+    r.setLibrary(keys);
+    return { ok: true };
+  }
+
   /** The faces on one photo, by its link id, for the viewer's tags. */
   async photoFaces(key: string): Promise<PhotoFace[]> {
     const r = await this.ready();

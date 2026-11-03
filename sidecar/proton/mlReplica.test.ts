@@ -281,3 +281,21 @@ describe("the faces on one photo", () => {
     expect(r.person("n:Bia")!.keys).toEqual(["p1"]);
   });
 });
+
+describe("photos no longer in the library", () => {
+  it("are neither grouped nor suggested, yet stay in the copy this device saves", () => {
+    const r = replica();
+    // A group that looks like Ana, on photos since trashed (p3, p4): the "See all 0 photos" case.
+    r.setCopies([phone(1000, [
+      face("p1", 0, 1, { confirmed: "Ana" }), face("p2", 0, 1, { confirmed: "Ana" }),
+      { ...face("p3", 0, 1), embedding: blend(1, 9, 0.55) }, { ...face("p4", 0, 1), embedding: blend(1, 9, 0.55) },
+    ], { manual: [{ name: "Ana", key: "p9" }] })], []);
+    expect(r.suggestionsFor("Ana")).toHaveLength(1);
+    r.setLibrary(["p1", "p2"]);
+    expect(r.suggestionsFor("Ana")).toEqual([]);
+    expect(r.view().suggestions).toEqual([]);
+    expect(r.view().people.map((p) => [p.name, [...p.keys].sort()])).toEqual([["Ana", ["p1", "p2"]]]);
+    expect(r.exportFaces().faces.map((f) => f.key).sort()).toEqual(["p1", "p2", "p3", "p4"]);
+    expect(r.exportFaces().manual).toEqual([{ name: "Ana", key: "p9" }]);
+  });
+});
