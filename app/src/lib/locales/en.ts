@@ -66,6 +66,7 @@ export const en: Record<string, string> = {
   "people.suggestQuestion": "Is this {name}?",
   "people.suggestYes": "Yes",
   "people.suggestNo": "No",
+  "people.faces": "Faces ({count})",
   "people.suggestSee.one": "See {count} photo",
   "people.suggestSee.other": "See all {count} photos",
   "people.namePlaceholder": "Name",

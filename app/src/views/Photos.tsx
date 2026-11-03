@@ -110,7 +110,7 @@ import {
 import { MapView, type MapPoint } from "../components/MapView";
 import { ImportReview } from "../components/ImportReview";
 import { AlbumAddPhotos } from "../components/AlbumAddPhotos";
-import { PeopleLibrary, PersonActions, PersonNameDialog, SuggestionCard } from "../components/People";
+import { FaceStrip, PeopleLibrary, PersonActions, PersonNameDialog, SuggestionCard, type FaceTile } from "../components/People";
 import {
   editPeople,
   linkOf,
@@ -1017,6 +1017,33 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     (sg: MlSuggestion) => personUids([...new Set(sg.faces.map((id) => id.slice(0, id.lastIndexOf("#"))))], byLinkId),
     [byLinkId],
   );
+  /** Faces as tiles to show: each in its photo, by uid, with its box. `perPhoto` keeps the
+   *  first (the clearest) face of each photo only. */
+  const faceTiles = useCallback(
+    (ids: string[], boxes: MlPerson["boxes"], perPhoto = false): FaceTile[] => {
+      const out: FaceTile[] = [];
+      const seen = new Set<string>();
+      ids.forEach((id, i) => {
+        const uid = byLinkId.get(id.slice(0, id.lastIndexOf("#")))?.uid;
+        if (!uid || (perPhoto && seen.has(uid))) return;
+        seen.add(uid);
+        out.push({ uid, box: boxes?.[i] ?? null });
+      });
+      return out;
+    },
+    [byLinkId],
+  );
+  const personFaces = useMemo(() => (person ? faceTiles(person.faces, person.boxes) : []), [person, faceTiles]);
+  /** Each photo of the open person centred on their face, as their page on the phone does. */
+  const personFocus = useMemo(() => {
+    if (!person) return undefined;
+    const out: Record<string, string> = {};
+    for (const f of faceTiles(person.faces, person.boxes, true)) {
+      if (!f.box) continue;
+      out[f.uid] = `${(((f.box[0] + f.box[2]) / 2) * 100).toFixed(1)}% ${(((f.box[1] + f.box[3]) / 2) * 100).toFixed(1)}%`;
+    }
+    return out;
+  }, [person, faceTiles]);
   /** A suggestion's group opened as a page of its own, the question asked again over it. */
   const openSuggestion = (sg: MlSuggestion) =>
     openFiltered({
@@ -2948,7 +2975,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               <PeopleLibrary
                 named={peopleEntries}
                 groups={groupEntries}
-                suggestions={ml.suggestions.map((sg) => ({ suggestion: sg, uids: suggestionUids(sg) })).filter((sg) => sg.uids.length > 0)}
+                suggestions={ml.suggestions
+                  .map((sg) => ({ suggestion: sg, uids: suggestionUids(sg), faces: faceTiles(sg.faces, sg.boxes, true) }))
+                  .filter((sg) => sg.uids.length > 0)}
                 cardSize={Math.round((albumCellSize * 140) / 190)}
                 busy={mlBusy}
                 onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "people", person: entry.id })}
@@ -3080,11 +3109,22 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
 
             {((loading && items.length === 0) || !hidingKnown) && <PhotoGridSkeleton count={30} cellSize={cellSize} />}
 
+            {person && personFaces.length > 0 && (
+              <FaceStrip
+                faces={personFaces}
+                onOpen={(uid) => {
+                  const at = shown.findIndex((f) => f.uid === uid);
+                  if (at >= 0) setLightboxIdx(at);
+                }}
+              />
+            )}
+
             {pageSuggestion && (person || uidFilter?.suggestion) && (
               <div className="pp-onpage">
                 <SuggestionCard
                   suggestion={pageSuggestion}
                   uids={suggestionUids(pageSuggestion)}
+                  faces={faceTiles(pageSuggestion.faces, pageSuggestion.boxes, true)}
                   busy={mlBusy}
                   // On the group's own page its photos are already the page; elsewhere it opens them.
                   onOpen={uidFilter?.suggestion ? undefined : () => openSuggestion(pageSuggestion)}
@@ -3177,6 +3217,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                   onContext={onCellContext}
                   offlineUids={offlineUids}
                   localUids={localUids}
+                  focus={personFocus}
                 />
               )}
             />}

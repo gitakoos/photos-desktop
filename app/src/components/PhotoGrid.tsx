@@ -145,6 +145,9 @@ type CellProps = {
   /** Badge density, from the tile's rendered width. */
   tier?: BadgeTier;
   renderOverlay?: (item: GridItem) => ReactNode;
+  /** Where to centre each photo's tile, as a CSS object-position, by uid: a person's page
+   *  centres every tile on that person's face. */
+  focus?: Record<string, string>;
 };
 
 /** One photo tile: thumbnail, hover select dot, corner badges, optional name. */
@@ -162,6 +165,7 @@ export function PhotoCell({
   local = false,
   tier = "all",
   renderOverlay,
+  focus,
 }: CellProps) {
   const t = useT();
   // `thumb === undefined` -> lazy: fetch this cell's thumbnail only once it
@@ -336,6 +340,7 @@ export function PhotoCell({
           decoding="async"
           alt=""
           draggable={false}
+          style={focus?.[item.uid] ? { objectPosition: focus[item.uid] } : undefined}
           ref={(img) => {
             imgRef.current = img;
             if (img && img.complete && img.naturalWidth > 0) img.dataset.ok = "1";

@@ -34,9 +34,11 @@ export type MlPerson = {
   faces: string[];
   keys: string[];
   cover: { key: string; box: FaceBox | null } | null;
+  /** Where each of `faces` sits in its photo, in the same order. */
+  boxes?: FaceBox[];
 };
 
-export type MlSuggestion = { name: string; group: string; score: number; faces: string[] };
+export type MlSuggestion = { name: string; group: string; score: number; faces: string[]; boxes?: FaceBox[] };
 
 export type MlView = {
   people: MlPerson[];

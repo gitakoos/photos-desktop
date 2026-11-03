@@ -83,12 +83,14 @@ const FACE_ZOOM_OUT = 1.4;
  * the face fills its square frame, kept inside the picture. Until the picture's own shape is
  * known it is shown whole.
  */
-function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
+export function FaceCover({ uid, thumb, box, hd = true }: { uid: string; thumb: string; box: FaceBox | null; hd?: boolean }) {
   const [aspect, setAspect] = useState<number | null>(null);
   // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it:
-  // the larger preview takes its place once it is in.
+  // the larger preview takes its place once it is in. A long strip of faces keeps to the
+  // thumbnails, so opening a person does not fetch a preview per face.
   const [preview, setPreview] = useState<string | null>(() => cachedPreview(uid) ?? null);
   useEffect(() => {
+    if (!hd) return;
     let live = true;
     void loadPreview(uid).then((url) => {
       if (live && url) setPreview(url);
@@ -96,7 +98,7 @@ function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceB
     return () => {
       live = false;
     };
-  }, [uid]);
+  }, [uid, hd]);
   const src = preview ?? thumb;
   let style: CSSProperties | undefined;
   if (box && aspect) {

@@ -27,9 +27,58 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { useT } from "../lib/i18n";
-import type { MlSuggestion } from "../lib/people";
+import type { FaceBox, MlSuggestion } from "../lib/people";
 import { HideIcon, MergeIcon, PencilIcon } from "./icons";
-import { EntryGrid, type LibraryEntry } from "./Library";
+import { EntryGrid, FaceCover, type LibraryEntry } from "./Library";
+
+/** One face cut out of its photo: what the index means by this person, even on a photo of many. */
+export type FaceTile = { uid: string; box: FaceBox | null };
+
+function FaceSquare({
+  face,
+  thumb,
+  hd,
+  title,
+  onClick,
+}: {
+  face: FaceTile;
+  thumb: string | null | undefined;
+  hd?: boolean;
+  title?: string;
+  onClick?: () => void;
+}) {
+  return (
+    <button className="pp-face" disabled={!onClick} onClick={onClick} title={title}>
+      {thumb ? (
+        face.box ? (
+          <span className="lib-facebox">
+            <FaceCover uid={face.uid} thumb={thumb} box={face.box} hd={hd} />
+          </span>
+        ) : (
+          <img src={thumb} alt="" draggable={false} />
+        )
+      ) : null}
+    </button>
+  );
+}
+
+/** A person's faces, each cut out of its photo, in a row above their photos. */
+export function FaceStrip({ faces, onOpen }: { faces: FaceTile[]; onOpen: (uid: string) => void }) {
+  const t = useT();
+  const shown = useMemo(() => faces.slice(0, 80), [faces]);
+  const thumbs = useThumbnails(useMemo(() => [...new Set(shown.map((f) => f.uid))], [shown]));
+  if (faces.length === 0) return null;
+  return (
+    <section className="pp-strip">
+      <h3 className="pp-strip-title">{t("people.faces", { count: faces.length })}</h3>
+      <div className="pp-strip-row">
+        {shown.map((f, i) => (
+          <FaceSquare key={`${f.uid}:${i}`} face={f} thumb={thumbs[f.uid]} hd={false} onClick={() => onOpen(f.uid)} />
+        ))}
+      </div>
+    </section>
+  );
+}
 import "../styles/AlbumDialogs.css";
 import "../styles/People.css";
 
@@ -125,6 +174,7 @@ export function PersonNameDialog({
 export function SuggestionCard({
   suggestion,
   uids,
+  faces,
   busy,
   onAnswer,
   onOpen,
@@ -132,22 +182,22 @@ export function SuggestionCard({
   suggestion: MlSuggestion;
   /** The group's photos as timeline uids. */
   uids: string[];
+  /** The group's faces, one per photo, cut out of it: the face the question is about. */
+  faces: FaceTile[];
   busy?: boolean;
   onAnswer: (yes: boolean) => void;
   /** Opens the group's photos in full, to look before answering. */
   onOpen?: () => void;
 }) {
   const t = useT();
-  const shown = useMemo(() => uids.slice(0, 6), [uids]);
-  const thumbs = useThumbnails(shown);
+  const shown = useMemo(() => faces.slice(0, 6), [faces]);
+  const thumbs = useThumbnails(useMemo(() => shown.map((f) => f.uid), [shown]));
   const see = t(uids.length === 1 ? "people.suggestSee.one" : "people.suggestSee.other", { count: uids.length });
   return (
     <div className="pp-suggest">
       <div className="pp-suggest-thumbs">
-        {shown.map((uid) => (
-          <button key={uid} className="pp-suggest-thumb" disabled={!onOpen} onClick={onOpen} title={onOpen ? see : undefined}>
-            {thumbs[uid] ? <img src={thumbs[uid]!} alt="" draggable={false} /> : null}
-          </button>
+        {shown.map((f) => (
+          <FaceSquare key={f.uid} face={f} thumb={thumbs[f.uid]} onClick={onOpen} title={onOpen ? see : undefined} />
         ))}
       </div>
       <div className="pp-suggest-text">{t("people.suggestQuestion", { name: suggestion.name })}</div>
@@ -181,7 +231,7 @@ export function PeopleLibrary({
 }: {
   named: LibraryEntry[];
   groups: LibraryEntry[];
-  suggestions: { suggestion: MlSuggestion; uids: string[] }[];
+  suggestions: { suggestion: MlSuggestion; uids: string[]; faces: FaceTile[] }[];
   cardSize: number;
   busy?: boolean;
   onOpen: (entry: LibraryEntry) => void;
@@ -196,7 +246,7 @@ export function PeopleLibrary({
           <h2 className="pp-heading">{t("people.suggestions")}</h2>
           <div className="pp-suggest-row">
             {suggestions.slice(0, 4).map((s) => (
-              <SuggestionCard key={`${s.suggestion.group}:${s.suggestion.name}`} suggestion={s.suggestion} uids={s.uids} busy={busy} onAnswer={(yes) => onAnswer(s.suggestion, yes)} onOpen={() => onOpenSuggestion(s.suggestion)} />
+              <SuggestionCard key={`${s.suggestion.group}:${s.suggestion.name}`} suggestion={s.suggestion} uids={s.uids} faces={s.faces} busy={busy} onAnswer={(yes) => onAnswer(s.suggestion, yes)} onOpen={() => onOpenSuggestion(s.suggestion)} />
             ))}
           </div>
         </section>

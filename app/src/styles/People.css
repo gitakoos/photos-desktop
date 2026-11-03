@@ -68,7 +68,9 @@
   grid-template-columns: repeat(3, 1fr);
   gap: 4px;
 }
-.pp-suggest-thumb {
+/* One face cut out of its photo: a square, the face centred in it. */
+.pp-face {
+  position: relative;
   aspect-ratio: 1;
   width: 100%;
   padding: 0;
@@ -78,18 +80,40 @@
   background: var(--surface-2);
   cursor: zoom-in;
 }
-.pp-suggest-thumb:disabled {
+.pp-face:disabled {
   cursor: default;
 }
-.pp-suggest-thumb img {
+.pp-face > img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: transform 0.15s ease;
 }
-.pp-suggest-thumb:not(:disabled):hover img {
-  transform: scale(1.05);
+.pp-face:not(:disabled):hover {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* A person's faces above their photos. */
+.pp-strip {
+  margin: 0 0 16px;
+}
+.pp-strip-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+.pp-strip-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+.pp-strip-row .pp-face {
+  flex: 0 0 72px;
+  width: 72px;
+  border-radius: 50%;
 }
 .pp-suggest-see {
   margin-right: auto;

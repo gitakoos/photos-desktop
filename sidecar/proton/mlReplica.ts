@@ -97,9 +97,12 @@ export type Person = {
   /** The photos they are on, face or hand-added. */
   keys: string[];
   cover: { key: string; box: [number, number, number, number] | null } | null;
+  /** Where each of `faces` sits in its photo, in the same order, so a page can show the face
+   *  itself rather than a whole photo that may hold several. Filled by `view`. */
+  boxes?: Box[];
 };
 
-export type Suggestion = { name: string; group: string; score: number; faces: string[] };
+export type Suggestion = { name: string; group: string; score: number; faces: string[]; boxes?: Box[] };
 
 export type ReplicaView = {
   people: Person[];
@@ -241,7 +244,22 @@ export class Replica {
   /** The people, the groups to name and the suggestions, as the pages show them. */
   view(): ReplicaView {
     const m = this.merged();
-    return { people: m.people, suggestions: m.suggestions, scanned: m.markers.size, searchable: m.searchKeys };
+    return {
+      people: m.people.map((p) => ({ ...p, boxes: this.boxesOf(p.faces) })),
+      suggestions: m.suggestions.map((s) => ({ ...s, boxes: this.boxesOf(s.faces) })),
+      scanned: m.markers.size,
+      searchable: m.searchKeys,
+    };
+  }
+
+  /** The boxes of some faces, to four places: enough to cut a face out of its photo. */
+  private boxesOf(ids: string[]): Box[] {
+    const faces = this.merged().faces;
+    const r = (v: number) => Math.round(v * 1e4) / 1e4;
+    return ids.map((id) => {
+      const b = faces.get(id)?.box ?? [0, 0, 1, 1];
+      return [r(b[0]), r(b[1]), r(b[2]), r(b[3])];
+    });
   }
 
   /** The faces behind some face ids, for an edit to name. */
@@ -276,7 +294,10 @@ export class Replica {
       const score = dot(mine, centroid(faces.map((id) => m.faces.get(id)!.embedding)));
       if (score >= 0.45) out.push({ name, group: g.id, score, faces });
     }
-    return out.sort((a, b) => b.score - a.score).slice(0, limit);
+    return out
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((s) => ({ ...s, boxes: this.boxesOf(s.faces) }));
   }
 
   /** Whether `name` was renamed away and now stands for another name. */
