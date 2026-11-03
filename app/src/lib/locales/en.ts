@@ -60,6 +60,8 @@ export const en: Record<string, string> = {
   "library.emptyPeople": "No named people in the saved copies.",
   "library.emptyLabels": "No labels in the saved copies.",
   "people.unnamed": "Add a name",
+  "viewer.showFaces": "Show the people on this photo",
+  "viewer.hideFaces": "Hide the people on this photo",
   "people.toName": "Name these people",
   "people.toNameDesc": "Faces that appear in more than one photo. Give each a name to keep them together.",
   "people.suggestions": "Is this the same person?",

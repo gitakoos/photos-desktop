@@ -809,6 +809,11 @@ export class ProtonSession {
     return this.ml.edit(req);
   }
 
+  mlPhotoFaces(uid: string) {
+    if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
+    return this.ml.photoFaces(uid.slice(uid.indexOf("~") + 1));
+  }
+
   mlSuggestions(name: string) {
     if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
     return this.ml.suggestionsFor(name);

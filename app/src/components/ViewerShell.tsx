@@ -24,7 +24,7 @@ import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNo
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setLightboxOpen } from "../lib/lightboxSignal";
 import { formatBytes } from "../lib/format";
-import { MIN_SCALE, PhotoViewer, ZOOM_STEP, type ZoomApi, type ZoomState } from "./PhotoViewer";
+import { MIN_SCALE, PhotoViewer, ZOOM_STEP, type FaceTag, type ZoomApi, type ZoomState } from "./PhotoViewer";
 import { ViewerContents, ViewerFilmstrip } from "./ViewerFilmstrip";
 import { VideoControls } from "./VideoControls";
 import { WindowButtons } from "./Titlebar";
@@ -143,6 +143,8 @@ type Props = {
   onContextMenu?: (e: MouseEvent) => void;
   /** Dialogs and notices that belong over the whole viewer. */
   children?: ReactNode;
+  /** The faces on the photo, tagged over it. */
+  faceTags?: FaceTag[];
 };
 
 /**
@@ -180,6 +182,7 @@ export function ViewerShell({
   onVideoError,
   onContextMenu,
   children,
+  faceTags,
 }: Props) {
   const t = useT();
   // One side panel at a time, beside the picture: the details or the list of everything
@@ -490,7 +493,7 @@ export function ViewerShell({
             {stage.detail && <p className="lbx-stage-msg-detail">{stage.detail}</p>}
           </div>
         ) : (
-          <PhotoViewer src={stage.src} loading={stage.loading} photoKey={itemKey} apiRef={zoomApi} onZoom={onZoom} />
+          <PhotoViewer src={stage.src} loading={stage.loading} photoKey={itemKey} apiRef={zoomApi} onZoom={onZoom} faceTags={faceTags} />
         )}
 
         {hasNext && (

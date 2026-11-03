@@ -32,7 +32,7 @@ import { join } from "node:path";
 
 import { addressKeys, loadFullCopies, saveMlCopy, sealEnvelope, type CopyCache } from "./driveData.ts";
 import { Analyzer, indexModelsStatus, startIndexModelsDownload, type ModelsStatus } from "./mlIndexer.ts";
-import { Replica, type Op, type ReplicaView, type Seen, type Suggestion } from "./mlReplica.ts";
+import { Replica, type Op, type PhotoFace, type ReplicaView, type Seen, type Suggestion } from "./mlReplica.ts";
 import { parseFacesSnapshot, parseSearchSnapshot, writeFacesSnapshot, writeSearchSnapshot } from "./mlSnapshot.ts";
 import { SEARCH_MODEL_ID } from "./semantic.ts";
 import { ML_DIR, isReady, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
@@ -74,7 +74,8 @@ export type EditRequest =
   | { action: "setCover"; name: string; key: string }
   | { action: "hide"; person: string }
   | { action: "acceptSuggestion"; group: string; name: string }
-  | { action: "dismissSuggestion"; group: string; name: string };
+  | { action: "dismissSuggestion"; group: string; name: string }
+  | { action: "nameFaces"; faces: string[]; name: string };
 
 export type MlDeps = {
   myFiles: () => any;
@@ -272,6 +273,12 @@ export class MlService {
     return { ...r.view(), names: r.names() };
   }
 
+  /** The faces on one photo, by its link id, for the viewer's tags. */
+  async photoFaces(key: string): Promise<PhotoFace[]> {
+    const r = await this.ready();
+    return r.photoFaces(key);
+  }
+
   async suggestionsFor(name: string): Promise<Suggestion[]> {
     const r = await this.ready();
     return r.suggestionsFor(name);
@@ -295,7 +302,10 @@ export class MlService {
     if ("person" in req && !person) throw new Error("That person is gone");
     const ops: Op[] = [];
     // A name that was renamed away is free again once someone is given it on purpose.
-    const target = req.action === "name" || req.action === "movePhotos" || req.action === "addPhotos" ? name : null;
+    const target =
+      req.action === "name" || req.action === "movePhotos" || req.action === "addPhotos" || req.action === "nameFaces"
+        ? name
+        : null;
     if (target && r.isAliased(target)) ops.push({ t, kind: "alias", from: target, to: target });
     switch (req.action) {
       case "name":
@@ -343,6 +353,10 @@ export class MlService {
           ops.push({ t, kind: "manual", keys: person!.keys, name: person!.name, on: false });
           ops.push({ t, kind: "cover", name: person!.name, key: null });
         }
+        break;
+      case "nameFaces":
+        // A face named from the viewer, on its own or out of whatever group it was in.
+        ops.push({ t, kind: "confirm", faces: r.refs(req.faces), name });
         break;
       case "acceptSuggestion":
       case "dismissSuggestion": {

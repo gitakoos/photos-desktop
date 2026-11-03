@@ -102,6 +102,9 @@ export type Person = {
   boxes?: Box[];
 };
 
+/** One face on a photo, for the viewer: its id, box, and who it is if anyone. */
+export type PhotoFace = { face: string; box: Box; person: string | null; name: string | null };
+
 export type Suggestion = { name: string; group: string; score: number; faces: string[]; boxes?: Box[] };
 
 export type ReplicaView = {
@@ -303,6 +306,30 @@ export class Replica {
   /** Whether `name` was renamed away and now stands for another name. */
   isAliased(name: string): boolean {
     return aliasResolver(this.ops)(name, Infinity) !== name;
+  }
+
+  /**
+   * The faces found on one photo, as the viewer tags them: each with its box and the person
+   * it belongs to, a named one, a group shown on the People page, or none for a face left
+   * on its own. Faces removed from People are left out.
+   */
+  photoFaces(key: string): PhotoFace[] {
+    const m = this.merged();
+    const shown = new Set(m.people.map((p) => p.id));
+    const groupOf = new Map<string, { id: string; name: string | null }>();
+    for (const g of m.groups) for (const id of g.faces) groupOf.set(id, g);
+    return [...m.faces.values()]
+      .filter((f) => f.key === key && m.identity.get(f.id)?.kind !== "rejected")
+      .sort((a, b) => a.box[0] - b.box[0])
+      .map((f) => {
+        const g = groupOf.get(f.id);
+        return {
+          face: f.id,
+          box: f.box,
+          person: g && shown.has(g.id) ? g.id : null,
+          name: g?.name ?? null,
+        };
+      });
   }
 
   /** Every name in use, for the pickers. */

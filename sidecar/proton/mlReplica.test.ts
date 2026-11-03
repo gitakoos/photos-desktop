@@ -261,3 +261,23 @@ describe("reusing the grouping across edits", () => {
     expect(warm.clusterCache).toBe(before);
   });
 });
+
+describe("the faces on one photo", () => {
+  it("tags each face with its own person, and names a lone face from the viewer", () => {
+    const r = replica();
+    // p1 holds two people: Ana on the left, a stranger on the right.
+    const right = (f: SnapFace): SnapFace => ({ ...f, box: [0.6, 0.1, 0.8, 0.4] });
+    r.setCopies([phone(1000, [
+      face("p1", 0, 1, { confirmed: "Ana" }), right(face("p1", 1, 7)),
+      face("p2", 0, 1, { confirmed: "Ana" }),
+    ])], []);
+    const tags = r.photoFaces("p1");
+    expect(tags.map((f) => [f.face, f.name, f.person])).toEqual([
+      ["p1#0", "Ana", "n:Ana"],
+      ["p1#1", null, null],
+    ]);
+    r.apply({ t: r.clock(), kind: "confirm", faces: r.refs(["p1#1"]), name: "Bia" });
+    expect(r.photoFaces("p1").map((f) => f.name)).toEqual(["Ana", "Bia"]);
+    expect(r.person("n:Bia")!.keys).toEqual(["p1"]);
+  });
+});

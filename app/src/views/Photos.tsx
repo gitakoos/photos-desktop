@@ -424,6 +424,8 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const [personDialog, setPersonDialog] = useState<"name" | "merge" | "move" | "add" | null>(null);
   const [confirmHide, setConfirmHide] = useState(false);
   const [personSuggestion, setPersonSuggestion] = useState<MlSuggestion | null>(null);
+  // A face picked in the viewer to be named.
+  const [faceToName, setFaceToName] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Escape belongs to the lightbox while it is open.
   const sel = useSelection(scrollRef, lightboxIdx === null);
@@ -3782,6 +3784,34 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           onEdited={bumpReload}
           isFavorite={!!current.tags?.includes(TAG.Favorite)}
           onFavoriteChanged={handleFavoriteChanged}
+          people={
+            settings.driveFaces && ml
+              ? {
+                  version: ml,
+                  onOpenPerson: (id) => {
+                    const p = ml.people.find((x) => x.id === id);
+                    if (!p) return;
+                    setLightboxIdx(null);
+                    openFiltered({ name: p.name ?? t("people.unnamed"), uids: new Set(personUids(p.keys, byLinkId)), back: "people", person: p.id });
+                  },
+                  onNameFace: setFaceToName,
+                }
+              : undefined
+          }
+        />
+      )}
+
+      {/* Over the viewer, which is where a face is picked to be named. */}
+      {faceToName && ml && (
+        <PersonNameDialog
+          title={t("people.nameTitle")}
+          confirmLabel={t("people.save")}
+          names={ml.names}
+          busy={mlBusy}
+          onCancel={() => setFaceToName(null)}
+          onConfirm={(name) =>
+            void runEdit({ action: "nameFaces", faces: [faceToName], name }).then((ok) => ok && setFaceToName(null))
+          }
         />
       )}
 

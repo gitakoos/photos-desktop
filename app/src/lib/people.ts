@@ -56,7 +56,11 @@ export type MlEdit =
   | { action: "setCover"; name: string; key: string }
   | { action: "hide"; person: string }
   | { action: "acceptSuggestion"; group: string; name: string }
-  | { action: "dismissSuggestion"; group: string; name: string };
+  | { action: "dismissSuggestion"; group: string; name: string }
+  | { action: "nameFaces"; faces: string[]; name: string };
+
+/** One face on a photo, for the viewer: who it is (a person id and name), if anyone. */
+export type PhotoFace = { face: string; box: FaceBox; person: string | null; name: string | null };
 
 export type IndexStatus = {
   running: boolean;
@@ -83,6 +87,7 @@ export type SyncStatus = {
 export const loadPeople = () => rpc<MlView>("mlView");
 export const editPeople = (edit: MlEdit) => rpc<MlView>("mlEdit", edit as unknown as Record<string, unknown>);
 export const suggestionsFor = (name: string) => rpc<MlSuggestion[]>("mlSuggestions", { name });
+export const photoFaces = (uid: string) => rpc<PhotoFace[]>("mlPhotoFaces", { uid });
 
 /** The person's photo keys as timeline uids, newest first, through the library's link-id map. */
 export function personUids<T extends { uid: string; captureTime: number }>(keys: string[], byLink: Map<string, T>): string[] {

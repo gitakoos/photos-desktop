@@ -113,3 +113,52 @@
     transform: rotate(360deg);
   }
 }
+
+/* The face tags: a ring on each face and its name under it, kept in place through zoom and
+   pan, easing with the photo as it eases. */
+.pv-tags {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.pv-face,
+.pv-tag {
+  position: absolute;
+  transition: left 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), top 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
+    width 0.22s cubic-bezier(0.2, 0.8, 0.2, 1), height 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.pv-tags.moving .pv-face,
+.pv-tags.moving .pv-tag {
+  transition: none;
+}
+.pv-face {
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.pv-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(20, 20, 24, 0.82);
+  color: #fff;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.pv-tag.add {
+  padding: 0;
+  width: 26px;
+}
+.pv-tag:hover {
+  background: var(--accent);
+}

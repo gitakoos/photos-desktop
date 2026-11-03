@@ -35,8 +35,11 @@ import { ShareDialog } from "./ShareDialog";
 import { AlbumPicker } from "./AlbumDialogs";
 import { ContextMenu, type MenuAction } from "./ContextMenu";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
+import { FaceCover } from "./Library";
+import { photoFaces, type PhotoFace } from "../lib/people";
 import {
   CloudIcon,
+  FaceIcon,
   DownloadIcon,
   FolderOpenIcon,
   HeartIcon,
@@ -113,7 +116,26 @@ type Props = {
   items?: CloudItem[];
   index?: number;
   onJump?: (i: number) => void;
+  /**
+   * The People index, when it is on: the faces on each photo are tagged over it and listed in
+   * the details. `version` changes whenever the index does, so the tags are read again.
+   */
+  people?: {
+    version: unknown;
+    onOpenPerson: (person: string) => void;
+    onNameFace: (face: string) => void;
+  };
 };
+
+/** Whether the face tags are drawn over the photo: the viewer's own switch, remembered. */
+const FACE_TAGS_KEY = "pfp.viewer.faceTags";
+function readFaceTagsOn(): boolean {
+  try {
+    return localStorage.getItem(FACE_TAGS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
 
 /**
  * How long a photo has to be the one on screen before the calls that are not its
@@ -166,8 +188,36 @@ export function Lightbox({
   items,
   index = -1,
   onJump,
+  people,
 }: Props) {
   const t = useT();
+  // The faces on this photo, tagged with the photo they belong to, read once it settles.
+  const [faces, setFaces] = useState<{ uid: string; list: PhotoFace[] } | null>(null);
+  const [tagsOn, setTagsOn] = useState(readFaceTagsOn);
+  const peopleOn = !!people;
+  useEffect(() => {
+    if (!peopleOn) return;
+    let live = true;
+    const timer = window.setTimeout(() => {
+      photoFaces(uid).then((list) => live && setFaces({ uid, list }), () => live && setFaces({ uid, list: [] }));
+    }, SETTLE_MS);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [uid, peopleOn, people?.version]);
+  const photoFaceList = faces?.uid === uid ? faces.list : [];
+  const openFace = (f: PhotoFace) => (f.person ? people?.onOpenPerson(f.person) : people?.onNameFace(f.face));
+  const toggleTags = () => {
+    setTagsOn((on) => {
+      try {
+        localStorage.setItem(FACE_TAGS_KEY, on ? "0" : "1");
+      } catch {
+        /* the switch holds for this run only */
+      }
+      return !on;
+    });
+  };
   const neighbours = useCloudMedia(items, index, onJump);
   // Both carry the photo they belong to. A uid change re-renders before the effect
   // below can clear them, so an untagged value would spend that render paired with the
@@ -597,8 +647,23 @@ export function Lightbox({
         else if (e.key.toLowerCase() === "s") setSharing(true);
       }}
       fileSize={details?.size ?? null}
+      faceTags={
+        tagsOn
+          ? photoFaceList.map((f) => ({ key: f.face, box: f.box, name: f.name, onClick: () => openFace(f) }))
+          : undefined
+      }
       toolbar={
         <>
+          {photoFaceList.length > 0 && (
+            <button
+              className={`lbx-ibtn ${tagsOn ? "sel" : ""}`}
+              onClick={toggleTags}
+              title={t(tagsOn ? "viewer.hideFaces" : "viewer.showFaces")}
+              aria-label={t(tagsOn ? "viewer.hideFaces" : "viewer.showFaces")}
+            >
+              <FaceIcon size={17} />
+            </button>
+          )}
           {/* Edit first and named, as in Windows Photos; the rest are icons named in their
               tooltips. Favourite colours in when held, as a state. */}
           {canEdit && (
@@ -671,6 +736,27 @@ export function Lightbox({
           <p className="lbx-dim">{t("common.loading")}</p>
         ) : (
           <dl>
+            {photoFaceList.length > 0 && (
+              <>
+                <dt>{t("library.people")}</dt>
+                <dd>
+                  <div className="lbx-people">
+                    {photoFaceList.map((f) => (
+                      <button key={f.face} className={`lbx-person${f.name ? "" : " unnamed"}`} onClick={() => openFace(f)}>
+                        <span className="lbx-person-face">
+                          {(preview?.uid === uid ? preview.url : null) ?? fallbackUrl ? (
+                            <span className="lib-facebox">
+                              <FaceCover uid={uid} thumb={((preview?.uid === uid ? preview.url : null) ?? fallbackUrl)!} box={f.box} />
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="lbx-person-name">{f.name ?? t("people.unnamed")}</span>
+                      </button>
+                    ))}
+                  </div>
+                </dd>
+              </>
+            )}
             <dt>{t("viewer.name")}</dt>
             <dd>{details.name || "—"}</dd>
             <dt>{t("viewer.type")}</dt>

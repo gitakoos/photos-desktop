@@ -107,6 +107,8 @@ function editRequest(p: any): EditRequest {
     case "acceptSuggestion":
     case "dismissSuggestion":
       return { action: p.action, group: str(p.group), name: str(p.name) };
+    case "nameFaces":
+      return { action: "nameFaces", faces: keys(p.faces), name: str(p.name) };
     default:
       throw new Error("Unknown edit");
   }
@@ -241,6 +243,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   mlView: () => session.mlView(),
   mlEdit: (p) => session.mlEdit(editRequest(p)),
   mlSuggestions: (p) => session.mlSuggestions(String(p?.name ?? "")),
+  mlPhotoFaces: (p) => session.mlPhotoFaces(String(p?.uid ?? "")),
   mlRefresh: () => session.mlRefresh(),
   mlSync: () => session.mlSync(),
   mlSaveNow: () => session.mlSaveNow(),
