@@ -26,6 +26,7 @@ import {
   floatToHalf,
   parseFacesSnapshot,
   parseSearchSnapshot,
+  withoutSaveTime,
   writeFacesSnapshot,
   writeSearchSnapshot,
   type FacesSnap,
@@ -104,5 +105,18 @@ describe("search snapshot", () => {
     expect(floatToHalf(0)).toBe(0);
     // 1 + 2^-11 is exactly halfway between two halves: it rounds to the even one.
     expect(floatToHalf(1 + 2 ** -11)).toBe(0x3c00);
+  });
+});
+
+describe("telling two saves of one index apart", () => {
+  it("reads the same with the save time blanked, and differently once anything else changes", () => {
+    const a = writeFacesSnapshot({ ...snap(), createdAt: 1 });
+    const b = writeFacesSnapshot({ ...snap(), createdAt: 999_999 });
+    expect(a.equals(b)).toBe(false);
+    expect(withoutSaveTime(a).equals(withoutSaveTime(b))).toBe(true);
+    const c = writeFacesSnapshot({ ...snap(), createdAt: 1, covers: [] });
+    expect(withoutSaveTime(a).equals(withoutSaveTime(c))).toBe(false);
+    // The original is left as it was.
+    expect(parseFacesSnapshot(a).createdAt).toBe(1);
   });
 });

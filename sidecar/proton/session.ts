@@ -424,6 +424,8 @@ export class ProtonSession {
   private driveCollections: { kinds: string; run: Promise<DriveReply> } | null = null;
   /** The search copies the last read brought, in the text encoder's space. */
   private searchCopies: SearchSnapshot[] = [];
+  /** The merged search vectors packed for ranking, kept while the index stays the same. */
+  private searchPack: { from: Map<string, Uint16Array | null>; copy: { keys: string[]; vectors: Uint16Array } } | null = null;
   /** The desktop's own face and search index, merged with every device's copy. */
   private ml = new MlService({
     myFiles: () => this.myFilesClient(),
@@ -638,8 +640,13 @@ export class ProtonSession {
     }
     if (!mailboxPassword) return { status: "mailbox", error: "wrong password" };
     this.mailboxPassword = mailboxPassword;
-    const result = await this.finishFreshLogin();
-    this.mailboxPassword = "";
+    let result: LoginResult;
+    try {
+      result = await this.finishFreshLogin();
+    } finally {
+      // Dropped whatever happened, a throw included: it must not outlive the attempt.
+      this.mailboxPassword = "";
+    }
     if (result.status === "error" && result.error === KEYS_LOCKED) {
       return { status: "mailbox", error: "wrong password" };
     }
@@ -780,14 +787,21 @@ export class ProtonSession {
     let copies = this.searchCopies;
     try {
       const merged = await this.ml.searchVectors();
-      const keys: string[] = [];
-      const vectors = new Uint16Array([...merged.values()].filter((v) => v).length * 512);
-      for (const [key, v] of merged) {
-        if (!v) continue;
-        vectors.set(v, keys.length * 512);
-        keys.push(key);
+      // Packed once per state of the index, not once per query: the map is the same object
+      // until the index changes, and packing a large library is tens of megabytes.
+      if (this.searchPack?.from !== merged) {
+        const keys: string[] = [];
+        let count = 0;
+        for (const v of merged.values()) if (v) count++;
+        const vectors = new Uint16Array(count * 512);
+        for (const [key, v] of merged) {
+          if (!v) continue;
+          vectors.set(v, keys.length * 512);
+          keys.push(key);
+        }
+        this.searchPack = { from: merged, copy: { keys, vectors } };
       }
-      if (keys.length > 0) copies = [{ keys, vectors }] as any;
+      if (this.searchPack.copy.keys.length > 0) copies = [this.searchPack.copy] as any;
     } catch {
       /* the phone's copies, as read */
     }
@@ -999,6 +1013,7 @@ export class ProtonSession {
     this.driveCollections = null;
     this.searchCopies = [];
     this.ml.reset();
+    this.searchPack = null;
     this.email = "";
     this.password = "";
     this.keyPassword = "";

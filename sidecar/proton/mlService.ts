@@ -33,7 +33,7 @@ import { join } from "node:path";
 import { addressKeys, loadFullCopies, saveMlCopy, sealEnvelope, type CopyCache } from "./driveData.ts";
 import { Analyzer, indexModelsStatus, startIndexModelsDownload, type ModelsStatus } from "./mlIndexer.ts";
 import { Replica, type Op, type PhotoFace, type ReplicaView, type Seen, type Suggestion } from "./mlReplica.ts";
-import { parseFacesSnapshot, parseSearchSnapshot, writeFacesSnapshot, writeSearchSnapshot } from "./mlSnapshot.ts";
+import { parseFacesSnapshot, parseSearchSnapshot, withoutSaveTime, writeFacesSnapshot, writeSearchSnapshot } from "./mlSnapshot.ts";
 import { SEARCH_MODEL_ID } from "./semantic.ts";
 import { ML_DIR, isReady, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
 
@@ -168,7 +168,17 @@ export class MlService {
     return this.replica!;
   }
 
+  /**
+   * Whether `r` is still the replica of the session that is signed in. A lock or a sign-out
+   * drops it, and work begun before that (a scan, a read of Drive, a save) must then leave
+   * the disk and Drive alone: the store and the account may already be someone else's.
+   */
+  private current(r: Replica): boolean {
+    return this.replica === r;
+  }
+
   private persistScans(r: Replica): void {
+    if (!this.current(r)) return;
     mkdirSync(this.dir(), { recursive: true });
     writeSealedAtomic(this.file("local-faces.bin"), writeFacesSnapshot(r.local));
     writeSealedAtomic(this.file("local-search.bin"), writeSearchSnapshot(r.localSearch));
@@ -184,6 +194,7 @@ export class MlService {
       const { copies, unreadable } = await loadFullCopies(this.deps.myFiles(), this.deps.account(), this.deps.copyCache());
       const faces = copies.flatMap((c) => (c.kind === "faces" ? [c.snap] : []));
       const search = copies.flatMap((c) => (c.kind === "search" ? [c.snap] : []));
+      if (!this.current(r)) return;
       r.setCopies(faces, search);
       this.writeJson("seen.json", r.seen);
       this.sync.unreadable = unreadable;
@@ -221,6 +232,7 @@ export class MlService {
   }
 
   private async save(r: Replica): Promise<void> {
+    if (!this.current(r)) return;
     if (this.sync.saving) {
       this.scheduleSave(r);
       return;
@@ -231,10 +243,12 @@ export class MlService {
       this.sync.pending = false;
       return;
     }
-    const facesPlain = writeFacesSnapshot(r.exportFaces(0));
-    const searchPlain = writeSearchSnapshot(r.exportSearch(0));
-    // Hashed with the save time left out, so an unchanged index is not saved again.
-    const hash = createHash("sha256").update(facesPlain).update(searchPlain).digest("hex");
+    // Each copy is written once; the hash that tells an unchanged index from a changed one
+    // reads it with the save time blanked, so saving again with nothing new uploads nothing.
+    const now = Date.now();
+    const facesPlain = writeFacesSnapshot(r.exportFaces(now));
+    const searchPlain = writeSearchSnapshot(r.exportSearch(now));
+    const hash = createHash("sha256").update(withoutSaveTime(facesPlain)).update(withoutSaveTime(searchPlain)).digest("hex");
     const last = this.readJson<{ at: number; hash: string }>("saved.json");
     if (last?.hash === hash) {
       this.sync.pending = false;
@@ -245,10 +259,9 @@ export class MlService {
     try {
       const keys = await addressKeys(this.deps.account());
       if (keys.length === 0) throw new Error("no address key");
-      const now = Date.now();
       const client = this.deps.myFiles();
-      await saveMlCopy(client, `faces-${r.deviceId}.pfpml`, await sealEnvelope(writeFacesSnapshot(r.exportFaces(now)), keys[0], keys[0]));
-      await saveMlCopy(client, `search-${r.deviceId}.pfpml`, await sealEnvelope(writeSearchSnapshot(r.exportSearch(now)), keys[0], keys[0]));
+      await saveMlCopy(client, `faces-${r.deviceId}.pfpml`, await sealEnvelope(facesPlain, keys[0], keys[0]));
+      await saveMlCopy(client, `search-${r.deviceId}.pfpml`, await sealEnvelope(searchPlain, keys[0], keys[0]));
       this.writeJson("saved.json", { at: now, hash });
       this.sync.savedAt = now;
       this.sync.pending = false;
@@ -436,10 +449,10 @@ export class MlService {
     let sincePersist = 0;
     try {
       const BATCH = 8;
-      for (let at = 0; at < todo.length && !this.cancel; at += BATCH) {
+      for (let at = 0; at < todo.length && !this.cancel && this.current(r); at += BATCH) {
         const batch = todo.slice(at, at + BATCH).map((it) => it.uid);
         for await (const { uid, bytes } of this.deps.previews(batch)) {
-          if (this.cancel) break;
+          if (this.cancel || !this.current(r)) break;
           const key = linkOf(uid);
           try {
             if (!bytes) throw new Error("no preview");

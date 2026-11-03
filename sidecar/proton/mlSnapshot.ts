@@ -503,3 +503,20 @@ export function toHalves(vector: Float32Array): Uint16Array {
   for (let i = 0; i < vector.length; i++) out[i] = floatToHalf(vector[i]);
   return out;
 }
+
+/**
+ * `plain` (a snapshot) with its save time zeroed: what two saves of the same index share,
+ * byte for byte, whenever they were made. The time sits after the magic, the version, the
+ * kind and the two length-prefixed device strings.
+ */
+export function withoutSaveTime(plain: Buffer): Buffer {
+  let at = MAGIC.length + 4 + 1;
+  for (let i = 0; i < 2; i++) {
+    if (at + 2 > plain.length) return plain;
+    at += 2 + plain.readUInt16LE(at);
+  }
+  if (at + 8 > plain.length) return plain;
+  const out = Buffer.from(plain);
+  out.fill(0, at, at + 8);
+  return out;
+}

@@ -335,18 +335,23 @@ export class Replica {
    */
   photoFaces(key: string): PhotoFace[] {
     const m = this.merged();
-    const shown = new Set(m.people.map((p) => p.id));
-    const groupOf = new Map<string, { id: string; name: string | null }>();
-    for (const g of m.groups) for (const id of g.faces) groupOf.set(id, g);
-    return [...m.faces.values()]
-      .filter((f) => f.key === key && m.identity.get(f.id)?.kind !== "rejected")
+    // Indexed once per merge, not per photo: the viewer asks for every photo it settles on.
+    if (!m.photoIndex) {
+      const shown = new Set(m.people.map((p) => p.id));
+      const groupOf = new Map<string, { id: string; name: string | null; shown: boolean }>();
+      for (const g of m.groups) for (const id of g.faces) groupOf.set(id, { ...g, shown: shown.has(g.id) });
+      m.photoIndex = { groupOf };
+    }
+    const { groupOf } = m.photoIndex;
+    return (m.byKey.get(key) ?? [])
+      .filter((f) => m.identity.get(f.id)?.kind !== "rejected")
       .sort((a, b) => a.box[0] - b.box[0])
       .map((f) => {
         const g = groupOf.get(f.id);
         return {
           face: f.id,
           box: f.box,
-          person: g && shown.has(g.id) ? g.id : null,
+          person: g?.shown ? g.id : null,
           name: g?.name ?? null,
         };
       });
@@ -434,6 +439,10 @@ type Merged = {
   search: Map<string, Uint16Array | null>;
   searchKeys: number;
   groups: { id: string; name: string | null; faces: string[] }[];
+  /** The kept faces of each photo. */
+  byKey: Map<string, Face[]>;
+  /** Built the first time a photo's faces are asked for. */
+  photoIndex?: { groupOf: Map<string, { id: string; name: string | null; shown: boolean }> };
   people: Person[];
   suggestions: Suggestion[];
 };
@@ -816,7 +825,7 @@ function merge(r: Replica): Merged {
 
   return {
     faces, markers, identity: identityOut, blocked: blockedOut, manual: manualOut, covers: coversOut,
-    search, searchKeys, groups, people, suggestions,
+    search, searchKeys, groups, people, suggestions, byKey,
   };
 }
 

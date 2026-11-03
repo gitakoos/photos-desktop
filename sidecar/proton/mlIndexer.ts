@@ -32,6 +32,8 @@
 // find the faces, an alignment onto the ArcFace template and GhostFaceNet to tell them apart.
 // Each photo is read from its HD preview, the picture the viewer shows, never the original.
 
+import { availableParallelism } from "node:os";
+
 import { faceDetectorModel } from "./faces.ts";
 import { MIN_SHARPNESS, rgbSharpness } from "./faceCluster.ts";
 import { toHalves } from "./mlSnapshot.ts";
@@ -210,7 +212,16 @@ export class Analyzer {
     if (!(await clipImage.intact()) || !(await faceDetectorModel.intact()) || !(await embedder.intact())) return false;
     this.ort = await import("onnxruntime-node");
     this.sharp = (await import("sharp")).default;
-    const opts = (level: string) => ({ graphOptimizationLevel: level, executionProviders: ["cpu"], logSeverityLevel: 3 });
+    // Half the cores: a scan of the whole library runs for minutes, and taking every core
+    // for it would leave the window, the thumbnails and the rest of the PC to stutter.
+    const threads = Math.max(1, Math.floor(availableParallelism() / 2));
+    const opts = (level: string) => ({
+      graphOptimizationLevel: level,
+      executionProviders: ["cpu"],
+      logSeverityLevel: 3,
+      intraOpNumThreads: threads,
+      interOpNumThreads: 1,
+    });
     // Basic optimisation for CLIP, as on the phone: the extended fusions are not what it was checked under.
     this.clip = await this.ort.InferenceSession.create(clipImage.path(), opts("basic"));
     this.det = await this.ort.InferenceSession.create(faceDetectorModel.path(), opts("all"));
