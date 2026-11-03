@@ -189,8 +189,6 @@ function videoKind(item: TimelineItem): "video" | "image" | undefined {
 const CELL_SIZES = [92, 116, 148, 190, 248];
 /** The wheel travel one zoom step takes (a mouse notch is 100), and the least time between steps. */
 const WHEEL_STEP = 60;
-/** How long the typing pauses before a typed date becomes a pill: Android's 700 ms. */
-const DATE_PILL_MS = 700;
 /** How often the phone's copies on Drive are looked at again, and how stale they may be when
  *  the window comes back before they are. */
 const DRIVE_REFRESH_MS = 15 * 60 * 1000;
@@ -1092,26 +1090,19 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // A name or a label typed into the search finds that person's or label's photos, matched
   // as the names are folded elsewhere: case and accents aside, anywhere in the name.
   const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase().trim();
-  // A month and a year at the end of the strip's search ("2026 january", "jan 2026") are a
-  // date, as on Android: the photos of that month, year, or month of every year.
+  // A month and a year at the end of the strip's search ("2026 january", "jan 2026") read as
+  // a date, the photos of that month, year, or month of every year: offered as a suggestion,
+  // never applied on its own. "dog 2023" searches for "dog 2023" until the date is picked.
   const dateQ = useMemo(
     () => parseDateQuery(query, lang),
     [query, lang],
   );
-  const textQuery = dateQ ? dateQ.rest : query;
-  // The date a pause in the typing turned into a pill. A date typed after it takes over.
+  const textQuery = query;
+  // The date picked from the suggestions, as a pill.
   const [datePin, setDatePin] = useState<DateQuery | null>(null);
   // People and labels picked into the search as pills: their photos only, every pill at once.
   const [namePins, setNamePins] = useState<{ kind: "people" | "labels"; name: string; uids: Set<string> }[]>([]);
-  useEffect(() => {
-    if (!dateQ) return;
-    const id = setTimeout(() => {
-      setDatePin({ year: dateQ.year, month: dateQ.month, rest: "" });
-      setQuery(dateQ.rest);
-    }, DATE_PILL_MS);
-    return () => clearTimeout(id);
-  }, [dateQ]);
-  const activeDate = dateQ ?? datePin;
+  const activeDate = datePin;
   const searching = query.trim() !== "" || datePin !== null || namePins.length > 0;
   const namedMatches = useMemo(() => {
     const q = fold(textQuery);
@@ -1501,17 +1492,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   /** Picks a term: its pill goes in, and the words that named it leave the text. */
   const pickTerm = (term: (typeof searchTerms)[number], rest: string) => {
     term.apply();
-    const datePart = dateQ ? query.trim().slice(dateQ.rest.length).trim() : "";
-    setQuery([rest, datePart].filter(Boolean).join(" "));
+    setQuery(rest);
   };
-  // A whole name at the end of the text becomes its pill once the typing pauses, as on Android.
-  useEffect(() => {
-    const found = termAtEnd(textQuery, searchTerms);
-    if (!found) return;
-    const id = window.setTimeout(() => pickTerm(found.term as (typeof searchTerms)[number], found.rest), DATE_PILL_MS);
-    return () => window.clearTimeout(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textQuery, searchTerms]);
+  // A whole name at the end of the text is offered first among the suggestions, but never
+  // picked on its own: what is typed stays a search for what is typed until a pick.
+  const wholeTerm = termAtEnd(textQuery, searchTerms);
   /** Empties the search: the text and every pill it holds. */
   const clearSearch = () => {
     setQuery("");
@@ -1519,10 +1504,30 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     setNamePins([]);
     resetFilter();
   };
-  const searchSuggestions: SearchSuggestion[] = termsStartedAtEnd(textQuery, searchTerms).map(({ term, rest }) => {
-    const full = term as (typeof searchTerms)[number];
-    return { key: full.key, label: full.label, kind: full.kind, icon: full.icon, onPick: () => pickTerm(full, rest) };
-  });
+  const termSuggestions = [
+    ...(wholeTerm ? [wholeTerm] : []),
+    ...termsStartedAtEnd(textQuery, searchTerms).filter((s) => s.term.key !== wholeTerm?.term.key),
+  ];
+  const searchSuggestions: SearchSuggestion[] = [
+    ...(dateQ
+      ? [
+          {
+            key: "date",
+            label: dateLabel(dateQ, lang),
+            kind: t("search.kindDate"),
+            icon: <CalendarIcon size={15} />,
+            onPick: () => {
+              setDatePin({ year: dateQ.year, month: dateQ.month, rest: "" });
+              setQuery(dateQ.rest);
+            },
+          },
+        ]
+      : []),
+    ...termSuggestions.map(({ term, rest }) => {
+      const full = term as (typeof searchTerms)[number];
+      return { key: full.key, label: full.label, kind: full.kind, icon: full.icon, onPick: () => pickTerm(full, rest) };
+    }),
+  ];
   /** What narrows the photos besides the text, shown in the strip's search: the date a
    *  pause turned into a pill, the type, the categories. */
   const searchPills: SearchPill[] = [

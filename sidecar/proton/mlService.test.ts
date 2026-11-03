@@ -35,7 +35,8 @@ import { CryptoProxy, initCrypto } from "./crypto.ts";
 import { openEnvelope, sealEnvelope } from "./driveData.ts";
 import { FACE_EMBED_SHA256, emptyFaces } from "./mlReplica.ts";
 import { MlService } from "./mlService.ts";
-import { parseFacesSnapshot, writeFacesSnapshot, type SnapFace } from "./mlSnapshot.ts";
+import { parseFacesSnapshot, writeFacesSnapshot, writeSearchSnapshot, type SnapFace } from "./mlSnapshot.ts";
+import { SEARCH_MODEL_ID } from "./semantic.ts";
 import { initStore, setDataKey } from "./store.ts";
 
 const PHONE = "bbbbbbbb-0000-0000-0000-000000000002";
@@ -138,6 +139,8 @@ function service(drive: ReturnType<typeof memoryDrive>) {
     copyCache: () => null,
     timeline: async () => [],
     previews: async function* () {},
+    thumbnail: async () => null,
+    original: async () => null,
   });
 }
 
@@ -201,5 +204,87 @@ describe("the People index against Drive", () => {
       ["Bruno", ["p3", "p4"]],
       ["Ana", ["p1"]],
     ]);
+  }, 60_000);
+});
+
+describe("looking at the library", () => {
+  it("never takes a photo it could not fetch for one with no faces, and gives the phone's photos a second look", async () => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-ml-scan-")));
+    setDataKey(randomBytes(32));
+    const drive = memoryDrive();
+    // The phone looked at p6 the ordinary way and found one face on it.
+    const phoneCopy = {
+      ...emptyFaces(PHONE, "Pixel 8"),
+      createdAt: 1000,
+      modelSha256: FACE_EMBED_SHA256,
+      faces: [face("p6", 1, "Ana")],
+      markers: [{ key: "p6", hiRes: false }],
+    };
+    await drive.put(["Photos for Proton", "ML data"], `faces-${PHONE}.pfpml`, await sealEnvelope(writeFacesSnapshot(phoneCopy), key, key));
+    // And its search vector, so p6 needs nothing but the thorough look.
+    const phoneSearch = { deviceId: PHONE, deviceLabel: "Pixel 8", createdAt: 1000, modelId: SEARCH_MODEL_ID, dim: 512, vectors: new Map([["p6", new Uint16Array(512).fill(0x3c00)]]) };
+    await drive.put(["Photos for Proton", "ML data"], `search-${PHONE}.pfpml`, await sealEnvelope(writeSearchSnapshot(phoneSearch), key, key));
+
+    const timeline = ["p1", "p2", "p3", "p4", "p5", "p6"].map((k) => ({ uid: `vol~${k}`, video: false }));
+    const asked = new Map<string, number>();
+    // What each picture holds, for the stand-in models: "face" finds one face, "blank" none,
+    // "junk" will not decode.
+    const picture = (what: string) => Buffer.from(what);
+    const service = new MlService({
+      myFiles: () => drive.client,
+      account: () => ({ getOwnAddresses: async () => [{ keys: [{ key }], primaryKeyIndex: 0 }] }),
+      copyCache: () => null,
+      timeline: async () => timeline,
+      previews: async function* (uids) {
+        for (const uid of uids) {
+          const n = (asked.get(uid) ?? 0) + 1;
+          asked.set(uid, n);
+          if (uid === "vol~p1") yield { uid, bytes: picture("face") };
+          // p2 stalls the first time it is asked for, then comes.
+          if (uid === "vol~p2" && n > 1) yield { uid, bytes: picture("blank") };
+          // p3, p4 and p5 have no HD preview.
+          if (uid === "vol~p3" || uid === "vol~p4" || uid === "vol~p5") yield { uid, bytes: null };
+          if (uid === "vol~p6") yield { uid, bytes: picture("two") };
+        }
+      },
+      thumbnail: async (uid) => (uid === "vol~p3" ? picture("face") : uid === "vol~p5" ? picture("junk") : null),
+      original: async () => null,
+      analyzer: () => ({
+        open: async () => true,
+        close: async () => {},
+        look: async (bytes: Buffer, faces: boolean, thorough?: boolean) => {
+          const what = bytes.toString();
+          if (what === "junk") throw new Error("cannot decode");
+          expect(thorough).toBe(true);
+          const at = (x: number) => ({ box: [x, 0.1, x + 0.2, 0.4] as [number, number, number, number], score: 0.9, blur: 40, points: Float32Array.of(30, 40, 70, 40, 50, 60, 35, 80, 65, 80), embedding: identity(5, 3) });
+          // "two" holds the face the phone found, at 0.1, and a small one it missed, at 0.6.
+          const found = what === "face" ? [at(0.1)] : what === "two" ? [at(0.1), at(0.6)] : [];
+          return { vector: new Uint16Array(512).fill(0x3c00), faces: faces ? found : [] };
+        },
+      }),
+    });
+
+    service.startIndex();
+    await service.indexDone();
+    const job = service.indexStatus();
+    expect(job.error).toBeNull();
+    expect([job.firstLooks, job.secondLooks]).toEqual([5, 1]);
+    expect(job.retryLater).toBe(1); // p4: nothing could be fetched, so it is left for next run
+    expect(job.unreadable).toBe(1); // p5: its one picture would not decode
+    expect(job.withFaces).toBe(3); // p1, p3 (from its thumbnail), p6
+    expect(job.noFaces).toBe(1); // p2, once it came
+    expect(asked.get("vol~p2")).toBe(2);
+
+    // p4 is not marked: the next run asks for it again. The others are done, thoroughly.
+    const view = await service.view();
+    expect(view.scanned).toBe(5);
+    // p6 keeps the phone's Ana and gains the face the phone missed.
+    const faces = await service.photoFaces("p6");
+    expect(faces.map((f) => f.name)).toEqual(["Ana", null]);
+
+    // A second run looks only at what is left.
+    service.startIndex();
+    await service.indexDone();
+    expect(service.indexStatus()).toMatchObject({ firstLooks: 1, secondLooks: 0, retryLater: 1 });
   }, 60_000);
 });

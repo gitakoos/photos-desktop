@@ -64,10 +64,16 @@ export type PhotoFace = { face: string; box: FaceBox; person: string | null; nam
 
 export type IndexStatus = {
   running: boolean;
-  phase: "idle" | "listing" | "scanning" | "saving";
+  phase: "idle" | "listing" | "scanning" | "retrying" | "saving";
   done: number;
   total: number;
+  firstLooks: number;
+  secondLooks: number;
   faces: number;
+  withFaces: number;
+  noFaces: number;
+  retryLater: number;
+  unreadable: number;
   failed: number;
   finishedAt: number | null;
   error: string | null;

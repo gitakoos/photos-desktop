@@ -437,6 +437,8 @@ export class ProtonSession {
     timeline: async () =>
       (await this.getTimeline()).map((it) => ({ uid: it.uid, video: it.tags.includes(PhotoTag.Videos) })),
     previews: (uids) => this.previewBytes(uids),
+    thumbnail: (uid) => this.smallThumbnailBytes(uid),
+    original: (uid) => this.originalBytesFor(uid),
   });
   private photos: any = null;
   /** Which sign-in a pending-step timer belongs to; a newer attempt disarms older ones. */
@@ -872,6 +874,41 @@ export class ProtonSession {
 
   mlIndexCancel() {
     return this.ml.cancelIndex();
+  }
+
+  /** A photo's grid thumbnail, for the scan of a photo with no HD preview. */
+  private async smallThumbnailBytes(uid: string): Promise<Buffer | null> {
+    if (!this.photos) throw new Error("Not signed in");
+    const cached = thumbGet(uid, ThumbnailType.Type1);
+    if (cached) return cached;
+    for await (const r of withStallGuard(this.photos.iterateThumbnails([uid], ThumbnailType.Type1), THUMBNAIL_STALL_MS, "iterateThumbnails(index)")) {
+      return (r as any).ok ? Buffer.from((r as any).thumbnail) : null;
+    }
+    return null;
+  }
+
+  /**
+   * A photo's original, for the scan of a photo with no thumbnail at all, held in memory only
+   * for the look and never written anywhere. Refused past a size no photo the decoder reads
+   * needs, so a long video or a huge RAW file is not downloaded for nothing.
+   */
+  private async originalBytesFor(uid: string): Promise<Buffer | null> {
+    if (!this.photos) throw new Error("Not signed in");
+    const MAX = 60 * 1024 * 1024;
+    const downloader = await this.photos.getFileDownloader(uid);
+    const size = Number(downloader.getClaimedSizeInBytes?.() ?? 0);
+    if (size > MAX) return null;
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const sink = new WritableStream<Uint8Array>({
+      write(chunk) {
+        total += chunk.length;
+        if (total > MAX) throw new Error("too large for a look");
+        chunks.push(chunk);
+      },
+    });
+    await downloader.downloadToStream(sink).completion();
+    return Buffer.concat(chunks);
   }
 
   /** The HD previews of `uids` for the library scan: the cached ones, then the rest fetched

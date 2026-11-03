@@ -100,19 +100,29 @@ export function PeopleIndexSettings() {
 
   let jobLine = "";
   if (job?.running) {
+    const n = (v: number) => v.toLocaleString(lang);
     jobLine =
       job.phase === "listing"
         ? t("settings.mlScanListing")
         : job.phase === "saving"
           ? t("settings.mlScanSaving")
-          : t("settings.mlScanRunning", { done: job.done.toLocaleString(lang), total: job.total.toLocaleString(lang), faces: job.faces.toLocaleString(lang) });
+          : job.phase === "retrying"
+            ? t("settings.mlScanRetrying", { done: n(job.done), total: n(job.total) })
+            : t("settings.mlScanRunning", { done: n(job.done), total: n(job.total), second: n(job.secondLooks), faces: n(job.faces) });
   } else if (job?.error) {
     jobLine = t("settings.mlScanError", { error: job.error });
   } else if (job?.finishedAt) {
+    const n = (v: number) => v.toLocaleString(lang);
     jobLine =
       job.total === 0
         ? t("settings.mlScanNothing")
-        : t("settings.mlScanDone", { done: job.done.toLocaleString(lang), faces: job.faces.toLocaleString(lang), date: date.format(new Date(job.finishedAt)) });
+        : [
+            t("settings.mlScanDone", { withFaces: n(job.withFaces), noFaces: n(job.noFaces), faces: n(job.faces), date: date.format(new Date(job.finishedAt)) }),
+            job.retryLater > 0 ? t("settings.mlScanRetryLater", { count: n(job.retryLater) }) : "",
+            job.unreadable > 0 ? t("settings.mlScanUnreadable", { count: n(job.unreadable) }) : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
   }
 
   let syncLine = "";

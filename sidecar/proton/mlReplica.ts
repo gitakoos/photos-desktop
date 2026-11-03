@@ -241,22 +241,41 @@ export class Replica {
   }
 
   /** Records a photo scanned here: its faces (any it had before are replaced) and its marker. */
-  addScan(key: string, faces: Omit<SnapFace, "key" | "index" | "person" | "confirmed" | "rejected">[], vector: Uint16Array | null, now = Date.now()): void {
+  /**
+   * Records a photo scanned here: its faces (any it had before are replaced) and its marker,
+   * `hiRes` when it was the thorough look. `vector` is the search vector, null for a photo that
+   * cannot be read, or undefined to leave the one there is.
+   */
+  addScan(
+    key: string,
+    faces: Omit<SnapFace, "key" | "index" | "person" | "confirmed" | "rejected">[],
+    vector: Uint16Array | null | undefined,
+    now = Date.now(),
+    hiRes = false,
+  ): void {
     this.local.faces = this.local.faces.filter((f) => f.key !== key);
     faces.forEach((f, index) => this.local.faces.push({ ...f, key, index, person: null, confirmed: null, rejected: false }));
     this.local.markers = this.local.markers.filter((m) => m.key !== key);
-    this.local.markers.push({ key, hiRes: false });
+    this.local.markers.push({ key, hiRes });
     this.local.createdAt = now;
-    this.localSearch.vectors.set(key, vector);
-    this.localSearch.createdAt = now;
+    if (vector !== undefined) {
+      this.localSearch.vectors.set(key, vector);
+      this.localSearch.createdAt = now;
+    }
     this.facesVersion++;
     this.cache = null;
   }
 
-  /** Whether any device already scanned `key` for faces, and has a search vector for it. */
-  covered(): { faces: Set<string>; search: Set<string> } {
+  /** The photos any device scanned for faces (true where the look was the thorough one), and
+   *  the photos with a search vector. */
+  covered(): { faces: Map<string, boolean>; search: Set<string> } {
     const m = this.merged();
-    return { faces: new Set(m.markers.keys()), search: new Set(m.search.keys()) };
+    return { faces: new Map(m.markers), search: new Set(m.search.keys()) };
+  }
+
+  /** The faces any device found on one photo, removed ones included: what a second look keeps. */
+  knownFaces(key: string): Face[] {
+    return this.merged().byKey.get(key) ?? [];
   }
 
   private merged(): Merged {
