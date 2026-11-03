@@ -69,6 +69,8 @@ import type { FacesSnap, SearchSnap, SnapFace } from "./mlSnapshot.ts";
 
 /** The recognition model this build embeds with; a copy under another cannot share faces. */
 export const FACE_EMBED_SHA256 = "ffd8203a0c9e93d90a4957e24d173a883a5a04d64d23c771742c66273518a0db";
+/** How long the pages may read a merge a scan has moved past. */
+const STALE_MS = 30_000;
 /** Two boxes overlapping this much on the same photo are the same face. */
 const SAME_FACE_IOU = 0.5;
 
@@ -257,29 +259,80 @@ export class Replica {
     faces.forEach((f, index) => this.local.faces.push({ ...f, key, index, person: null, confirmed: null, rejected: false }));
     this.local.markers = this.local.markers.filter((m) => m.key !== key);
     this.local.markers.push({ key, hiRes });
+    const idx = this.indexes.get(this.local);
+    if (idx) {
+      idx.faces.set(key, this.local.faces.filter((f) => f.key === key));
+      idx.markers.set(key, hiRes);
+    }
     this.local.createdAt = now;
     if (vector !== undefined) {
       this.localSearch.vectors.set(key, vector);
       this.localSearch.createdAt = now;
     }
     this.facesVersion++;
-    this.cache = null;
+    // A scan records a photo every fraction of a second; merging the whole library again for
+    // each would hold everything else up. What the pages read may lag a scan by a little
+    // (`STALE_MS`); an edit, and anything saved, always reads the replica as it is.
+    this.stale = true;
   }
 
   /** The photos any device scanned for faces (true where the look was the thorough one), and
    *  the photos with a search vector. */
   covered(): { faces: Map<string, boolean>; search: Set<string> } {
+    this.fresh();
     const m = this.merged();
     return { faces: new Map(m.markers), search: new Set(m.search.keys()) };
   }
 
-  /** The faces any device found on one photo, removed ones included: what a second look keeps. */
+  /**
+   * The faces any device found on one photo, removed ones included: what a second look keeps.
+   * Read straight off the copies, by the merge's own rule for which scan of a photo counts (a
+   * thorough one first, then the newest), and never through a merge: a scan asks for this once
+   * a photo and records a scan right after, so going through the merge would regroup the whole
+   * library for every photo.
+   */
   knownFaces(key: string): Face[] {
-    return this.merged().byKey.get(key) ?? [];
+    let best: { faces: SnapFace[]; hiRes: boolean; t: number } | null = null;
+    for (const s of [...this.copies.filter(fullyCompatible), this.local]) {
+      const idx = this.indexOf(s);
+      const hiRes = idx.markers.get(key);
+      const faces = idx.faces.get(key);
+      if (hiRes === undefined && !faces) continue;
+      const h = hiRes ?? false;
+      if (!best || (h && !best.hiRes) || (h === best.hiRes && s.createdAt > best.t)) best = { faces: faces ?? [], hiRes: h, t: s.createdAt };
+    }
+    return (best?.faces ?? []).filter((f) => f.embedding.length === EMBEDDING_DIM).map((f) => ({ ...f, id: faceId(f.key, f.index) }));
+  }
+
+  /** Each copy's faces and markers by photo, built once per copy. This device's own is kept up
+   *  to date by `addScan`. */
+  private indexes = new WeakMap<FacesSnap, { faces: Map<string, SnapFace[]>; markers: Map<string, boolean> }>();
+  private indexOf(s: FacesSnap) {
+    let idx = this.indexes.get(s);
+    if (!idx) {
+      idx = { faces: new Map(), markers: new Map() };
+      for (const f of s.faces) (idx.faces.get(f.key) ?? idx.faces.set(f.key, []).get(f.key)!).push(f);
+      for (const m of s.markers) idx.markers.set(m.key, m.hiRes);
+      this.indexes.set(s, idx);
+    }
+    return idx;
+  }
+
+  private stale = false;
+  private mergedAt = 0;
+
+  /** Makes the next read merge again, whatever a scan left pending. */
+  fresh(): void {
+    if (this.stale) this.cache = null;
   }
 
   private merged(): Merged {
-    if (!this.cache) this.cache = merge(this);
+    if (this.cache && this.stale && Date.now() - this.mergedAt > STALE_MS) this.cache = null;
+    if (!this.cache) {
+      this.stale = false;
+      this.cache = merge(this);
+      this.mergedAt = Date.now();
+    }
     return this.cache;
   }
 
@@ -383,6 +436,7 @@ export class Replica {
 
   /** The face copy this device saves: everything merged. */
   exportFaces(now = Date.now()): FacesSnap {
+    this.fresh();
     const m = this.merged();
     const nameOf = new Map<string, string>();
     for (const p of m.people) if (p.name) for (const id of p.faces) nameOf.set(id, p.name);
@@ -415,6 +469,7 @@ export class Replica {
 
   /** The search copy this device saves: every photo's newest vector. */
   exportSearch(now = Date.now()): SearchSnap {
+    this.fresh();
     return { ...emptySearch(this.deviceId, this.deviceLabel, this.searchModelId), createdAt: now, vectors: this.merged().search };
   }
 

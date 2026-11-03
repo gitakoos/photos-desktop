@@ -596,6 +596,8 @@ export class MlService {
     } finally {
       await analyzer.close();
       this.persistScans(r);
+      // What the pages read caught up with every photo the run looked at.
+      r.fresh();
     }
     if (!this.current(r)) return;
     this.job.phase = "saving";

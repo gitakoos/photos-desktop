@@ -140,7 +140,13 @@ fn priority_for(method: &str) -> Priority {
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
         | "protectSession" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
-        | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces" => Priority::Interactive,
+        | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces"
+        // The People index's scan: its start, its stop and its progress, each answered at once
+        // from the sidecar's memory (the scan runs inside the sidecar and never holds the
+        // channel). On the background lane they sat behind a whole-library sweep for minutes,
+        // and the progress read as stuck.
+        | "mlIndexStart" | "mlIndexStatus" | "mlIndexCancel" | "mlModels" | "mlModelsDownload"
+        | "mlSync" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
         // even though the user is looking at that photo: the transfer itself runs inside
@@ -181,12 +187,9 @@ fn priority_for(method: &str) -> Priority {
         "startFixDatesFromName" | "dateFixStatus" | "cancelFixDatesFromName"
         | "dateFixResults" => Priority::Background,
 
-        // The People index's scan and Drive copy: a start, a stop and progress polls that
-        // answer at once, and the reads of every device's copy. The scan itself runs inside
-        // the sidecar and never holds the channel, so like the date fix these only have to
-        // stay reachable while a long walk holds the foreground lane.
-        "mlIndexStart" | "mlIndexStatus" | "mlIndexCancel" | "mlModels" | "mlModelsDownload"
-        | "mlSync" | "mlSaveNow" | "mlRefresh" | "mlLibrary" => Priority::Background,
+        // The People index's work that nobody waits on: a save, a read of every device's copy,
+        // the library's list of photos.
+        "mlSaveNow" | "mlRefresh" | "mlLibrary" => Priority::Background,
 
         // The names of a selection the user is acting on (Fix dates). The same lookup as
         // `getMetadata`, which sits under the warmer as `Enumerate`: with the Explorer

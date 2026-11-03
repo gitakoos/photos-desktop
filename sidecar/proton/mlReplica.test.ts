@@ -299,3 +299,19 @@ describe("photos no longer in the library", () => {
     expect(r.exportFaces().manual).toEqual([{ name: "Ana", key: "p9" }]);
   });
 });
+
+describe("the faces known on a photo, read without a merge", () => {
+  it("are the very faces the merge keeps for it, a thorough scan winning over an ordinary one", () => {
+    const r = replica();
+    r.setCopies([phone(1000, [face("p1", 0, 1, { confirmed: "Ana" }), face("p1", 1, 2), face("p2", 0, 1)])], []);
+    const merged = (key: string) => r.view().people.flatMap((p) => p.faces).filter((id) => id.startsWith(`${key}#`)).sort();
+    expect(r.knownFaces("p1").map((f) => f.id).sort()).toEqual(["p1#0", "p1#1"]);
+    // This PC's thorough look at p1 finds three faces; from then on they are the ones kept.
+    r.addScan("p1", [face("p1", 0, 1), face("p1", 1, 2), face("p1", 2, 3)], undefined, 2000, true);
+    expect(r.knownFaces("p1").map((f) => f.index)).toEqual([0, 1, 2]);
+    r.fresh();
+    expect(r.view().scanned).toBe(2);
+    expect(merged("p1").length).toBeGreaterThan(0);
+    expect(r.knownFaces("p9")).toEqual([]);
+  });
+});
