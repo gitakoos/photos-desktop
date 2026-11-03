@@ -201,6 +201,15 @@ export class MlService {
         const library = this.readJson<string[]>("library.json");
         if (library) r.setLibrary(library);
         this.autoMergeOn = this.readJson<{ autoMerge?: boolean }>("prefs.json")?.autoMerge === true;
+        // This device's own last copy, kept on disk at every save: what it knew then, the other
+        // devices' decisions included, so nothing is lost when a copy goes from Drive.
+        try {
+          const ownFaces = readSealedOrDiscard(this.file("export-faces.bin"));
+          const ownSearch = readSealedOrDiscard(this.file("export-search.bin"));
+          r.setOwn(ownFaces ? parseFacesSnapshot(ownFaces) : null, ownSearch ? parseSearchSnapshot(ownSearch) : null);
+        } catch {
+          /* a damaged file is read again from Drive */
+        }
         // Who each face was grouped as when the app last ran: the first grouping leans on it.
         const names = this.readJson<Record<string, string>>("names.json");
         if (names) r.lastNames = new Map(Object.entries(names));
@@ -334,6 +343,10 @@ export class MlService {
         this.sync.pending = false;
         return;
       }
+      // Never from what this device holds alone: until Drive was read, a copy made now could
+      // leave out what the other devices, and this one's own last copy, hold.
+      if (!this.readOnce) await this.refresh().catch(() => {});
+      if (!this.readOnce && !r.ownFaces) throw new Error("Proton Drive could not be read; nothing was saved");
       await this.breathe();
       const report = r.report();
       const now = Date.now();
@@ -352,6 +365,9 @@ export class MlService {
         back.faces.length < report.merged.faces ? `faces ${back.faces.length}/${report.merged.faces}` : "",
         back.markers.length < report.merged.scanned ? `scanned ${back.markers.length}/${report.merged.scanned}` : "",
         vectors < report.merged.vectors ? `vectors ${vectors}/${report.merged.vectors}` : "",
+        // Faces are never taken out of the index, only out of People: fewer than the last copy
+        // held means something was not read.
+        r.ownFaces && back.faces.length < r.ownFaces.faces.length ? `faces ${back.faces.length}, last copy ${r.ownFaces.faces.length}` : "",
       ].filter(Boolean);
       process.stderr.write(`[ml] index: ${JSON.stringify({ ...report, copy: { faces: back.faces.length, scanned: back.markers.length, manual: back.manual.length, notPerson: back.notPerson.length, covers: back.covers.length, vectors, facesBytes: facesPlain.length, searchBytes: searchPlain.length } })}\n`);
       if (shortBy.length) throw new Error(`the copy came out short (${shortBy.join(", ")})`);
@@ -371,10 +387,22 @@ export class MlService {
       if (last?.hash === hash) {
         const inDrive = byHand ? await mlCopyNames(client) : null;
         if (!inDrive || names.every((n) => inDrive.has(n))) {
+          if (!existsSync(this.file("export-faces.bin")) && this.current(r)) {
+            writeSealedAtomic(this.file("export-faces.bin"), facesPlain);
+            writeSealedAtomic(this.file("export-search.bin"), searchPlain);
+          }
           this.sync.pending = false;
           this.sync.last = { outcome: "upToDate", ...summary };
           return;
         }
+      }
+      // Kept here first, so what this copy holds survives a failed upload and a deleted file.
+      if (this.current(r)) {
+        mkdirSync(this.dir(), { recursive: true });
+        writeSealedAtomic(this.file("export-faces.bin"), facesPlain);
+        writeSealedAtomic(this.file("export-search.bin"), searchPlain);
+        // What the page shows already holds all of it: no need to group the library again.
+        r.setOwn(facesSnap, searchSnap, false);
       }
       const keys = await addressKeys(this.deps.account());
       if (keys.length === 0) throw new Error("no address key");

@@ -120,7 +120,45 @@ export type ReplicaView = {
   searchable: number;
 };
 
-type Source = { device: string; t: number; snap: FacesSnap; full: boolean };
+/** A copy the merge reads. `fallback` is this device's own last copy: its faces and vectors
+ *  count like any other's, but what it says was decided only fills in where no other device's
+ *  copy and no edit here says anything, so it never brings back an old decision over a new one. */
+type Source = { device: string; t: number; snap: FacesSnap; full: boolean; fallback?: boolean };
+
+/** Older than any date a device or an edit gives: a value only a fallback copy holds. */
+const FALLBACK_TIME = Number.MIN_SAFE_INTEGER + 1;
+
+/** Two boxes on one photo that are one face, when two devices found it: they mostly agree, or
+ *  one sits inside the other. */
+function sameFace(a: number[], b: number[]): boolean {
+  if (iou(a, b) >= 0.3) return true;
+  const iw = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
+  const ih = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+  const smaller = Math.min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]));
+  return smaller > 0 && (iw * ih) / smaller >= 0.6;
+}
+
+/**
+ * One photo's faces from every copy that looked at it: the best scan's (a thorough one first,
+ * then the newest) as they are, then each face another copy found that the best one does not
+ * hold, numbered after them. No device's face is lost because another looked at the photo too.
+ */
+function unionOfPhoto(key: string, perSource: { faces: SnapFace[]; hiRes: boolean; t: number }[]): SnapFace[] {
+  if (perSource.length === 0) return [];
+  const ranked = perSource
+    .map((s, i) => ({ ...s, i }))
+    .sort((a, b) => (a.hiRes !== b.hiRes ? (a.hiRes ? -1 : 1) : b.t - a.t || a.i - b.i));
+  const out = ranked[0].faces.filter((f) => f.embedding.length === EMBEDDING_DIM);
+  let next = 0;
+  for (const f of out) if (f.index >= next) next = f.index + 1;
+  for (const s of ranked.slice(1)) {
+    for (const f of s.faces) {
+      if (f.embedding.length !== EMBEDDING_DIM || out.some((k) => sameFace(k.box, f.box))) continue;
+      out.push({ ...f, key, index: next++ });
+    }
+  }
+  return out;
+}
 
 const faceId = (key: string, index: number) => `${key}#${index}`;
 
@@ -198,10 +236,16 @@ export class Replica {
     const byDevice = (a: { deviceId: string }, b: { deviceId: string }) => (a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0);
     const own = faces.filter((s) => s.deviceId !== this.deviceId).sort(byDevice);
     const ownSearch = search.filter((s) => s.deviceId !== this.deviceId && s.modelId === this.searchModelId).sort(byDevice);
+    // This device's own copy in Drive, kept apart as the fallback: the newest of it and the one
+    // kept on disk.
+    const newest = <T extends { createdAt: number }>(list: T[]) => list.sort((a, b) => b.createdAt - a.createdAt)[0];
+    const mine = newest(faces.filter((s) => s.deviceId === this.deviceId));
+    const mineSearch = newest(search.filter((s) => s.deviceId === this.deviceId && s.modelId === this.searchModelId));
+    const ownChanged = this.setOwn(mine, mineSearch, false);
     // A periodic look at Drive mostly finds the very copies already read: keeping them as they
     // are keeps the grouping too, rather than redoing it for nothing.
     const sig = (list: { deviceId: string; createdAt: number }[]) => list.map((s) => `${s.deviceId}@${s.createdAt}`).sort().join(",");
-    if (sig(own) === sig(this.copies) && sig(ownSearch) === sig(this.searchCopies) && this.facesVersion > 0) return;
+    if (!ownChanged && sig(own) === sig(this.copies) && sig(ownSearch) === sig(this.searchCopies) && this.facesVersion > 0) return;
     this.copies = own;
     this.searchCopies = ownSearch;
     this.otherModelSearch = search
@@ -213,7 +257,34 @@ export class Replica {
   }
 
   get copyFacts(): Fact[] {
-    return this.facts;
+    return this.ownFacts.length ? [...this.facts, ...this.ownFacts] : this.facts;
+  }
+
+  /** This device's own last copy, from disk or Drive: what it knew when it last saved. */
+  ownFaces: FacesSnap | null = null;
+  ownSearch: SearchSnap | null = null;
+  private ownFacts: Fact[] = [];
+
+  /**
+   * Takes this device's own last copy in, when newer than the one held. Returns whether it
+   * changed. `regroup` false leaves the caller to redo the grouping.
+   */
+  setOwn(faces: FacesSnap | undefined | null, search: SearchSnap | undefined | null, regroup = true): boolean {
+    let changed = false;
+    if (faces && faces.deviceId === this.deviceId && fullyCompatible(faces) && faces.createdAt > (this.ownFaces?.createdAt ?? -Infinity)) {
+      this.ownFaces = faces;
+      this.ownFacts = ingestFallback(faces);
+      changed = true;
+    }
+    if (search && search.deviceId === this.deviceId && search.modelId === this.searchModelId && search.createdAt > (this.ownSearch?.createdAt ?? -Infinity)) {
+      this.ownSearch = search;
+      changed = true;
+    }
+    if (changed && regroup) {
+      this.facesVersion++;
+      this.cache = null;
+    }
+    return changed;
   }
 
   /** The time for a new edit: now, or just past the newest time any copy or edit carries. */
@@ -339,6 +410,7 @@ export class Replica {
         ...this.searchCopies.map((s) => ({ device: s.deviceLabel, vectors: s.vectors.size, sameModel: true })),
         ...this.otherModelSearch.map((s) => ({ ...s, sameModel: false })),
       ],
+      own: this.ownFaces ? { savedAt: this.ownFaces.createdAt, faces: this.ownFaces.faces.length, markers: this.ownFaces.markers.length, vectors: this.ownSearch?.vectors.size ?? 0 } : null,
       local: { faces: this.local.faces.length, markers: this.local.markers.length, vectors: this.localSearch.vectors.size, edits: this.ops.length },
       merged: {
         faces: m.faces.size,
@@ -379,16 +451,21 @@ export class Replica {
    * library for every photo.
    */
   knownFaces(key: string): Face[] {
-    let best: { faces: SnapFace[]; hiRes: boolean; t: number } | null = null;
-    for (const s of [...this.copies.filter(fullyCompatible), this.local]) {
+    const perSource: { faces: SnapFace[]; hiRes: boolean; t: number }[] = [];
+    for (const s of this.faceSources()) {
       const idx = this.indexOf(s);
       const hiRes = idx.markers.get(key);
       const faces = idx.faces.get(key);
       if (hiRes === undefined && !faces) continue;
-      const h = hiRes ?? false;
-      if (!best || (h && !best.hiRes) || (h === best.hiRes && s.createdAt > best.t)) best = { faces: faces ?? [], hiRes: h, t: s.createdAt };
+      perSource.push({ faces: faces ?? [], hiRes: hiRes ?? false, t: s.createdAt });
     }
-    return (best?.faces ?? []).filter((f) => f.embedding.length === EMBEDDING_DIM).map((f) => ({ ...f, id: faceId(f.key, f.index) }));
+    return unionOfPhoto(key, perSource).map((f) => ({ ...f, id: faceId(f.key, f.index) }));
+  }
+
+  /** Every copy whose faces compare with this build's, in the merge's order: the other
+   *  devices', this device's own last copy, then what it scanned since. */
+  faceSources(): FacesSnap[] {
+    return [...this.copies.filter(fullyCompatible), ...(this.ownFaces ? [this.ownFaces] : []), this.local];
   }
 
   /** Each copy's faces and markers by photo, built once per copy. This device's own is kept up
@@ -715,6 +792,27 @@ const SEP = "\u0001";
  * from the copy since the last one is a removal dated by this copy. A copy older than one
  * already read changes nothing that was learned from the newer.
  */
+/**
+ * This device's own last copy read back, every decision in it dated older than anything: it
+ * fills in what no other copy and no edit here holds (a device's copy since deleted from Drive,
+ * say), and gives way to all of them. Nothing in it is dated as new, so `seen` is not touched.
+ */
+export function ingestFallback(snap: FacesSnap): Fact[] {
+  const facts: Fact[] = [];
+  const boxes = new Map(snap.faces.map((f) => [faceId(f.key, f.index), f.box]));
+  for (const f of snap.faces) {
+    const value = f.rejected ? "R" : f.confirmed ? `C:${f.confirmed}` : "";
+    if (value) facts.push({ kind: "identity", key: f.key, index: f.index, box: f.box, value, t: FALLBACK_TIME });
+  }
+  for (const n of snap.notPerson) {
+    const box = boxes.get(faceId(n.key, n.index));
+    if (box) facts.push({ kind: "notPerson", key: n.key, index: n.index, box, name: n.name, on: true, t: FALLBACK_TIME });
+  }
+  for (const m of snap.manual) facts.push({ kind: "manual", key: m.key, name: m.name, on: true, t: FALLBACK_TIME });
+  for (const c of snap.covers) facts.push({ kind: "cover", name: c.name, key: c.key, t: FALLBACK_TIME });
+  return facts;
+}
+
 export function ingest(snap: FacesSnap, seen: Seen): Fact[] {
   const dev = snap.deviceId + SEP;
   const lastKey = dev + "@";
@@ -777,12 +875,12 @@ function merge(r: Replica): Merged {
 
   const sources: Source[] = [
     ...r.faceCopies.map((snap) => ({ device: snap.deviceId, t: snap.createdAt, snap, full: fullyCompatible(snap) })),
+    ...(r.ownFaces ? [{ device: r.deviceId, t: r.ownFaces.createdAt, snap: r.ownFaces, full: true, fallback: true }] : []),
     { device: r.deviceId, t: r.local.createdAt, snap: r.local, full: true },
   ];
 
-  // Coverage: every marker; each photo's faces from its best scan.
+  // Coverage: every marker, thorough where any device's look was.
   const markers = new Map<string, boolean>();
-  const best = new Map<string, { source: Source; hiRes: boolean }>();
   for (const s of sources) {
     const scanned = new Map<string, boolean>();
     for (const m of s.snap.markers) scanned.set(m.key, m.hiRes);
@@ -790,19 +888,27 @@ function merge(r: Replica): Merged {
     for (const f of s.snap.faces) if (!scanned.has(f.key)) scanned.set(f.key, false);
     for (const [key, hiRes] of scanned) {
       markers.set(key, (markers.get(key) ?? false) || hiRes);
-      if (!s.full) continue;
-      const had = best.get(key);
-      if (!had || (hiRes && !had.hiRes) || (hiRes === had.hiRes && s.t > had.source.t)) best.set(key, { source: s, hiRes });
+    }
+  }
+  // Each photo's faces: its best scan's, joined by any face another copy found that it lacks.
+  const perPhoto = new Map<string, { faces: SnapFace[]; hiRes: boolean; t: number }[]>();
+  for (const s of sources) {
+    if (!s.full) continue;
+    const byPhoto = new Map<string, SnapFace[]>();
+    for (const f of s.snap.faces) (byPhoto.get(f.key) ?? byPhoto.set(f.key, []).get(f.key)!).push(f);
+    const hiResOf = new Map<string, boolean>();
+    for (const m of s.snap.markers) hiResOf.set(m.key, m.hiRes);
+    for (const key of new Set([...byPhoto.keys(), ...hiResOf.keys()])) {
+      (perPhoto.get(key) ?? perPhoto.set(key, []).get(key)!).push({ faces: byPhoto.get(key) ?? [], hiRes: hiResOf.get(key) ?? false, t: s.t });
     }
   }
   const faces = new Map<string, Face>();
   const byKey = new Map<string, Face[]>();
-  for (const s of sources) {
-    for (const f of s.snap.faces) {
-      if (best.get(f.key)?.source !== s || f.embedding.length !== EMBEDDING_DIM) continue;
+  for (const [key, list] of perPhoto) {
+    for (const f of unionOfPhoto(key, list)) {
       const face: Face = { ...f, id: faceId(f.key, f.index) };
       faces.set(face.id, face);
-      (byKey.get(f.key) ?? byKey.set(f.key, []).get(f.key)!).push(face);
+      (byKey.get(key) ?? byKey.set(key, []).get(key)!).push(face);
     }
   }
   /** The kept face a face of some copy, or an edit, stands for: the same id where its box still
@@ -835,7 +941,8 @@ function merge(r: Replica): Merged {
     for (const f of s.snap.faces) {
       if (!f.person) continue;
       const id = canonical(f.key, faceId(f.key, f.index), f.box);
-      if (id) reg(carried, id).write(resolve(f.person, s.t), s.t, false);
+      const t = s.fallback ? FALLBACK_TIME : s.t;
+      if (id) reg(carried, id).write(resolve(f.person, t), t, false);
     }
   }
   // What each device decided, each value dated by when that device first published it.
@@ -911,12 +1018,15 @@ function merge(r: Replica): Merged {
   const coversOut = new Map<string, string>();
   for (const [name, v] of covers) if (v.value) coversOut.set(name, v.value);
 
-  // Search: each photo's newest vector, from any device with this build's model.
+  // Search: each photo's newest vector, from any device with this build's model. A photo one
+  // device could not read keeps the vector another device made of it.
   const search = new Map<string, Uint16Array | null>();
   const searchAt = new Map<string, number>();
-  for (const s of [...r.searchCopyList, r.localSearch]) {
+  for (const s of [...r.searchCopyList, ...(r.ownSearch ? [r.ownSearch] : []), r.localSearch]) {
     for (const [key, v] of s.vectors) {
-      if ((searchAt.get(key) ?? -Infinity) <= s.createdAt) {
+      const had = search.get(key);
+      const newer = (searchAt.get(key) ?? -Infinity) <= s.createdAt;
+      if (had === undefined || (v && !had) || (newer && (v || !had))) {
         search.set(key, v);
         searchAt.set(key, s.createdAt);
       }

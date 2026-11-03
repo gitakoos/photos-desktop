@@ -348,3 +348,48 @@ describe("what a fresh start reads", () => {
     expect(ana(await third.view())).toEqual(["p1", "p2", "p3", "p4"]);
   }, 60_000);
 });
+
+describe("a copy deleted from Drive", () => {
+  it("is not lost: this PC keeps what it held, and its next save is no smaller", async () => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-ml-keep-")));
+    setDataKey(randomBytes(32));
+    const drive = memoryDrive();
+    const phoneCopy = {
+      ...emptyFaces(PHONE, "Pixel 8"),
+      createdAt: 1000,
+      modelSha256: FACE_EMBED_SHA256,
+      faces: [face("p1", 1, "Ana"), face("p2", 1, "Ana"), face("p3", 2, "Bia"), face("p4", 2, "Bia")],
+      markers: ["p1", "p2", "p3", "p4"].map((k) => ({ key: k, hiRes: false })),
+    };
+    await drive.put(["Photos for Proton", "ML data"], `faces-${PHONE}.pfpml`, await sealEnvelope(writeFacesSnapshot(phoneCopy), key, key));
+
+    const ml = service(drive);
+    const first = await ml.view();
+    const people = (v: typeof first) => v.people.filter((p) => p.name).map((p) => [p.name, [...p.keys].sort()]).sort();
+    const before = people(first);
+    // An edit here, so this PC has a copy of its own to save.
+    await ml.edit({ action: "removePhotos", person: "n:Bia", keys: ["p4"] });
+    const edited = people(await ml.view());
+    await ml.saveNow();
+    await ml.saveIdle();
+    expect(ml.syncStatus().error).toBeNull();
+    expect(before).not.toEqual(edited);
+
+    // The phone's copy is deleted from Drive.
+    const phoneFile = drive.files().find((f) => f.name.includes(PHONE))!;
+    phoneFile.trashTime = new Date();
+
+    const again = service(drive);
+    expect(people(await again.view())).toEqual(edited);
+    await again.edit({ action: "name", person: "n:Ana", name: "Ana" });
+    await again.saveNow();
+    await again.saveIdle();
+    expect(again.syncStatus().error).toBeNull();
+    const mine = drive.files().filter((f) => f.name.startsWith("faces-") && !f.name.includes(PHONE));
+    const latest = mine[0].revisions[mine[0].revisions.length - 1];
+    const opened = await openEnvelope(latest, [key], [key]);
+    const snap = parseFacesSnapshot((opened as { plain: Buffer }).plain);
+    expect(snap.faces).toHaveLength(4);
+    expect(snap.faces.filter((f) => f.confirmed === "Ana")).toHaveLength(2);
+  }, 60_000);
+});

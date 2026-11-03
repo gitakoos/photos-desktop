@@ -192,11 +192,15 @@ describe("merging the phone's copy", () => {
     expect(r.exportSearch(4000).vectors.has("p7")).toBe(true);
   });
 
-  it("leaves this device's own copy in Drive out of the merge", () => {
+  it("reads this device's own copy as a fallback: it fills in, and gives way to any other say", () => {
+    // Alone, the own copy brings back what it held.
     const r = replica();
-    const mine = { ...emptyFaces(ME, "Windows PC"), createdAt: 99_999, faces: [face("p1", 0, 1, { confirmed: "Old" })] };
+    const mine = { ...emptyFaces(ME, "Windows PC"), createdAt: 99_999, modelSha256: FACE_EMBED_SHA256, faces: [face("p1", 0, 1, { confirmed: "Old" })] };
     r.setCopies([mine], []);
-    expect(r.view().people).toEqual([]);
+    expect(named(r)).toEqual([["Old", ["p1"]]]);
+    // A phone's copy saved before it, saying otherwise, still wins: the own copy only relays.
+    r.setCopies([mine, phone(1000, [face("p1", 0, 1, { confirmed: "New" })])], []);
+    expect(named(r)).toEqual([["New", ["p1"]]]);
   });
 
   it("suggests an unnamed group that looks like a named person", () => {
@@ -375,5 +379,47 @@ describe("a grouping that holds", () => {
       { ...face("p3", 0, 1), embedding: blend(1, 9, 0.55) }, { ...face("p4", 0, 1), embedding: blend(1, 9, 0.55) },
     ], { notPerson: [{ name: "Ana", key: "p3", index: 0 }] })], []);
     expect(r.suggestionsFor("Ana")).toEqual([]);
+  });
+});
+
+
+describe("an index that never shrinks", () => {
+  it("keeps every device's decisions after a copy is deleted from Drive", () => {
+    const r = replica();
+    r.setCopies([phone(1000, [face("p1", 0, 1, { confirmed: "Ana" }), face("p2", 0, 1, { confirmed: "Ana" }), face("p3", 0, 2, { confirmed: "Bia" })])], []);
+    const [p3] = r.refs(["p3#0"]);
+    r.apply({ t: r.clock(), kind: "confirm", faces: [p3], name: "Carla" });
+    const before = named(r);
+    const saved = parseFacesSnapshot(writeFacesSnapshot(r.exportFaces(5000)));
+
+    // The phone's copy is gone from Drive; this device starts again with only its own copy.
+    const again = replica();
+    again.ops = [...r.ops];
+    again.setOwn(saved, null);
+    again.setCopies([], []);
+    expect(named(again)).toEqual(before);
+    expect(again.exportFaces(6000).faces).toHaveLength(3);
+  });
+
+  it("joins the faces two devices found on one photo, once each", () => {
+    const r = replica();
+    // The phone found two faces on p1; this PC's thorough look found the left one and a third.
+    r.setCopies([phone(1000, [face("p1", 0, 1, { confirmed: "Ana" }), { ...face("p1", 1, 2), box: [0.5, 0.1, 0.7, 0.4] }])], []);
+    r.addScan("p1", [
+      { ...face("p1", 0, 1), box: [0.01, 0.1, 0.21, 0.41] },
+      { ...face("p1", 1, 3), box: [0.75, 0.5, 0.95, 0.8] },
+    ], undefined, 2000, true);
+    const onP1 = r.exportFaces(3000).faces.filter((f) => f.key === "p1");
+    expect(onP1).toHaveLength(3);
+    expect(new Set(onP1.map((f) => f.index)).size).toBe(3);
+    // The phone's name stays on the face it named, wherever this PC numbered it.
+    expect(named(r)).toEqual([["Ana", ["p1"]]]);
+  });
+
+  it("takes the vector a device made over another's mark that it could not read the photo", () => {
+    const r = replica();
+    r.setCopies([], [{ deviceId: PHONE, deviceLabel: "Pixel", createdAt: 1000, modelId: "clip", dim: 512, vectors: new Map([["p1", new Uint16Array(512).fill(1)]]) }]);
+    r.addScan("p1", [], null, 5000, true);
+    expect(r.searchVectors().get("p1")).not.toBeNull();
   });
 });
