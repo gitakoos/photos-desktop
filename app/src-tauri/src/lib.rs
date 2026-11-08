@@ -28,9 +28,11 @@
 // so that uninstalling takes the Run entry with it.
 pub mod autostart;
 mod cloud_mount;
+mod device_pick;
 mod explorer_rules;
 #[cfg(windows)]
 mod explorer_sync;
+mod keep_all;
 // Public because the installer compiles this same file (see its header), and a
 // module the app itself never reads would otherwise read as dead code.
 pub mod data_format;
@@ -39,6 +41,7 @@ pub mod data_format;
 pub mod file_assoc;
 #[cfg(not(windows))]
 mod files_drive;
+mod hello;
 mod notices;
 mod local_file;
 mod local_folder;
@@ -46,6 +49,7 @@ mod photo_edit;
 mod secure_store;
 mod update_sig;
 mod upload_frame;
+mod video_compress;
 mod window_place;
 
 use std::collections::BinaryHeap;
@@ -54,8 +58,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
-use tauri::webview::WebviewBuilder;
-use tauri::{AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, WebviewUrl};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// The response router, shared with the reader thread. Each in-flight request registers
 /// a one-shot sender under its id; the reader delivers each response line to the matching
@@ -129,17 +132,24 @@ enum Priority {
     Interactive,
 }
 
-/// The method -> priority map. Exhaustive for the methods we know; anything unlisted
-/// falls to `UserAction` (never `Background`), so an unrecognised or newly added
-/// method is never buried under the warmer.
+/// The method -> priority map. Every sidecar method is named in `classified`, which a
+/// test holds to the sidecar's own list, so a new method's lane is decided when it is
+/// added rather than left to a default; one not named there still falls to `UserAction`
+/// (never `Background`), so it is never buried under the warmer.
 fn priority_for(method: &str) -> Priority {
-    match method {
+    classified(method).unwrap_or(Priority::UserAction)
+}
+
+/// The lane and rank of every method the sidecar answers, or `None` for a name it does not.
+fn classified(method: &str) -> Option<Priority> {
+    Some(match method {
         // The user is waiting on the answer.
         "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile" | "startHydrate"
         // Session lifecycle: must never sit behind a warm.
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
+        | "localLockState" | "localLockCheck" | "localLockSet" | "localLockClear"
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
-        | "protectSession" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
+        | "protectSession" | "signInChoice" | "keepSignIn" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
         | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
@@ -167,16 +177,64 @@ fn priority_for(method: &str) -> Priority {
         "warmThumbnails" | "listAlbumsForMount" | "listExtrasForMount"
         | "getAlbumPhotoUids" | "heapStats"
         | "whoami" | "getAccountInfo" | "getSharingInfo" | "listInvitations"
-        | "checkUpdate" | "downloadUpdate" | "getDriveCollections" => Priority::Background,
+        | "checkUpdate" | "downloadUpdate" | "getDriveCollections" | "sharedBackupLoad"
+        // The My files picker looking ahead through sub-folders for photos: a sweep, so it
+        // never holds up what the window is drawing.
+        | "myFilesCheck"
+        // The hidden albums' photos read again: a walk over each album.
+        | "hiddenRefresh"
+        // Keeping every photo on this PC: a whole-library download that yields to the window,
+        // and the lookups that decide what it keeps.
+        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden" => Priority::Background,
 
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
         // warmer, behind which a page stayed empty for as long as a cold batch took.
         "getThumbnails" | "getAlbums" | "getAlbumPhotos" | "getShared" => Priority::UserAction,
 
-        // Everything else: user-driven mutations and any method not named above.
-        _ => Priority::UserAction,
-    }
+        // What the window asks for a screenful at a time, or waits on as it opens a view:
+        // short, and wanted now.
+        "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
+        | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
+        | "facePeople" | "facePersonCandidates" | "labelsList" | "labelsOf" | "myFilesList"
+        | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
+        | "duplicatesGroups" => Priority::UserAction,
+
+        // The window's status polls: tiny answers.
+        "uploadStatus" | "dropReplaced" | "dateEditStatus" | "offlineStatus" | "offlineAlbums" | "saveStatus" | "hydrateProgress" | "updateStatus"
+        | "faceScanStatus" | "faceSweepStatus" | "labelsVersion" | "sharedBackupStatus"
+        | "duplicatesStatus" | "ocrModelStatus" | "ocrResult" | "hiddenState" | "faceWipeSeen" => Priority::UserAction,
+
+        // The backups on Drive the backup settings list, a folder listing each, and the trash of one.
+        "driveBackups" | "driveBackupTrash" => Priority::UserAction,
+
+        // The upload compression settings, handed over as they change.
+        "uploadCompressionSet" => Priority::UserAction,
+
+        // What the user did: changes, and the starts of longer work that runs on by itself
+        // and answers at once.
+        "renamePhoto" | "trashPhotos" | "restorePhotos"
+        | "deletePhotosForever" | "emptyTrash" | "setFavorite" | "createAlbum" | "renameAlbum"
+        | "deleteAlbum" | "setAlbumCover" | "addPhotosToAlbum" | "removePhotosFromAlbum"
+        | "acceptInvitation" | "declineInvitation" | "invitePeople" | "removePerson"
+        | "setPublicLink" | "removePublicLink" | "stopSharing" | "pinOffline" | "unpinOffline" | "offlineAlbumSet"
+        | "unpinAllOffline" | "startSaveOriginals" | "cancelHydrate" | "saveCloudEdit"
+        | "startUpload" | "startDropUpload" | "cancelUpload" | "clearUploads" | "startImport"
+        | "dateEditInfo" | "startDateEdit" | "stopDateEdit"
+        | "prepareImport" | "confirmImport" | "discardImport" | "startMyFilesImport"
+        | "startUpdateDownload" | "semanticModelDownload" | "semanticModelRemove"
+        | "faceScanSetEnabled" | "faceScanSetPaused" | "faceScanRescan" | "faceScanClear"
+        | "faceClearHere" | "faceClearEverywhere"
+        | "faceSearchClear" | "faceNameFaces" | "faceRejectFaces" | "faceNotThisPerson" | "facePersonRename"
+        | "facePersonMerge" | "facePersonReject" | "facePersonDecline" | "facePersonCover"
+        | "facePersonAddFaces" | "facePersonRemovePhotos" | "faceSuggestionDismiss"
+        | "faceSweepStart" | "faceSweepStop" | "labelsAdd" | "labelsRemove" | "labelsSet"
+        | "labelCreate" | "labelRename" | "labelDelete" | "sharedBackupSet" | "sharedBackupNow"
+        | "diagSave" | "diagSetDetailed" | "duplicatesStart" | "duplicatesTrash"
+        | "duplicatesIgnore" | "ocrModelDownload" | "ocrModelRemove" | "ocrStart" | "hiddenSet" => Priority::UserAction,
+
+        _ => return None,
+    })
 }
 
 /// One waiter's place in line: its priority, then its arrival order. `Ord` makes a
@@ -455,6 +513,14 @@ impl SidecarGate {
         }
     }
 
+    /// Writes one line to the sidecar of `generation`, if it is still the one running: an answer
+    /// to a call it made of the host (`video_compress`), which no request of ours waits on.
+    fn post(&self, generation: u64, line: &str) -> bool {
+        let Ok(mut guard) = self.sidecar.lock() else { return false };
+        let Some(sc) = guard.as_mut().filter(|sc| sc.generation == generation) else { return false };
+        sc.stdin.write_all(line.as_bytes()).and_then(|_| sc.stdin.flush()).is_ok()
+    }
+
     fn is_abandoned(&self, id: CallId) -> bool {
         self.pending.lock().unwrap().get(&id).copied().unwrap_or(false)
     }
@@ -635,6 +701,10 @@ fn packaged_command(app: &AppHandle) -> Result<Command, String> {
     command.env("SIDECAR_RELEASE", "1");
     // This app's version, so the updater can take the update installer made for it.
     command.env("PFP_APP_VERSION", app.package_info().version.to_string());
+    // The folder the updater stages the installer in, which `run_updater` launches from.
+    // Named here rather than left to each side: Node reads TEMP first and Rust reads TMP
+    // first, so where the two differ the installer would land where it is never looked for.
+    command.env("PFP_UPDATE_DIR", std::env::temp_dir());
     // The process that holds the unlocked session reads none of these from whatever
     // environment the app was started in: each would let something else run code in
     // it (`NODE_OPTIONS=--require`, a module path) or turn its TLS checks off. A
@@ -1003,6 +1073,20 @@ fn sidecar_log(app: &AppHandle) -> Stdio {
         .unwrap_or_else(|_| Stdio::null())
 }
 
+/// Windows' own id for this installation of Windows, which stays through reinstalls of the app.
+#[cfg(windows)]
+fn machine_guid() -> Option<String> {
+    winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(
+            r"SOFTWARE\Microsoft\Cryptography",
+            winreg::enums::KEY_READ | winreg::enums::KEY_WOW64_64KEY,
+        )
+        .and_then(|k| k.get_value::<String, _>("MachineGuid"))
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     let mut command = if cfg!(debug_assertions) {
         dev_command()
@@ -1015,6 +1099,13 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     } else {
         sidecar_log(app)
     };
+
+    // The value the sidecar makes this install's id among the account's devices from, so a
+    // reinstall on the same PC writes on in the files the earlier install saved to Drive.
+    #[cfg(windows)]
+    if let Some(guid) = machine_guid() {
+        command.env("PFP_MACHINE_ID", guid);
+    }
 
     // The Node runtime is a console-subsystem executable, so Windows would pop a
     // console window every time it is spawned. Suppress it in the packaged app;
@@ -1041,6 +1132,7 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     // and an answer whose asker has gone both fall through and are dropped.
     let router: Router = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let reader_router = std::sync::Arc::clone(&router);
+    let reader_app = app.clone();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         loop {
@@ -1060,6 +1152,20 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
                     }
                     match serde_json::from_str::<serde_json::Value>(trimmed) {
                         Ok(value) => {
+                            // Something the sidecar tells, with nothing to answer.
+                            if let Some(notice) = value.get("notice").and_then(serde_json::Value::as_str) {
+                                on_sidecar_notice(&reader_app, notice);
+                                continue;
+                            }
+                            // A call of the sidecar's for the host to do, not an answer.
+                            if let (Some(call), Some(call_id)) = (
+                                value.get("call").and_then(serde_json::Value::as_str),
+                                value.get("callId").and_then(serde_json::Value::as_u64),
+                            ) {
+                                let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                                video_compress::dispatch(&reader_app, generation, call, call_id, params);
+                                continue;
+                            }
                             if let Some(id) = value.get("id").and_then(serde_json::Value::as_u64) {
                                 let waiter = reader_router.lock().unwrap().remove(&id);
                                 if let Some(tx) = waiter {
@@ -1132,7 +1238,7 @@ fn deadline_for(method: &str) -> Duration {
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
         "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
-        "getDriveCollections" => TRANSFER,
+        "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,
     }
 }
@@ -1241,7 +1347,13 @@ pub(crate) fn sidecar_rpc(
 /// once, which stalled the app). The caller owns the temp file and must remove it.
 #[cfg(windows)]
 pub(crate) fn hydrate_to_temp(app: &AppHandle, uid: &str) -> Result<(std::path::PathBuf, u64), String> {
-    let result = sidecar_rpc(app, "hydrateFile", serde_json::json!({ "uid": uid }))?;
+    // The pass that keeps every photo on this PC downloads on the background lane, so a
+    // photo the user opens is never queued behind a whole file of it.
+    #[cfg(windows)]
+    let method = if keep_all::in_pass(uid) { "hydrateFileBg" } else { "hydrateFile" };
+    #[cfg(not(windows))]
+    let method = "hydrateFile";
+    let result = sidecar_rpc(app, method, serde_json::json!({ "uid": uid }))?;
     let path = result
         .get("path")
         .and_then(|v| v.as_str())
@@ -1260,6 +1372,10 @@ fn host_only(method: &str) -> bool {
         || matches!(
             method,
             "hydrateFile"
+                | "hydrateFileBg"
+                | "mountFates"
+                | "keepReady"
+                | "mountHidden"
                 | "startHydrate"
                 | "hydrateProgress"
                 | "cancelHydrate"
@@ -1268,7 +1384,39 @@ fn host_only(method: &str) -> bool {
                 | "listAlbumsForMount"
                 | "listExtrasForMount"
                 | "startDropUpload"
+                | "dropReplaced"
         )
+}
+
+/// What the sidecar tells without being asked. `sessionEnded`: Proton refused the session while
+/// the app was open, so the window goes to the sign-in and the keep-on-this-PC pass stops.
+fn on_sidecar_notice(app: &AppHandle, notice: &str) {
+    if notice == "sessionEnded" {
+        #[cfg(windows)]
+        crate::keep_all::forget();
+        let _ = app.emit("session-ended", ());
+    }
+}
+
+/// Whether a browser sign-in's answer says another account took the place of a lapsed one.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn account_switched(answer: &serde_json::Value) -> bool {
+    answer.get("result").and_then(|r| r.get("switched")).and_then(|v| v.as_bool()) == Some(true)
+}
+
+#[cfg(test)]
+mod account_switch_tests {
+    use super::account_switched;
+    use serde_json::json;
+
+    #[test]
+    fn only_a_sign_in_that_says_so_empties_the_folder() {
+        assert!(account_switched(&json!({ "ok": true, "result": { "status": "protect", "email": "b@x", "switched": true } })));
+        assert!(!account_switched(&json!({ "ok": true, "result": { "status": "protect", "email": "a@x" } })));
+        assert!(!account_switched(&json!({ "ok": true, "result": { "status": "ok", "email": "a@x" } })));
+        assert!(!account_switched(&json!({ "ok": true, "result": { "status": "waiting" } })));
+        assert!(!account_switched(&json!({ "ok": false, "error": "x" })));
+    }
 }
 
 #[tauri::command]
@@ -1281,6 +1429,9 @@ async fn rpc(
 ) -> Result<serde_json::Value, String> {
     if host_only(&method) {
         return Err(format!("{method} is not available here"));
+    }
+    if method == "diagSave" && !diag_file_was_picked(&params) {
+        return Err("choose the file to save to first".into());
     }
     if method == "startSaveOriginals" && !save_folder_was_picked(&params) {
         return Err("choose the folder to save to first".into());
@@ -1299,7 +1450,6 @@ async fn rpc(
         shared.track(id);
     }
     let called = method.clone();
-    #[cfg(windows)]
     let app_after = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         rpc_blocking(&app, &shared, method, params, call_id)
@@ -1312,13 +1462,27 @@ async fn rpc(
         let app = app_after.clone();
         std::thread::spawn(move || cloud_mount::clear_after_sign_out(&app));
     }
+    // The account's own switches go with it, so the next account turns on only what it chooses.
+    if (called == "signOut" && result.is_ok())
+        || (called == "browserLoginStatus" && result.as_ref().is_ok_and(account_switched))
+    {
+        secure_store::turn_off_account_switches(&app_after);
+    }
+    // Another account signed in where a lapsed session left the folder: the previous
+    // account's placeholders and mount state go as at sign-out, before the answer reaches
+    // the page, so its first fill already finds the folder emptied.
+    #[cfg(windows)]
+    if called == "browserLoginStatus" && result.as_ref().is_ok_and(account_switched) {
+        let app = app_after.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || cloud_mount::clear_after_sign_out(&app)).await;
+    }
     // A change made in the app shows in the Explorer folder too, quietly and soon.
     #[cfg(windows)]
     if result.as_ref().is_ok_and(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
         && matches!(
             called.as_str(),
             "trashPhotos" | "restorePhotos" | "deletePhotosForever" | "emptyTrash" | "renamePhoto"
-                | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
+                | "duplicatesTrash" | "hiddenSet" | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
                 | "removePhotosFromAlbum" | "setFavorite" | "saveCloudEdit"
         )
     {
@@ -1331,12 +1495,70 @@ async fn rpc(
             "getTimeline" | "startTimeline" => files_drive::session_started(),
             "startUpload" | "confirmImport" => files_drive::upload_started(),
             "trashPhotos" | "restorePhotos" | "deletePhotosForever" | "emptyTrash" | "renamePhoto"
-            | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
+            | "duplicatesTrash" | "hiddenSet" | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
             | "removePhotosFromAlbum" | "saveCloudEdit" => files_drive::library_changed(),
             _ => {}
         }
     }
     result
+}
+
+/// Asks Windows Hello to confirm it is this account's owner before the Hidden page opens.
+/// Off the async runtime, since the prompt waits for the person.
+#[tauri::command]
+async fn hello_verify(window: tauri::WebviewWindow, message: String) -> Result<hello::Verification, String> {
+    #[cfg(windows)]
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?.0 as isize;
+    #[cfg(not(windows))]
+    let hwnd = {
+        let _ = &window;
+        0isize
+    };
+    tauri::async_runtime::spawn_blocking(move || hello::verify(hwnd, &message))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// With a lock set, the main window shows the taskbar preview and Peek only as the app's icon:
+/// Windows keeps the picture of what was on screen when the window went away, photos included,
+/// and would show it to anyone pointing at the taskbar.
+#[tauri::command]
+fn set_private_preview(app: AppHandle, on: bool) {
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        if let Ok(hwnd) = window.hwnd() {
+            use windows::Win32::Graphics::Dwm::{
+                DwmSetWindowAttribute, DWMWA_DISALLOW_PEEK, DWMWA_FORCE_ICONIC_REPRESENTATION,
+            };
+            let value = windows::core::BOOL::from(on);
+            let size = std::mem::size_of::<windows::core::BOOL>() as u32;
+            for attribute in [DWMWA_FORCE_ICONIC_REPRESENTATION, DWMWA_DISALLOW_PEEK] {
+                unsafe {
+                    let _ = DwmSetWindowAttribute(
+                        windows::Win32::Foundation::HWND(hwnd.0 as _),
+                        attribute,
+                        &value as *const _ as *const core::ffi::c_void,
+                        size,
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (app, on);
+}
+
+/// Whether Windows Hello is set up for this account, asked without a prompt, for Settings
+/// to offer the app lock only where it can be answered.
+#[tauri::command]
+async fn hello_available() -> bool {
+    tauri::async_runtime::spawn_blocking(hello::available).await.unwrap_or(false)
+}
+
+/// The encoders this PC has for a compressed video, for Settings to offer only the codecs it can write.
+#[tauri::command]
+async fn video_encoders() -> video_compress::Encoders {
+    tauri::async_runtime::spawn_blocking(video_compress::encoders).await.unwrap_or_default()
 }
 
 /// The folders the user picked to save originals into, this session.
@@ -1361,6 +1583,39 @@ async fn pick_save_folder(window: tauri::WebviewWindow) -> Option<String> {
     let path = picked.into_path().ok()?.to_string_lossy().into_owned();
     SAVE_FOLDERS.lock().unwrap().push(path.clone());
     Some(path)
+}
+
+/// The diagnostics files the user picked to save to, this session. `diagSave` writes only to
+/// one of them, so a renderer that has been taken over cannot aim it at any other file.
+static DIAG_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The save dialog for the diagnostics report, named [default_name], `.txt` added when left off.
+#[tauri::command]
+async fn pick_diag_file(window: tauri::WebviewWindow, default_name: String, filter_name: String) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_file_name(&default_name)
+            .add_filter(&filter_name, &["txt"])
+            .blocking_save_file()
+    })
+    .await
+    .ok()
+    .flatten()?;
+    let mut path = picked.into_path().ok()?.to_string_lossy().into_owned();
+    if !path.to_lowercase().ends_with(".txt") {
+        path.push_str(".txt");
+    }
+    DIAG_FILES.lock().unwrap().push(path.clone());
+    Some(path)
+}
+
+fn diag_file_was_picked(params: &serde_json::Value) -> bool {
+    let path = params.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+    !path.is_empty() && DIAG_FILES.lock().unwrap().iter().any(|p| p == path)
 }
 
 fn save_folder_was_picked(params: &serde_json::Value) -> bool {
@@ -1408,6 +1663,70 @@ fn background_texts(lang: &str) -> (&'static str, &'static str, &'static str) {
 fn lock_on_hide(app: &AppHandle) -> bool {
     page_setting(app, "lockOnHide").and_then(|b| b.as_bool()).unwrap_or(false)
 }
+
+/// Whether the app locks at all: Windows Hello, or the password of a vault that has one.
+#[cfg(windows)]
+fn app_lock_set(app: &AppHandle) -> bool {
+    let on = |key: &str| page_setting(app, key).and_then(|b| b.as_bool()).unwrap_or(false);
+    on("helloLock") || on("lockOnHide")
+}
+
+/// A close to the tray waiting for the page to cover itself, and whether it has.
+#[cfg(windows)]
+static COVERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COVERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The longest a close to the tray waits for that cover, so it never hangs on a page that is stuck.
+#[cfg(windows)]
+const COVER_WAIT: Duration = Duration::from_millis(400);
+
+/// The page has covered what it shows; the window may go to the tray now.
+#[tauri::command]
+fn page_covered() {
+    COVERED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Hides the main window to the tray: the key of a vault with a password goes now or once its
+/// wait is up, the page hears of it, and the page is put to sleep.
+#[cfg(windows)]
+fn hide_to_tray(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.hide();
+    }
+    // Locked from here rather than left to the page: the page is suspended a moment later and
+    // would not act on the event until it is woken, which left the session open behind the tray.
+    if lock_on_hide(app) {
+        let locking = app.clone();
+        let after = lock_after_secs(app);
+        let hidden = HIDE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        std::thread::spawn(move || {
+            // With a wait chosen, the key goes only once the window has stayed in the tray that
+            // long, not shown or hidden again since.
+            if after > 0 {
+                std::thread::sleep(Duration::from_secs(after));
+                let shown = locking
+                    .get_webview_window(MAIN_WINDOW)
+                    .and_then(|w| w.is_visible().ok())
+                    .unwrap_or(true);
+                if shown || HIDE_COUNT.load(std::sync::atomic::Ordering::SeqCst) != hidden {
+                    return;
+                }
+            }
+            let _ = sidecar_rpc(&locking, "lock", serde_json::json!({}));
+        });
+    }
+    let _ = app.emit("window-hidden", ());
+    webview_power::suspend(app);
+}
+
+/// After how many seconds in the tray the app locks; 0 for as soon as it goes there.
+#[cfg(windows)]
+fn lock_after_secs(app: &AppHandle) -> u64 {
+    page_setting(app, "lockAfter").and_then(|v| v.as_u64()).unwrap_or(0)
+}
+
+/// Counts the window's trips to the tray, so a lock timed for one trip does not fire in the next.
+#[cfg(windows)]
+static HIDE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One of the settings the page keeps sealed, for the host to act on; `None` when they
 /// cannot be read.
@@ -1588,137 +1907,6 @@ fn serve_original(app: &AppHandle, token: &str) -> tauri::http::Response<Vec<u8>
     }
 }
 
-// ---- Human verification (captcha) ----
-//
-// Proton's captcha page refuses to be iframed: its `frame-ancestors` names only
-// Proton's own web origins. That is why the official Android client hosts it in
-// a native WebView. We do the same, but as a child webview placed inside the
-// main window, so it is a top-level document and no extra OS window appears.
-//
-// The page reports its result with `window.parent.postMessage(...)`. In a
-// top-level webview that posts to itself, so the bridge below catches the event
-// and hands it to Rust via a sentinel navigation we cancel. Tauri's IPC is never
-// exposed to the remote page.
-
-const CAPTCHA_LABEL: &str = "captcha";
-const CAPTCHA_ORIGIN: &str = "https://drive-api.proton.me";
-const CAPTCHA_SENTINEL_HOST: &str = "captcha.result";
-
-const CAPTCHA_BRIDGE: &str = r#"
-(function () {
-  // Blend the page into our card: our background, centred, no scrollbar.
-  function applyStyle() {
-    var style = document.createElement('style');
-    style.textContent =
-      'html,body{background:#0e0e0f !important;margin:0 !important;}' +
-      'body{display:grid;place-items:center;min-height:100vh;}' +
-      '::-webkit-scrollbar{width:0 !important;height:0 !important;}';
-    (document.head || document.documentElement).appendChild(style);
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', applyStyle);
-  } else {
-    applyStyle();
-  }
-
-  window.addEventListener('message', function (event) {
-    if (event.origin !== 'https://drive-api.proton.me') return;
-    var data = event.data;
-    if (!data || (data.type !== 'pm_captcha' && data.type !== 'pm_captcha_expired')) return;
-    var url = new URL('https://captcha.result/');
-    url.searchParams.set('type', data.type);
-    url.searchParams.set('token', data.token || '');
-    window.location.href = url.toString();
-  });
-})();
-"#;
-
-/// Must stay `async`. Tauri runs synchronous commands on the main thread, while
-/// `add_child` posts webview creation to that same thread and waits for it, so a
-/// sync version deadlocks before the webview is ever created.
-#[tauri::command]
-async fn open_captcha(
-    app: AppHandle,
-    url: String,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-) -> Result<(), String> {
-    // Exact-origin check (not just a prefix): a look-alike host such as
-    // drive-api.proton.me.evil.test must not pass.
-    let parsed = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
-    if !url.starts_with(CAPTCHA_ORIGIN)
-        || parsed.scheme() != "https"
-        || parsed.host_str() != Some("drive-api.proton.me")
-    {
-        return Err("refusing to open a page outside the Proton captcha origin".into());
-    }
-    let window = app.get_window(MAIN_WINDOW).ok_or("no main window")?;
-    if let Some(existing) = app.get_webview(CAPTCHA_LABEL) {
-        let _ = existing.close();
-    }
-    let handle = app.clone();
-    let builder = WebviewBuilder::new(CAPTCHA_LABEL, WebviewUrl::External(parsed))
-        .initialization_script(CAPTCHA_BRIDGE)
-        // A remote page, so no window of its own: whatever it tries to pop up (a help
-        // link, or anything a compromised third-party script would open) goes nowhere.
-        // Its navigation is left free: the challenge loads its puzzle from hosts that are
-        // Proton's to choose, and a sign-in that cannot complete it is worse than the page.
-        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-        .on_navigation(move |target| {
-            if target.host_str() != Some(CAPTCHA_SENTINEL_HOST) {
-                return true;
-            }
-            let mut kind = String::new();
-            let mut token = String::new();
-            for (key, value) in target.query_pairs() {
-                match key.as_ref() {
-                    "type" => kind = value.into_owned(),
-                    "token" => token = value.into_owned(),
-                    _ => {}
-                }
-            }
-            let _ = handle.emit("captcha", serde_json::json!({ "type": kind, "token": token }));
-            false // the sentinel is a signal, never a real navigation
-        });
-
-    window
-        .add_child(
-            builder,
-            LogicalPosition::new(x, y),
-            LogicalSize::new(width, height),
-        )
-        .map_err(|e| {
-            eprintln!("[host] captcha webview creation failed: {e}");
-            e.to_string()
-        })?;
-    Ok(())
-}
-
-/// Keep the child webview glued to its placeholder as the window resizes or scrolls.
-#[tauri::command]
-async fn move_captcha(app: AppHandle, x: f64, y: f64, width: f64, height: f64) -> Result<(), String> {
-    if let Some(webview) = app.get_webview(CAPTCHA_LABEL) {
-        webview
-            .set_position(LogicalPosition::new(x, y))
-            .map_err(|e| e.to_string())?;
-        webview
-            .set_size(LogicalSize::new(width, height))
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// Async for the same reason as `open_captcha`: closing dispatches to the main thread.
-#[tauri::command]
-async fn close_captcha(app: AppHandle) -> Result<(), String> {
-    if let Some(webview) = app.get_webview(CAPTCHA_LABEL) {
-        webview.close().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
 /// Reliable click-outside dismissal for the tray popup.
 ///
 /// Focus-based dismissal is unreliable on Windows: the foreground lock keeps the
@@ -1826,9 +2014,11 @@ fn background_launch() -> bool {
 /// folder empty until the window was opened again.
 static PAGE_SETTLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// A suspend asked for before the page settled, carried out once it has.
+#[cfg_attr(not(windows), allow(dead_code))]
 static SUSPEND_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What a request to suspend the main window's page does.
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 enum SuspendNow {
     /// On screen: never.
@@ -1839,6 +2029,7 @@ enum SuspendNow {
     Later,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn suspend_decision(visible: bool, settled: bool) -> SuspendNow {
     match (visible, settled) {
         (true, _) => SuspendNow::No,
@@ -2187,6 +2378,7 @@ fn show_main_window(app: &AppHandle) {
 /// is closed. Either mouse button shows our own rounded popup (a real frameless
 /// window, not the OS menu) near the cursor — with the account, live sync status,
 /// a "Sync now" action, and Open / Sign out / Quit.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -2217,6 +2409,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 /// A frameless, transparent popup styled like the app (rounded corners). It
 /// loads the frontend, which renders the tray menu when it sees this window's
 /// label. Created hidden alongside the app's own window; shown on a tray click.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn build_tray_popup(app: &AppHandle) -> tauri::Result<()> {
     let popup =
         tauri::WebviewWindowBuilder::new(app, TRAY_POPUP_WINDOW, tauri::WebviewUrl::default())
@@ -2294,10 +2487,12 @@ fn native_show(window: &tauri::WebviewWindow) {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 fn native_show(_window: &tauri::WebviewWindow) {}
 
 /// Anchor the popup bottom-right, above the taskbar, like a standard tray flyout,
 /// then tell it to refresh its account data (it was created before sign-in).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn show_tray_popup(app: &AppHandle) {
     let Some(w) = app.get_webview_window(TRAY_POPUP_WINDOW) else {
         return;
@@ -2355,6 +2550,11 @@ fn start_background_services(app: &AppHandle) {
             autostart::declare_background(status);
         });
     }
+    // An uninstall that stopped part way can leave its flag behind; a starting app is
+    // never being uninstalled.
+    cloud_mount::clear_detaching();
+    // Copies taken off a camera for an upload in an earlier run are no longer in use.
+    device_pick::clear_staging();
     if cloud_mount::show_in_explorer_enabled() {
         cloud_mount::ensure_folder();
         cloud_mount::mount(app.clone());
@@ -2412,11 +2612,15 @@ fn run_updater(app: AppHandle) -> Result<(), String> {
                 .creation_flags(flags)
                 .spawn()
         };
-        if spawn(DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+        if let Err(e) = spawn(DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
             .or_else(|_| spawn(DETACHED_PROCESS | CREATE_NO_WINDOW))
-            .is_err()
         {
-            note(&app, "[update] could not launch the installer");
+            // The Windows error number only: it tells a blocked file (an antivirus) from a
+            // missing one, and carries no path.
+            note(
+                &app,
+                &format!("[update] could not launch the installer (os error {})", e.raw_os_error().unwrap_or(-1)),
+            );
             return Err("could not launch the installer".into());
         }
     }
@@ -2660,6 +2864,20 @@ mod capability_tests {
         serde_json::from_str(CAPABILITY).expect("the capability file is not valid JSON")
     }
 
+    /// The report is written only to a file the host's own dialog handed out, and the page
+    /// can no longer open a save dialog of its own to name one.
+    #[test]
+    fn diagnostics_are_saved_only_where_the_host_was_told_to() {
+        let picked = "C:/Users/x/Desktop/pfp-diag-test.txt";
+        assert!(!diag_file_was_picked(&serde_json::json!({ "path": picked })));
+        DIAG_FILES.lock().unwrap().push(picked.to_string());
+        assert!(diag_file_was_picked(&serde_json::json!({ "path": picked })));
+        assert!(!diag_file_was_picked(&serde_json::json!({ "path": "C:/Windows/win.ini.txt" })));
+        assert!(!diag_file_was_picked(&serde_json::json!({})));
+        let perms = capability()["permissions"].to_string();
+        assert!(!perms.contains("dialog:allow-save"));
+    }
+
     /// A window whose label the capability does not list gets no IPC at all, and the
     /// failure is silent: every call from it is refused, so it comes up as a frame with
     /// a dead page in it rather than as an error anyone sees. Nothing else in the build
@@ -2725,6 +2943,62 @@ mod capability_tests {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Deletes the files the installer set aside (`<name>.pfp-old`) in this install, best-effort: one still held
+/// by another process stays for the next start.
+fn sweep_update_leftovers() {
+    let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) else {
+        return;
+    };
+    for path in update_leftovers(&dir) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The installer's set-aside files under `dir`, skipping the data folder, which holds none.
+fn update_leftovers(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                if d == dir && entry.file_name() == "data" {
+                    continue;
+                }
+                todo.push(path);
+            } else if path.to_string_lossy().ends_with(".pfp-old") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod update_leftover_tests {
+    use super::update_leftovers;
+
+    #[test]
+    fn only_set_aside_files_outside_the_data_folder_are_found() {
+        let dir = std::env::temp_dir().join(format!("pfp-leftovers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("resources").join("sidecar")).unwrap();
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        for f in ["photosforproton.exe.pfp-old", "photosforproton.exe", "resources/sidecar/x.node.pfp-old", "data/keep.pfp-old"] {
+            std::fs::write(dir.join(f), "x").unwrap();
+        }
+        let mut found: Vec<String> = update_leftovers(&dir)
+            .into_iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["photosforproton.exe.pfp-old", "resources/sidecar/x.node.pfp-old"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 pub fn run() {
     // Keep the WebView2 profile inside the app's own data folder so, on an
     // installed build, everything (session, caches, WebView data) lives under the
@@ -2738,6 +3012,12 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // `--quit` asks the running app to quit the way its own Quit does, so whatever
+            // replaces it (an installer, a restart) never has to stop it by force.
+            if argv.iter().any(|a| a == "--quit") {
+                app.exit(0);
+                return;
+            }
             // A second launch is one of two things, and they are not the same request.
             // A file goes to the viewer and leaves the app's window exactly as it was,
             // library and all; anything else is the app itself being started again, so
@@ -2774,10 +3054,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             rpc,
+            hello_verify,
+            hello_available,
+            video_encoders,
+            page_covered,
+            set_private_preview,
             cancel_rpc,
-            open_captcha,
-            move_captcha,
-            close_captcha,
             quit_app,
             run_updater,
             restart_app,
@@ -2802,8 +3084,13 @@ pub fn run() {
             cloud_mount::local_usage,
             cloud_mount::show_in_explorer,
             cloud_mount::set_show_in_explorer,
-            cloud_mount::auto_download,
-            cloud_mount::set_auto_download,
+            cloud_mount::take_explorer_notice,
+            cloud_mount::download_mode,
+            cloud_mount::set_download_mode,
+            cloud_mount::keep_status,
+            cloud_mount::keep_pause,
+            cloud_mount::keep_estimate,
+            cloud_mount::keep_held_answer,
             cloud_mount::explorer_edits,
             cloud_mount::set_explorer_edits,
             cloud_mount::synced_albums,
@@ -2827,6 +3114,7 @@ pub fn run() {
             local_folder::list_media_folder,
             local_folder::local_thumbnails,
             upload_frame::upload_frames,
+            device_pick::pick_for_upload,
             files_drive_status,
             set_files_drive,
             set_files_drive_edits,
@@ -2834,9 +3122,18 @@ pub fn run() {
             set_files_drive_address,
             keep_running,
             set_keep_running,
-            pick_save_folder
+            pick_save_folder,
+            pick_diag_file
         ])
         .setup(|app| {
+            // Asked to quit with nothing running to quit: start nothing either.
+            if std::env::args().any(|a| a == "--quit") {
+                app.handle().exit(0);
+                return Ok(());
+            }
+            // An update installed while this app still ran set the files it held aside (`.pfp-old`); this
+            // process no longer uses them, so they go now rather than at the next update.
+            std::thread::spawn(sweep_update_leftovers);
             // The file a cold launch was asked to open. The single-instance callback
             // above never runs for the first process, and this never runs for a second
             // one, so both are needed and neither is a duplicate of the other. This one
@@ -2916,19 +3213,30 @@ pub fn run() {
                     // running invisibly with no icon to reopen it.
                     #[cfg(windows)]
                     {
-                        let _ = window.hide();
                         api.prevent_close();
-                        // Locked from here rather than left to the page: the page is
-                        // suspended a moment later and would not act on the event until
-                        // it is woken, which left the session open behind the tray.
-                        if lock_on_hide(app) {
-                            let locking = app.clone();
-                            std::thread::spawn(move || {
-                                let _ = sidecar_rpc(&locking, "lock", serde_json::json!({}));
-                            });
+                        // With a lock set, the page first covers what it shows (the lock
+                        // screen, or a blank sheet until the lock is due), so the photos
+                        // never come back on screen for a moment when the window does.
+                        if app_lock_set(app) {
+                            if !COVERING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                COVERED.store(false, std::sync::atomic::Ordering::SeqCst);
+                                let _ = app.emit("window-will-hide", ());
+                                let hiding = app.clone();
+                                std::thread::spawn(move || {
+                                    let until = Instant::now() + COVER_WAIT;
+                                    while !COVERED.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < until {
+                                        std::thread::sleep(Duration::from_millis(10));
+                                    }
+                                    let on_main = hiding.clone();
+                                    let _ = hiding.run_on_main_thread(move || {
+                                        COVERING.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        hide_to_tray(&on_main);
+                                    });
+                                });
+                            }
+                        } else {
+                            hide_to_tray(app);
                         }
-                        let _ = app.emit("window-hidden", ());
-                        webview_power::suspend(app);
                     }
                     // Linux, when asked to keep running (the default): the window only
                     // hides, and the app goes on serving the file-manager drive. It
@@ -3017,6 +3325,45 @@ mod gate_tests {
         assert_eq!(suspend_decision(true, false), SuspendNow::No);
         assert_eq!(suspend_decision(false, true), SuspendNow::Now);
         assert_eq!(suspend_decision(false, false), SuspendNow::Later);
+    }
+
+    /// The method names of the sidecar's handler tables: `name: (` or `name: async (` at
+    /// the start of a line, in the files that hold them.
+    fn sidecar_methods() -> Vec<String> {
+        let sources = [
+            include_str!("../../../sidecar/server.ts"),
+            include_str!("../../../sidecar/proton/faceApi.ts"),
+            include_str!("../../../sidecar/proton/labelApi.ts"),
+        ];
+        let mut out = Vec::new();
+        for line in sources.iter().flat_map(|s| s.lines()) {
+            let indent = line.len() - line.trim_start().len();
+            if !(2..=4).contains(&indent) {
+                continue;
+            }
+            let rest = line.trim_start();
+            let name: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            let after = &rest[name.len()..];
+            if !name.is_empty() && (after.starts_with(": (") || after.starts_with(": async (")) {
+                out.push(name);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_sidecar_method_has_its_lane_decided() {
+        let methods = sidecar_methods();
+        assert!(methods.len() > 100, "the handler tables were not read: {}", methods.len());
+        let open: Vec<&String> = methods.iter().filter(|m| super::classified(m).is_none()).collect();
+        assert!(open.is_empty(), "name these in `classified`: {open:?}");
+    }
+
+    #[test]
+    fn the_my_files_look_ahead_never_holds_up_the_window() {
+        assert!(super::is_background(super::priority_for("myFilesCheck")));
+        assert!(!super::is_background(super::priority_for("myFilesThumbs")));
+        assert!(!super::is_background(super::priority_for("myFilesList")));
     }
 
     #[test]

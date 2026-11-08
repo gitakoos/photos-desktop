@@ -47,10 +47,10 @@ import {
   scryptSync,
   timingSafeEqual,
 } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { clearDataKey, setDataKey, storeDir, wipeCache } from "./store";
+import { clearDataKey, dataKeyCopy, setDataKey, storeDir } from "./store";
 
 // ~64 MiB of work per derivation: strong for an interactive unlock, still snappy.
 const SCRYPT: import("node:crypto").ScryptOptions = {
@@ -98,12 +98,27 @@ export function vaultExists(): boolean {
   return existsSync(metaPath());
 }
 
-function sealMeta(meta: VaultMeta): Buffer {
+function sealMeta(meta: VaultMeta | LocalLockMeta): Buffer {
   if (!metaKey) throw new Error("vault meta key not set");
   const nonce = randomBytes(META_NONCE_LEN);
   const cipher = createCipheriv("aes-256-gcm", metaKey, nonce);
   const body = Buffer.concat([cipher.update(JSON.stringify(meta), "utf8"), cipher.final()]);
   return Buffer.concat([nonce, body, cipher.getAuthTag()]);
+}
+
+/** A sealed blob opened again, or null when it is torn or sealed under another key. */
+function openSealed<T>(blob: Buffer): T | null {
+  if (!metaKey || blob.length <= META_NONCE_LEN + 16) return null;
+  try {
+    const nonce = blob.subarray(0, META_NONCE_LEN);
+    const tag = blob.subarray(blob.length - 16);
+    const decipher = createDecipheriv("aes-256-gcm", metaKey, nonce);
+    decipher.setAuthTag(tag);
+    const plain = Buffer.concat([decipher.update(blob.subarray(META_NONCE_LEN, blob.length - 16)), decipher.final()]);
+    return JSON.parse(plain.toString("utf8")) as T;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -125,20 +140,8 @@ function readMeta(): { meta: VaultMeta; sealed: boolean } | null {
   } catch {
     // Not the legacy form, so it is sealed. Fall through.
   }
-  if (!metaKey || blob.length <= META_NONCE_LEN + 16) return null;
-  try {
-    const nonce = blob.subarray(0, META_NONCE_LEN);
-    const tag = blob.subarray(blob.length - 16);
-    const decipher = createDecipheriv("aes-256-gcm", metaKey, nonce);
-    decipher.setAuthTag(tag);
-    const plain = Buffer.concat([
-      decipher.update(blob.subarray(META_NONCE_LEN, blob.length - 16)),
-      decipher.final(),
-    ]);
-    return { meta: JSON.parse(plain.toString("utf8")) as VaultMeta, sealed: true };
-  } catch {
-    return null;
-  }
+  const meta = openSealed<VaultMeta>(blob);
+  return meta ? { meta, sealed: true } : null;
 }
 
 function derive(password: string, salt: Buffer): Buffer {
@@ -173,6 +176,21 @@ export function createDeviceVault(): void {
   const meta: DeviceMeta = { v: 1, mode: "device", key: key.toString("base64") };
   writeFileSync(metaPath(), sealMeta(meta));
   setDataKey(key);
+}
+
+/**
+ * Turns the open password vault into one this Windows account opens with no password, under the
+ * key it already has: everything sealed under it stays readable, so nothing is fetched or built
+ * again. False when no vault is open, or the open one already needs no password.
+ */
+export function convertToDeviceVault(): boolean {
+  if (vaultMode() !== "password") return false;
+  const key = dataKeyCopy();
+  if (!key || key.length !== KEY_LEN) return false;
+  const meta: DeviceMeta = { v: 1, mode: "device", key: key.toString("base64") };
+  writeFileSync(metaPath(), sealMeta(meta));
+  key.fill(0);
+  return true;
 }
 
 /** Which kind of vault this is, or null when there is none that opens here. */
@@ -218,18 +236,90 @@ export function unlockVault(password: string): boolean {
   return true;
 }
 
-/**
- * Sign-in path (the Proton password was just validated by SRP). Unlock the
- * existing vault if the password still matches; otherwise the password changed,
- * so drop the now-unreadable cache and start a clean vault.
- */
-export function openOrResetVault(password: string): void {
-  if (unlockVault(password)) return;
-  wipeCache();
-  createVault(password);
-}
-
 /** Forget the in-memory key (sign-out, or tray lock when "always ask" is on). */
 export function lockVault(): void {
   clearDataKey();
+}
+
+/** Whether `password` is the vault's, checked without opening anything. */
+export function checkVaultPassword(password: string): boolean {
+  const stored = readMeta();
+  if (!stored || !("salt" in stored.meta)) return false;
+  const key = derive(password, Buffer.from(stored.meta.salt, "base64"));
+  const got = verifierFor(key);
+  key.fill(0);
+  const want = Buffer.from(stored.meta.verifier, "base64");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+// ---- The local lock: Hidden and the app lock where no Windows Hello asks ----
+//
+// On Linux nothing outside the app can ask for the person's own sign-in: a Flatpak reaches no
+// polkit rule of its own and no portal verifies a user. So Hidden and the app lock ask for a
+// password instead: the vault's, when the app has one, or else one set for this lock alone,
+// kept as a scrypt verifier in a file sealed like the vault's meta.
+
+export const LOCAL_LOCK_FILE = "local-lock.json";
+/** The shortest password the local lock takes, as the app password. */
+export const LOCAL_LOCK_MIN = 8;
+
+type LocalLockMeta = { v: 1; salt: string; verifier: string };
+
+function localLockPath(): string {
+  return join(storeDir(), LOCAL_LOCK_FILE);
+}
+
+function localVerifier(key: Buffer): Buffer {
+  return createHash("sha256").update(key).update("photos-for-proton/local-lock").digest();
+}
+
+function readLocalLock(): LocalLockMeta | null {
+  try {
+    const meta = openSealed<LocalLockMeta>(readFileSync(localLockPath()));
+    return meta?.salt && meta?.verifier ? meta : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the local lock asks for: the vault's password, its own, or nothing set yet. */
+export function localLockKind(): "vault" | "own" | "none" {
+  if (vaultMode() === "password") return "vault";
+  return readLocalLock() ? "own" : "none";
+}
+
+/** Whether `password` opens the local lock. */
+export function checkLocalLock(password: string): boolean {
+  const kind = localLockKind();
+  if (kind === "vault") return checkVaultPassword(password);
+  const meta = readLocalLock();
+  if (!meta) return false;
+  const key = derive(password, Buffer.from(meta.salt, "base64"));
+  const got = localVerifier(key);
+  key.fill(0);
+  const want = Buffer.from(meta.verifier, "base64");
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+/**
+ * Sets the local lock's own password. Refused where the vault's password is the lock, for one
+ * too short, and, when one is set already, unless `current` opens it.
+ */
+export function setLocalLock(password: string, current?: string): boolean {
+  const kind = localLockKind();
+  if (kind === "vault" || password.length < LOCAL_LOCK_MIN) return false;
+  if (kind === "own" && !checkLocalLock(current ?? "")) return false;
+  const salt = randomBytes(SALT_LEN);
+  const key = derive(password, salt);
+  const meta: LocalLockMeta = { v: 1, salt: salt.toString("base64"), verifier: localVerifier(key).toString("base64") };
+  key.fill(0);
+  writeFileSync(localLockPath(), sealMeta(meta));
+  return true;
+}
+
+/** Takes the local lock's own password away, when `current` opens it. */
+export function clearLocalLock(current: string): boolean {
+  if (localLockKind() !== "own" || !checkLocalLock(current)) return false;
+  rmSync(localLockPath(), { force: true });
+  return true;
 }

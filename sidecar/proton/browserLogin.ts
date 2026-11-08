@@ -45,6 +45,8 @@ const TAG_LEN = 16;
 export const FORK_FIRST_POLL_MS = 5000;
 export const FORK_POLL_MS = 5000;
 export const FORK_GIVE_UP_MS = 10 * 60 * 1000;
+/** The least time between two asks that a return to the app brings forward. */
+export const FORK_NUDGE_GAP_MS = 1000;
 
 /** The sign-in link for a fork's user code, and the key its answer is sealed with. */
 export function signInUrl(userCode: string): { url: string; key: Buffer } {
@@ -103,6 +105,7 @@ export class BrowserSignIn {
   private selector = "";
   private stopped = false;
   private wake: (() => void) | null = null;
+  private lastAsked = 0;
 
   constructor(
     private readonly api: ForkApi,
@@ -120,6 +123,16 @@ export class BrowserSignIn {
 
   state(): BrowserSignInState {
     return this.current;
+  }
+
+  /**
+   * Asks Proton now instead of at the next turn of the wait. Called when the user comes
+   * back to the app, which is when the browser sign-in has most likely just finished;
+   * the steady five-second pace, Proton's own, stays for everything else.
+   */
+  checkNow(): void {
+    if (this.current.state !== "waiting" || Date.now() - this.lastAsked < FORK_NUDGE_GAP_MS) return;
+    this.wake?.();
   }
 
   cancel(): void {
@@ -158,6 +171,7 @@ export class BrowserSignIn {
         return;
       }
       try {
+        this.lastAsked = Date.now();
         const answer = await this.api.status(this.selector);
         if (this.stopped) return;
         if (answer) {

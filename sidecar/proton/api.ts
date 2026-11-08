@@ -24,6 +24,8 @@
 // session-aware HTTP client the Drive SDK consumes.
 
 import { Agent } from "undici";
+import { isTransient } from "./transient.ts";
+import { diag } from "./diag.ts";
 
 export const BASE_URL = "https://drive-api.proton.me";
 // Mirror the Android app's proven appVersion exactly. The underscore form passes
@@ -61,33 +63,6 @@ export function isApiUrl(url: string): boolean {
 
 export type Session = { uid: string; accessToken: string; refreshToken?: string };
 
-/** A human-verification challenge the API demands (Code 9001). */
-export type HvChallenge = { token: string; methods: string[] };
-/** The solved proof, replayed as headers on the retried request. */
-export type HvProof = { token: string; type: string };
-
-/**
- * Proton's captcha page. `ForceWebMessaging=1` makes it report the result with
- * `window.parent.postMessage({type: "pm_captcha", token}, "*")`, so it can be
- * embedded in an iframe and the token read from the message.
- */
-export const captchaUrl = (token: string): string =>
-  `${BASE_URL}/core/v4/captcha?Token=${encodeURIComponent(token)}&ForceWebMessaging=1&Dark=1`;
-
-/** Field names are not in the SDK's type set, so read defensively and log misses. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function hvChallengeFrom(json: any): HvChallenge | null {
-  if (json?.Code !== 9001) return null;
-  const d = json.Details ?? {};
-  const token = d.HumanVerificationToken ?? d.Token;
-  const methods = d.HumanVerificationMethods ?? d.Methods ?? [];
-  if (!token) {
-    process.stderr.write(`[api] 9001 without a token; Details=${JSON.stringify(d)}\n`);
-    return null;
-  }
-  return { token, methods };
-}
-
 /**
  * How long one of this module's own requests may go unanswered. Without a limit a request
  * that never returns (the machine slept mid-call, the network changed) is ended only
@@ -113,14 +88,10 @@ function baseHeaders(session?: Session): Record<string, string> {
 
 async function apiFetch(
   path: string,
-  opts: { method?: string; body?: object; session?: Session; hv?: HvProof } = {},
+  opts: { method?: string; body?: object; session?: Session } = {},
 ): Promise<Record<string, unknown>> {
   const headers = baseHeaders(opts.session);
   if (opts.body) headers["Content-Type"] = "application/json";
-  if (opts.hv) {
-    headers["x-pm-human-verification-token"] = opts.hv.token;
-    headers["x-pm-human-verification-token-type"] = opts.hv.type;
-  }
   const res = await fetch(BASE_URL + path, {
     method: opts.method ?? "GET",
     headers,
@@ -144,18 +115,12 @@ async function apiFetch(
     err.status = res.status;
     err.code = json?.Code;
     err.details = json;
-    err.hv = hvChallengeFrom(json);
     throw err;
   }
   return json;
 }
 
 export const ProtonApi = {
-  authInfo: (username: string) =>
-    apiFetch("/auth/v4/info", { method: "POST", body: { Username: username } }),
-  auth: (body: object, hv?: HvProof) => apiFetch("/auth/v4", { method: "POST", body, hv }),
-  auth2fa: (session: Session, code: string) =>
-    apiFetch("/auth/v4/2fa", { method: "POST", body: { TwoFactorCode: code }, session }),
   /** Ends the session on Proton's side, so its tokens stop working everywhere. */
   revoke: (session: Session) => apiFetch("/auth/v4", { method: "DELETE", session }),
   getUser: (session: Session) => apiFetch("/core/v4/users", { session }),
@@ -215,8 +180,12 @@ export async function refreshSession(uid: string, refreshToken: string): Promise
   if (!res.ok || (json?.Code && json.Code !== 1000)) {
     // The status travels with the error: a busy server is worth asking again, a
     // refused token is not.
-    const err = new Error(json?.Error || `token refresh failed (HTTP ${res.status})`) as Error & { status?: number };
+    const err = new Error(json?.Error || `token refresh failed (HTTP ${res.status})`) as Error & {
+      status?: number;
+      protonCode?: number;
+    };
     err.status = res.status;
+    if (typeof json?.Code === "number") err.protonCode = json.Code;
     throw err;
   }
   return { uid: json.UID ?? uid, accessToken: json.AccessToken, refreshToken: json.RefreshToken };
@@ -280,7 +249,17 @@ export function reportSlowUpload(): void {
  * tokens. Refresh is single-flight because Proton rotates the refresh token on every
  * use, so concurrent refreshes would invalidate each other and force a real logout.
  */
-export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
+export function makeSdkHttpClient(
+  session: Session,
+  onRefreshed?: () => void,
+  onLost?: () => void,
+  /**
+   * Whether this session may still spend its refresh token. False once the app locked or dropped
+   * it: Proton swaps the refresh token on every use, and a new one that cannot be saved any more
+   * leaves only the spent one on disk, so the next start has to sign in again.
+   */
+  mayRefresh: () => boolean = () => true,
+) {
   function inject(url: string, headers: Headers): Headers {
     headers.set("x-pm-appversion", APP_VERSION);
     headers.set("User-Agent", USER_AGENT);
@@ -298,7 +277,15 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
     if (!refreshing) {
       refreshing = (async () => {
         if (!session.refreshToken) throw new Error("no refresh token");
+        if (!mayRefresh()) {
+          diag.log("session", "refresh_held", { reason: "closed" });
+          throw new Error("the session was closed");
+        }
+        // Noted before the call too: a stop between Proton spending the old token and the answer
+        // arriving leaves only this line, which tells such a loss apart from any other.
+        diag.log("session", "refresh_start");
         const fresh = await refreshSession(session.uid, session.refreshToken);
+        diag.log("session", "token_refreshed");
         // Mutate the shared session object in place so later requests (and the
         // persisted blob) see the new tokens.
         session.uid = fresh.uid;
@@ -317,7 +304,10 @@ export function makeSdkHttpClient(session: Session, onRefreshed?: () => void) {
     if (res.status === 401 && isApiUrl(url)) {
       try {
         await refresh();
-      } catch {
+      } catch (e) {
+        // Refused, not just unreachable: the session was ended on Proton's side (a password
+        // change, "sign out of all devices", this device removed). The app is told at once.
+        if (!isTransient(e)) onLost?.();
         return res; // refresh failed: surface the original 401
       }
       return run(); // retry once with the fresh access token

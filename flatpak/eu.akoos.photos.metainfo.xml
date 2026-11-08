@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>eu.akoos.photos</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Photos for Proton</name>
+  <summary>Unofficial client for Proton Drive Photos</summary>
+  <description>
+    <p>
+      Photos for Proton is an unofficial, open-source client for Proton Drive
+      Photos, built on Proton's own Drive SDK and end-to-end encrypted. Browse the
+      timeline and albums, search by date, name, label or what a photo shows,
+      upload and import, edit, and share. It is not affiliated with Proton AG.
+    </p>
+    <p>
+      The library also appears as a Proton Photos entry in the file manager, where
+      photos can be opened and new ones added.
+    </p>
+  </description>
+  <launchable type="desktop-id">eu.akoos.photos.desktop</launchable>
+  <url type="homepage">https://www.photosforproton.eu</url>
+  <url type="bugtracker">https://github.com/gitakoos/photos-desktop/issues</url>
+  <url type="vcs-browser">https://github.com/gitakoos/photos-desktop</url>
+  <developer id="eu.akoos">
+    <name>Akoos</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.3.0" date="2026-11-08"/>
+    <release version="1.2.0" date="2026-10-23"/>
+    <release version="1.1.0" date="2026-10-22"/>
+    <release version="0.2.0-beta.1" date="2026-09-23"/>
+  </releases>
+</component>

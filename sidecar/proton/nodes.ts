@@ -51,6 +51,20 @@ export async function collectResults(results: AsyncGenerator<any>): Promise<Node
 }
 
 /**
+ * The node's active revision. The SDK hands it over directly; a node read back from a
+ * cache written by an older build still carries the earlier `Result` wrapper, which is
+ * unwrapped here so neither shape loses its size, date or attributes.
+ */
+export function activeRevisionOf(node: any): any {
+  const revision = node?.activeRevision;
+  if (!revision) return null;
+  if (typeof revision === "object" && "ok" in revision && !("uid" in revision)) {
+    return revision.ok ? revision.value : null;
+  }
+  return revision;
+}
+
+/**
  * `NodeEntity.name` is a `Result<string, Error | InvalidNameError>`. An invalid
  * name still carries a placeholder the client is meant to display.
  */
@@ -85,7 +99,7 @@ export function nodeName(node: any): string {
  * (a 0,0 that a camera without a fix wrote is no place either).
  */
 export function nodeLocation(node: any): [number, number] | null {
-  const revision = node?.activeRevision?.ok ? node.activeRevision.value : null;
+  const revision = activeRevisionOf(node);
   const extra = revision?.claimedAdditionalMetadata as Record<string, any> | undefined | null;
   const location = extra?.Location ?? extra?.location;
   if (!location) return null;
@@ -97,7 +111,7 @@ export function nodeLocation(node: any): [number, number] | null {
 }
 
 export function nodeDurationMs(node: any): number | null {
-  const revision = node?.activeRevision?.ok ? node.activeRevision.value : null;
+  const revision = activeRevisionOf(node);
   const extra = revision?.claimedAdditionalMetadata as Record<string, any> | undefined | null;
   if (!extra) return null;
   const media = (extra.Media ?? extra.media ?? extra) as Record<string, any>;

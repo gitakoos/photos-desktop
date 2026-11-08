@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.2.0"
+version = "1.3.0"
 description = "Photos for Proton, desktop"
 authors = ["Akoos"]
 edition = "2021"
@@ -27,14 +27,13 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# `unstable`      - multiple webviews per window (Proton's captcha refuses iframing).
 # `tray-icon`     - the system-tray icon so the app runs in the background.
 # `image-png`     - load the bundled PNG icon for the tray.
 # `protocol-asset`- lets the webview read one staging folder from disk, which is how the
 #                   viewer shows a full-resolution original without sending the whole
 #                   file over the JSON-RPC channel. Its reach is the `assetProtocol`
 #                   scope in tauri.conf.json, and nothing else.
-tauri = { version = "2", features = ["unstable", "tray-icon", "image-png", "protocol-asset"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 tauri-plugin-opener = "2"
 # Single-instance: a second launch focuses the running window instead of starting
 # a duplicate copy.
@@ -61,7 +60,11 @@ imagesize = "0.13"
 kamadak-exif = "0.6"
 # The write side of the same philosophy, for the photo editor's save. `little_exif` is
 # pure, safe Rust that manipulates the EXIF/APP1 segment without ever decoding a pixel.
-little_exif = "=0.6.23"
+# Vendored 0.6.23 (see vendor/little_exif): upstream still asks for quick-xml 0.37, which
+# RUSTSEC-2026-0194 and -0195 cover (a crafted XMP packet can stall or exhaust memory). The
+# local copy reads XMP through quick-xml 0.41, the release that fixes both, which its code
+# builds against as it is; nothing else is changed.
+little_exif = { path = "vendor/little_exif" }
 # In-app encrypted store: an AES-256-GCM data key, itself sealed at rest with a
 # per-platform keystore (user-scope DPAPI on Windows, the Secret Service on Linux).
 aes-gcm = "0.10"
@@ -93,6 +96,9 @@ windows = { version = "0.61", features = [
   # back its options as an IPropertyBag2.
   "Win32_Graphics_Imaging",
   "Win32_System_Com_StructuredStorage",
+  # DwmSetWindowAttribute: with a lock set, the taskbar preview and Peek show the app's icon,
+  # never a picture of the photos the window held when it went away.
+  "Win32_Graphics_Dwm",
   # EXIF records a capture time as a bare wall clock with no zone, so turning one into
   # an instant needs the OS's own rules for that date (DST included).
   "Win32_System_Time",
@@ -109,6 +115,8 @@ windows = { version = "0.61", features = [
   # std::fs::metadata opens the file to stat it, and to the Cloud Filter driver an
   # open that is not marked no-recall is a data access, so it hydrates the file.
   "Win32_Storage_FileSystem",
+  # Whether the PC runs on battery, which holds the pass that keeps every photo on this PC.
+  "Win32_System_Power",
   # SHChangeNotify, so a file association switched on or off in Settings reaches
   # Explorer's "Open with" straight away instead of after a sign-out, and
   # ShellExecuteW to hand the default-apps page to the shell. Also
@@ -116,6 +124,10 @@ windows = { version = "0.61", features = [
   # the shell hands back the picture Explorer itself shows for that file, so no
   # video decoder has to ship here to get one.
   "Win32_UI_Shell",
+  # COMDLG_FILTERSPEC, the file-type filter of the upload's own picker (device_pick.rs).
+  "Win32_UI_Shell_Common",
+  # IShellItem::GetAttributes takes its SFGAO_FLAGS from here, to tell a device's folder from a file.
+  "Win32_System_SystemServices",
   # IShellItem2::GetUInt32/GetUInt64, which is how a video's length and frame size
   # reach the upload: the shell answers from the same item the picture comes off, so
   # no media decoder ships here for that either.
@@ -129,7 +141,23 @@ windows = { version = "0.61", features = [
   # The notification that says what a delete in File Explorer did: Explorer itself says
   # "permanently", and the photo went to the Proton trash.
   "UI_Notifications",
+  # Whether the connection is metered, which holds the same pass.
+  "Networking_Connectivity",
   "Data_Xml_Dom",
+  # Windows Hello, the lock on the Hidden page, and the interop that parents its prompt
+  # to the app's window.
+  "Security_Credentials_UI",
+  "Win32_System_WinRT",
+  # Videos compressed for upload with Windows' own encoders (video_compress.rs): the transcoder,
+  # its encoding profiles, the files it reads and writes and their length and turn, and the
+  # Media Foundation list of encoders, which tells which codecs this PC can write in hardware.
+  "Media_Transcoding",
+  "Media_MediaProperties",
+  "Storage",
+  "Storage_FileProperties",
+  "Storage_Streams",
+  "Foundation_Collections",
+  "Win32_Media_MediaFoundation",
 ] }
 # Registers the "Proton Photos" folder as a Windows Cloud Filter sync root so it
 # shows in the Explorer navigation pane (files-on-demand comes later).
@@ -158,6 +186,9 @@ webview2-com = "0.38"
 # `windows_core::` paths, so windows-core must be a direct dependency by that name. Same
 # version webview2-com-sys binds against, so the COM interface traits unify.
 windows-core = "0.61"
+# The asynchronous answer Windows Hello's prompt gives. Already in the build through the
+# windows crate, which moved its async types here; named directly to wait on that answer.
+windows-future = "0.2"
 # The "show in File Explorer" preference (HKCU), shared with the installer checkbox.
 winreg = "0.52"
 # Seals the store's AES-256-GCM data key at rest with user-scope DPAPI. No entry is

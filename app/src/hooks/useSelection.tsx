@@ -32,17 +32,23 @@ import {
   type RefObject,
 } from "react";
 import {
+  CalendarIcon,
+  CallMergeIcon,
   CloseIcon,
   DeleteForeverIcon,
   DownloadIcon,
   ImageIcon,
+  LabelIcon,
   LibraryAddIcon,
   LibraryRemoveIcon,
   MoreHorizIcon,
   OfflinePinIcon,
+  PersonRemoveIcon,
   RefreshIcon,
   SweepIcon,
   TrashIcon,
+  VisibilityIcon,
+  VisibilityOffIcon,
 } from "../components/icons";
 import { createPortal } from "react-dom";
 import { ContextMenu, type MenuAction } from "../components/ContextMenu";
@@ -406,8 +412,16 @@ export function SelectionBar({
   onRestore,
   onDeleteForever,
   onAddToAlbum,
+  onLabels,
+  onEditDate,
   onRemoveFromAlbum,
+  onRemoveFromPerson,
+  onMergePeople,
+  onRejectPeople,
   onSetCover,
+  onHide,
+  onUnhide,
+  countKey = "common.photoCount",
 }: {
   count: number;
   /** True while one of the actions below is still working. */
@@ -426,9 +440,23 @@ export function SelectionBar({
   onRestore?: () => void;
   onDeleteForever?: () => void;
   onAddToAlbum?: () => void;
+  /** Puts labels on the selection, or takes them off. */
+  onLabels?: () => void;
+  /** Opens the date editor for the selection. */
+  onEditDate?: () => void;
   onRemoveFromAlbum?: () => void;
+  /** Takes the selection away from the person whose photos these are. */
+  onRemoveFromPerson?: () => void;
+  /** People picked on the People page: put together, or left out as not a person. */
+  onMergePeople?: () => void;
+  onRejectPeople?: () => void;
+  /** What the count names: photos, or people. */
+  countKey?: string;
   /** A cover is one photo, so the caller passes this only when one is selected. */
   onSetCover?: () => void;
+  /** Moves the selection into Hidden, or out of it on the Hidden page. */
+  onHide?: () => void;
+  onUnhide?: () => void;
 }) {
   const t = useT();
   const barRef = useRef<HTMLDivElement>(null);
@@ -454,24 +482,38 @@ export function SelectionBar({
     };
     add(onRestore, "restore", <RefreshIcon size={18} />, "primary");
     add(onAddToAlbum, "addToAlbum", <LibraryAddIcon size={18} />);
+    add(onLabels, "labels", <LabelIcon size={18} />);
+    add(onEditDate, "editDate", <CalendarIcon size={18} />);
     add(onSetCover, "setCover", <ImageIcon size={18} />);
     add(onDownload, "download", <DownloadIcon size={18} />);
     add(onFreeUp, "freeUp", <SweepIcon size={18} />);
     add(onOfflineAdd, "offlineAdd", <OfflinePinIcon size={18} />);
     add(onOfflineRemove, "offlineRemove", <OfflinePinIcon size={18} />);
     add(onRemoveFromAlbum, "removeFromAlbum", <LibraryRemoveIcon size={18} />);
+    add(onRemoveFromPerson, "removeFromPerson", <PersonRemoveIcon size={18} />);
+    add(onMergePeople, "mergePeople", <CallMergeIcon size={18} />, "primary");
+    add(onRejectPeople, "notPerson", <PersonRemoveIcon size={18} />, "danger");
+    add(onUnhide, "unhide", <VisibilityIcon size={18} />, "primary");
+    add(onHide, "hide", <VisibilityOffIcon size={18} />);
     add(onTrash, "trash", <TrashIcon size={18} />, "danger");
     add(onDeleteForever, "deleteForever", <DeleteForeverIcon size={18} />, "danger", true);
     return list;
   }, [
     onRestore,
     onAddToAlbum,
+    onLabels,
+    onEditDate,
     onSetCover,
     onDownload,
     onFreeUp,
     onOfflineAdd,
     onOfflineRemove,
     onRemoveFromAlbum,
+    onRemoveFromPerson,
+    onMergePeople,
+    onRejectPeople,
+    onUnhide,
+    onHide,
     onTrash,
     onDeleteForever,
   ]);
@@ -527,7 +569,7 @@ export function SelectionBar({
       <div className="g-pagehead">
         <h1 className="g-pagetitle">{t("selection.title")}</h1>
         <span className="g-pagesub">
-          {t(count === 1 ? "common.photoCount.one" : "common.photoCount.other", { count })}
+          {t(count === 1 ? `${countKey}.one` : `${countKey}.other`, { count })}
         </span>
       </div>
       <div className="g-spacer" />

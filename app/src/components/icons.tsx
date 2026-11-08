@@ -383,6 +383,54 @@ export function ContentCopyIcon({ size = 20 }: Props) {
   );
 }
 
+/** A window with a line at its foot: the window made small onto the taskbar. */
+export function MinimizeIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="4" width="18" height="14" rx="2" />
+      <path d="M8 21h8" />
+    </svg>
+  );
+}
+
+/** A clock face: after how long something happens. */
+export function ScheduleIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+
+/** A fingerprint: Windows Hello, the PIN, face or fingerprint this Windows account signs in with. */
+export function FingerprintIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" />
+      <path d="M14 13.12c0 2.38 0 6.38-1 8.88" />
+      <path d="M17.29 21.02c.12-.6.43-2.3.5-3.02" />
+      <path d="M2 12a10 10 0 0 1 18-6" />
+      <path d="M2 16h.01" />
+      <path d="M21.8 16c.2-2 .131-5.354 0-6" />
+      <path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2" />
+      <path d="M8.65 22c.21-.66.45-1.32.57-2" />
+      <path d="M9 6.8a6 6 0 0 1 9 5.2v2" />
+    </svg>
+  );
+}
+
+/** A cloud with an arrow going up: what this computer keeps on Proton Drive, outlined like the settings rail. */
+export function BackupIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 13v8" />
+      <path d="M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24" />
+      <path d="m8 17 4-4 4 4" />
+    </svg>
+  );
+}
+
 /** Icons.Filled.CloudUpload */
 export function CloudUploadIcon({ size = 20 }: Props) {
   return (
@@ -560,6 +608,28 @@ export function PersonAddIcon({ size = 16 }: Props) {
       <path d="M16 21v-2a4 4 0 0 0 -4 -4H6a4 4 0 0 0 -4 4v2" />
       <circle cx="9" cy="7" r="4" />
       <path d="M19 8v6M22 11h-6" />
+    </svg>
+  );
+}
+
+/** Two paths joining into one: putting two people together. */
+export function CallMergeIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M8 7l4 -4l4 4" />
+      <path d="M12 3v7.5a4 4 0 0 1 -1.2 2.8l-4.8 4.7" />
+      <path d="M12 10.5a4 4 0 0 0 1.2 2.8l4.8 4.7" />
+    </svg>
+  );
+}
+
+/** The same figure with a minus: taking a photo away from a person. */
+export function PersonRemoveIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M16 21v-2a4 4 0 0 0 -4 -4H6a4 4 0 0 0 -4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M22 11h-6" />
     </svg>
   );
 }
@@ -1133,11 +1203,47 @@ export function ArrowDownIcon({ size = 17 }: Props) {
   );
 }
 
+/** Icons.Outlined.Computer, for this PC among the devices. */
+export function ComputerIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M20 18c1.1 0 1.99 -0.9 1.99 -2L22 6c0 -1.1 -0.9 -2 -2 -2H4c-1.1 0 -2 0.9 -2 2v10c0 1.1 0.9 2 2 2H0v2h24v-2h-4ZM4 6h16v10H4V6Z" />
+    </svg>
+  );
+}
+
+/** Icons.Outlined.Devices, for the account's other devices. */
+export function DevicesIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M4 6h18V4H4c-1.1 0 -2 0.9 -2 2v11H0v3h14v-3H4V6Zm19 2h-6c-0.55 0 -1 0.45 -1 1v10c0 0.55 0.45 1 1 1h6c0.55 0 1 -0.45 1 -1V9c0 -0.55 -0.45 -1 -1 -1Zm-1 9h-4v-7h4v7Z" />
+    </svg>
+  );
+}
+
 /** Icons.Outlined.Smartphone, for what the phone saved. */
 export function PhoneIcon({ size = 17 }: Props) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
       <path d="M17 1.01L7 1c-1.1 0 -2 0.9 -2 2v18c0 1.1 0.9 2 2 2h10c1.1 0 2 -0.9 2 -2V3c0 -1.1 -0.9 -1.99 -2 -1.99ZM17 21H7v-1h10v1Zm0 -3H7V6h10v12ZM7 4V3h10v1H7Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.VisibilityOff, for hiding. */
+export function VisibilityOffIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.Visibility, for showing again. */
+export function VisibilityIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" />
     </svg>
   );
 }

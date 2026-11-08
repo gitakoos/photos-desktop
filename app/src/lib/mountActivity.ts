@@ -33,6 +33,8 @@ export type MountActivity = {
   by: string | null;
   done: number;
   total: number;
+  /** Which part of a fill runs: the photos (none), then the albums, then the tidying. */
+  phase?: "albums" | "tidy" | null;
 };
 
 /** What a "syncing" is doing and why, in words a reader can act on. */
@@ -63,7 +65,16 @@ export function describeMount(a: MountActivity, t: TFunc): SyncInfo {
     case "fill":
       return isWindows
         ? {
-            title: a.total > 0 ? t("sync.fillCount", count) : t("sync.fill"),
+            title:
+              a.phase === "albums"
+                ? a.total > 0
+                  ? t("sync.fillAlbumsCount", count)
+                  : t("sync.fillAlbums")
+                : a.phase === "tidy"
+                  ? t("sync.fillTidy")
+                  : a.total > 0
+                    ? t("sync.fillCount", count)
+                    : t("sync.fill"),
             why: t("sync.fillWhy"),
             ...count,
           }

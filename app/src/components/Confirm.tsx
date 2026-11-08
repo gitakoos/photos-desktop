@@ -28,7 +28,12 @@ type Props = {
   title: string;
   message: string;
   confirmLabel: string;
+  /** What the way out says, when "Cancel" is not the word for it. */
+  cancelLabel?: string;
   danger?: boolean;
+  /** A second way to go ahead, beside the main one, for a choice of two. */
+  altLabel?: string;
+  onAlt?: () => void;
   /**
    * For an action with no way back. Enter stops confirming and the focus rests
    * on Cancel, so the button has to be aimed at and hit deliberately.
@@ -47,7 +52,10 @@ export function Confirm({
   title,
   message,
   confirmLabel,
+  cancelLabel,
   danger,
+  altLabel,
+  onAlt,
   irreversible,
   onConfirm,
   onCancel,
@@ -79,8 +87,13 @@ export function Confirm({
         <p className="cf-msg">{message}</p>
         <div className="cf-actions">
           <button className="cf-btn" autoFocus={irreversible} onClick={onCancel}>
-            {t("common.cancel")}
+            {cancelLabel ?? t("common.cancel")}
           </button>
+          {altLabel && onAlt && (
+            <button className="cf-btn" onClick={onAlt}>
+              {altLabel}
+            </button>
+          )}
           <button
             className={`cf-btn ${danger ? "danger" : "primary"}`}
             autoFocus={!irreversible}

@@ -20,6 +20,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+// The thumbnail workers are the Windows decoders'; elsewhere only part of this file is used.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 // The neighbours of a file opened from Explorer: the rest of its folder.
 //
 // A viewer launched over one file has no list behind it, so this builds the one Explorer

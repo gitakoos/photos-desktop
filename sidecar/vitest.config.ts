@@ -37,10 +37,14 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   resolve: {
-    alias: {
-      "openpgp/lightweight": "openpgp",
-      "@protontech/drive-sdk": "@protontech/drive-sdk/src/index.ts",
-    },
+    alias: [
+      { find: "openpgp/lightweight", replacement: "openpgp" },
+      {
+        find: "@protontech/drive-sdk/dist/protonDrivePhotosClient.js",
+        replacement: "@protontech/drive-sdk/src/protonDrivePhotosClient.ts",
+      },
+      { find: /^@protontech\/drive-sdk$/, replacement: "@protontech/drive-sdk/src/index.ts" },
+    ],
   },
   test: {
     server: { deps: { inline: [/@protontech/] } },

@@ -252,6 +252,55 @@ describe("own requests: timeout", () => {
 // Node's own fetch cuts a request whose answer has not begun 300 s after it was sent,
 // even while its body is still going up: on a slow uplink every 4 MB block failed that
 // way, as "fetch failed", and was sent again at the same pace.
+describe("a session ended on Proton's side", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A first-party call refused for its token, then the refresh answered `refresh`. */
+  function stub(refresh: () => Response) {
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("/auth/v4/refresh")) return refresh();
+      return new Response("{}", { status: 401 });
+    });
+  }
+  const ask = (c: ReturnType<typeof makeSdkHttpClient>) =>
+    c.fetchJson({ url: "https://drive-api.proton.me/core/v4/users", method: "GET", headers: new Headers(), timeoutMs: 5000 });
+
+  it("is told at once when the refresh is refused", async () => {
+    let lost = 0;
+    stub(() => new Response(JSON.stringify({ Code: 10013, Error: "Invalid refresh token" }), { status: 400 }));
+    const res = await ask(makeSdkHttpClient({ uid: "u", accessToken: "a", refreshToken: "r" }, undefined, () => lost++));
+    expect(res.status).toBe(401);
+    expect(lost).toBe(1);
+  });
+
+  it("never spends the refresh token of a session the app closed", async () => {
+    let refreshed = 0;
+    let saved = 0;
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url).includes("/auth/v4/refresh")) {
+        refreshed++;
+        return new Response(JSON.stringify({ Code: 1000, UID: "u", AccessToken: "a2", RefreshToken: "r2" }), { status: 200 });
+      }
+      return new Response("{}", { status: 401 });
+    });
+    const session = { uid: "u", accessToken: "a", refreshToken: "r" };
+    const res = await ask(makeSdkHttpClient(session, () => saved++, undefined, () => false));
+    expect(res.status).toBe(401);
+    expect(refreshed).toBe(0);
+    expect(saved).toBe(0);
+    expect(session.refreshToken).toBe("r");
+  });
+
+  it("is not told for a server that is only busy or unreachable", async () => {
+    let lost = 0;
+    stub(() => new Response("{}", { status: 503 }));
+    await ask(makeSdkHttpClient({ uid: "u", accessToken: "a", refreshToken: "r" }, undefined, () => lost++));
+    expect(lost).toBe(0);
+  });
+});
+
 describe("file content on a slow line", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

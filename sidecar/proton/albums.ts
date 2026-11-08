@@ -177,43 +177,54 @@ export async function listAlbumPhotos(photos: any, uid: string): Promise<AlbumPh
 
 /**
  * Albums with their member photo uids, for the Explorer mount's `Albums\`
- * subfolders. Names and sizes are not resolved here — the mount reuses the
- * metadata gathered in the main photo pass — so this stays a cheap membership
- * walk (the album uids, then iterateAlbum per album).
+ * subfolders, a page of them at a time: `offset` and `limit` count albums. Names and
+ * sizes are not resolved here — the mount reuses the metadata gathered in the main
+ * photo pass — so this stays a membership walk (the album uids, then iterateAlbum per
+ * album, a few albums at once). A page keeps each call short, so a library with many
+ * albums never holds the channel long enough to run into the host's deadline, and the
+ * folder can say how far it has got.
  *
  * This runs on a background thread at startup and behind the tray's "Sync now",
  * which is why it takes the same uid route as the list: reading the album nodes
  * any other way leaves the cache holding whatever this pass saw.
  */
-export async function listAlbumsForMount(photos: any): Promise<AlbumMount[]> {
+export async function listAlbumsForMount(
+  photos: any,
+  offset = 0,
+  limit = Number.MAX_SAFE_INTEGER,
+): Promise<{ total: number; items: AlbumMount[] }> {
   const albumUids = await listAlbumUids(photos);
-  if (albumUids.length === 0) return [];
+  const slice = albumUids.slice(offset, offset + limit);
+  if (slice.length === 0) return { total: albumUids.length, items: [] };
 
-  const out: AlbumMount[] = [];
-  for await (const albumNode of withStallGuard(
-    photos.iterateNodes(albumUids),
-    SDK_STALL_MS,
-    "iterateNodes",
-  )) {
-    if ((albumNode as any).missingUid) continue;
-    const albumUid = (albumNode as any).uid;
+  const nodes: any[] = [];
+  for await (const albumNode of withStallGuard(photos.iterateNodes(slice), SDK_STALL_MS, "iterateNodes")) {
+    if (!(albumNode as any).missingUid) nodes.push(albumNode);
+  }
+  const members = async (albumUid: string): Promise<string[]> => {
     const uids: string[] = [];
     try {
-      for await (const item of withStallGuard(
-        photos.iterateAlbum(albumUid),
-        SDK_STALL_MS,
-        "iterateAlbum",
-      )) {
+      for await (const item of withStallGuard(photos.iterateAlbum(albumUid), SDK_STALL_MS, "iterateAlbum")) {
         const u = (item as any).nodeUid;
         if (u) uids.push(u);
       }
     } catch (e) {
-      process.stderr.write(`[albums] iterateAlbum failed: ${(e as Error).message}\n`);
+      process.stderr.write(`[albums] iterateAlbum failed: ${(e as Error).name}
+`);
     }
-    out.push({ uid: albumUid, name: nodeName(albumNode) || "Album", uids });
+    return uids;
+  };
+  const items: AlbumMount[] = [];
+  for (let i = 0; i < nodes.length; i += ALBUMS_AT_ONCE) {
+    const batch = nodes.slice(i, i + ALBUMS_AT_ONCE);
+    const lists = await Promise.all(batch.map((n) => members((n as any).uid)));
+    batch.forEach((n, j) => items.push({ uid: (n as any).uid, name: nodeName(n) || "Album", uids: lists[j] }));
   }
-  return out;
+  return { total: albumUids.length, items };
 }
+
+/** Albums whose members are read at once for the mount. */
+const ALBUMS_AT_ONCE = 3;
 
 // ---- Changing ----
 

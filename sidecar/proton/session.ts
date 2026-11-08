@@ -20,8 +20,8 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-// The authenticated Proton session: SRP login, key unlock, and the Photos
-// client. Holds state across the login -> 2FA -> browse steps.
+// The authenticated Proton session: the browser sign-in, key unlock, and the
+// Photos client.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { createHash } from "node:crypto";
@@ -29,6 +29,7 @@ import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { PhotoTag, ProtonDriveClient, ThumbnailType } from "@protontech/drive-sdk";
+import sharp from "sharp";
 import { ProtonDrivePhotosClient } from "@protontech/drive-sdk/dist/protonDrivePhotosClient.js";
 
 import {
@@ -37,22 +38,21 @@ import {
   initCrypto,
   makeOpenPGPCryptoModule,
   makeSrpModule,
-  getSrp,
 } from "./crypto.ts";
 import {
   ProtonApi,
-  captchaUrl,
   makeSdkHttpClient,
   randomModulus,
   refreshSession,
-  type HvProof,
   type Session,
 } from "./api.ts";
 import {
   ALBUM_MEMBERS_FILE,
+  BACKUP_STATE_FILE,
   DRIVE_COPIES_DIR,
   SESSION_FILE,
   isReady,
+  originalGet,
   metaGet,
   metaPut,
   readSealedOrDiscard,
@@ -63,10 +63,15 @@ import {
   writeSealedAtomic,
 } from "./store.ts";
 import {
+  checkLocalLock,
+  clearLocalLock,
   createDeviceVault,
   createVault,
+  convertToDeviceVault,
+  LOCAL_LOCK_FILE,
+  localLockKind,
   lockVault,
-  openOrResetVault,
+  setLocalLock,
   unlockDeviceVault,
   unlockVault,
   vaultExists,
@@ -76,17 +81,50 @@ import {
 import { BrowserSignIn, type ForkApi, type ForkedSession } from "./browserLogin.ts";
 import { BoundedCache } from "./boundedCache.ts";
 import {
+  HIDDEN_FOLDER,
+  LABELS_FOLDER,
+  ML_FOLDER,
+  facesFileName,
+  hiddenFileName,
+  labelsFileName,
+  listDriveBackups,
   loadDriveData,
+  otherFaceCopies,
+  saveCopy,
+  saveFaceCopy,
+  searchFileName,
+  sealEnvelope,
+  trashDriveFiles,
+  writeFaceCopy,
+  writeHiddenCopy,
+  writeLabelCopy,
+  writeSearchCopy,
   type CopyCache,
+  type DriveBackup,
   type DriveCollections,
   type DriveKinds,
+  type HiddenCopy,
   type SearchSnapshot,
 } from "./driveData.ts";
 import { encodeText, rank, SEARCH_MODEL_ID } from "./semantic.ts";
+import { deviceLabel, faceScanner } from "./faceScan.ts";
+import { installDeviceId } from "./deviceId.ts";
+import { keepDeviceNames, readBackupFlags, writeBackupFlags } from "./backupFlags.ts";
+import { labelStore, labelsForDrive, rekeyLabels, takeInLabels } from "./labelStore.ts";
+import { rekeyPeople } from "./facePeople.ts";
+import { dateEditInfo as readDateEditInfo, dateEditor, type DateEditInfo, type DateEditItem, type DateEditStatus } from "./dateEdit.ts";
+import { SavedCopies, SharedBackup, type BackupKind, type BackupStatus } from "./sharedBackup.ts";
+import { checkMyFolders, listMyFolder, type MyFolderListing } from "./myFilesImport.ts";
+import { diag } from "./diag.ts";
+import { duplicateFinder, withListingTap, type DuplicateStatus, type ShownGroups } from "./duplicates.ts";
+import { ocrModelStatus, readText, type OcrResult, type OcrStage } from "./ocr.ts";
+import { hiddenStore, type HiddenKind, type HiddenState } from "./hidden.ts";
 import { isTransient, withRetry } from "./transient.ts";
-import { nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
+import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { sameAccount } from "./accountSwitch.ts";
+import { hostNotice } from "./hostCall.ts";
 import {
   cancelHydrate as stopHydrate,
   getOriginal as readOriginal,
@@ -95,6 +133,8 @@ import {
   hydrateFile as runHydrateFile,
   hydrateProgress as readHydrateProgress,
   listForMount as readMountPage,
+  mountFates as readMountFates,
+  type MountFate,
   readOriginalBytes as takeOriginalBytes,
   releaseOriginal as dropOriginal,
   resetDownloadState,
@@ -103,6 +143,7 @@ import {
   resolveMountMetaBatch,
   startHydrate as beginHydrate,
   startSaveOriginals as runSaveOriginals,
+  viewedOriginal,
   withMediaExtension,
   type HydratedFile,
   type MountPage,
@@ -117,7 +158,14 @@ import {
   type CloudEditorSource,
 } from "./editor.ts";
 import {
+  addToOfflineAlbum,
+  isOfflineReady,
+  isPinned,
+  noteOfflineTimes,
+  offlineLibrary,
+  offlineAlbums as readOfflineAlbums,
   offlineStatus as readOfflineStatus,
+  setAlbumOffline,
   pinOffline as runPinOffline,
   resetOfflineState,
   unpinAllOffline as runUnpinAllOffline,
@@ -130,12 +178,15 @@ import {
   getUploadStatusView as readUploadStatus,
   startUpload as runUpload,
   startImport as runImport,
+  startMyFilesImport as runMyFilesImport,
+  isMediaName,
   prepareImport as runPrepareImport,
   getImportReview as readImportReview,
   getImportChecks as readImportChecks,
   confirmImport as runConfirmImport,
   discardImport as runDiscardImport,
   startDropUpload as runDropUpload,
+  takeDropReplaced,
   type ShellMediaInfo,
   type UploadStatus,
 } from "./upload.ts";
@@ -199,7 +250,16 @@ const VAULT_META_FILE = "vault.json";
 // cloud_mount.rs). Sealed there under the host's own key, but still per-account,
 // so sign-out takes it with the rest: left behind, one account's uid list makes
 // every photo in the next one look new, which is a whole-library download.
-const HOST_STATE_FILES = ["mount_seen.txt", "synced_albums.txt"];
+const HOST_STATE_FILES = [
+  "mount_seen.txt",
+  "synced_albums.txt",
+  "mount_mode.txt",
+  "mount_kept.txt",
+  "mount_freed.txt",
+  "mount_pending.txt",
+  "mount_held.txt",
+  "mount_untrashed.txt",
+];
 // What an internal-only key lookup answers for an address with no Proton account.
 const NO_SUCH_PROTON_ADDRESS = 33102;
 
@@ -220,14 +280,34 @@ const toDataUrl = (bytes: Buffer): string => `data:image/jpeg;base64,${bytes.toS
  * session state to fix a handful of missing thumbnails.
  */
 const THUMBNAIL_STALL_MS = 30_000;
+
+/** Originals downloading at once for the scan, unless its speed asks for another number. */
+const SCAN_DOWNLOADS_AHEAD = 4;
+const SCAN_DOWNLOADS_MAX = 8;
+
+/** How long the picker's knowledge of which folders hold photos is kept. */
+const MY_FOLDERS_FRESH_MS = 10 * 60_000;
+
+/** The largest original the scan reads into memory; a larger one is read from its preview. */
+const SCAN_ORIGINAL_MAX_BYTES = 200 * 1024 * 1024;
+
+/** Photo types this side cannot decode, read from their large preview instead. */
+const PREVIEW_ONLY_TYPES = new Set(["image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"]);
+
+/** Whether the decoder can read these bytes at all; a RAW file and the like cannot. */
+async function decodable(bytes: Buffer): Promise<boolean> {
+  try {
+    const meta = await sharp(bytes, { failOn: "none" }).metadata();
+    return !!meta.width && !!meta.height && meta.format !== "heif";
+  } catch {
+    return false;
+  }
+}
 /** How many uncached grid thumbnails one call fetches; the rest are asked for again. */
 const THUMBNAIL_FETCH_PER_CALL = 8;
 /** The background warmer's share of one call: it must never hold the channel long
  *  enough for a thumbnail on screen, or a page being opened, to wait on it. */
 const THUMBNAIL_WARM_PER_CALL = 2;
-
-/** How long a sign-in may wait on its 2FA code or captcha before the password goes. */
-const PENDING_SIGN_IN_MS = 10 * 60_000;
 
 /**
  * How many entries the SDK may keep before its cache starts over: nodes as serialised
@@ -238,11 +318,23 @@ const PENDING_SIGN_IN_MS = 10 * 60_000;
 const ENTITY_CACHE_LIMIT = 50_000;
 /** The pauses between asking again to resume a saved session over a network not yet up. */
 const RESUME_RETRY_MS = [2_000, 5_000];
+
+/**
+ * How often an open app asks Proton whether its session still stands, with the smallest request
+ * there is. Ended elsewhere (a stolen laptop's session removed from the account, a password
+ * change), the window then goes to the sign-in within this long, even while nobody uses it.
+ */
+const SESSION_CHECK_MS = 60_000;
+const SESSION_CHECK_URL = "https://drive-api.proton.me/core/v4/events/latest";
 /** Nodes read per request while the map gathers places, so no one request grows unbounded. */
 const LOCATION_BATCH = 500;
 /** The most timeline items one answer carries. */
 const TIMELINE_CEILING = 1_000_000;
 const CRYPTO_CACHE_LIMIT = 20_000;
+/** How many photos' read text is kept, for going back to one of them. */
+const OCR_KEPT = 40;
+/** A copy's save that fails on the network is tried again after these pauses. */
+const UPLOAD_RETRY_MS = [2_000, 5_000];
 
 /** The shortest password of the user's own that a browser sign-in may be sealed with. */
 const MIN_APP_PASSWORD = 8;
@@ -300,20 +392,37 @@ type SharedSummary = {
 type NodeMeta = { uid: string; name: string; mediaType: string | null; size?: number | null };
 
 type TimelineItem = { uid: string; captureTime: number; tags: number[] };
+/** One copy-text read: `unavailable` when the models are not on this computer. */
+type OcrJob = { state: "working" | "done" | "failed" | "unavailable"; stage: OcrStage | null; result: OcrResult | null };
+
+/** The picture formats a file on this computer is read for text from. */
+const OCR_FILE_TYPES = /\.(jpe?g|png|webp|gif|bmp|tiff?|heic|heif|avif)$/i;
+/** The largest picture file read for text. */
+const OCR_FILE_MAX_BYTES = 200 * 1024 * 1024;
+
+async function readPictureFile(path: string): Promise<Buffer | null> {
+  if (!OCR_FILE_TYPES.test(path)) return null;
+  try {
+    const { stat, readFile } = await import("node:fs/promises");
+    const info = await stat(path);
+    if (!info.isFile() || info.size > OCR_FILE_MAX_BYTES) return null;
+    return await readFile(path);
+  } catch {
+    return null;
+  }
+}
 type TimelineRun = { id: number; items: TimelineItem[]; done: boolean; error: string | null };
 type TimelinePage = { items: TimelineItem[]; done: boolean; error: string | null };
 
 type LoginResult =
   | { status: "ok"; email: string }
-  | { status: "2fa" }
-  /** The API demands human verification; `url` is the captcha page to embed. */
-  | { status: "hv"; url: string }
   /** Signed in through the browser; the user still picks how this machine keeps it. */
-  | { status: "protect"; email: string }
+  | { status: "protect"; email: string; switched?: boolean }
   /** The vault opened, but its session is gone: a new sign-in, into the same vault. */
   | { status: "relogin" }
-  /** The saved session could not be checked because Proton could not be reached. */
-  | { status: "offline" }
+  /** The saved session could not be checked because Proton could not be reached. With `email`, the
+   *  account is open on the photos kept offline (`kept` of them) until Proton answers again. */
+  | { status: "offline"; email?: string; kept?: number }
   | { status: "error"; error: string };
 
 type BrowserLoginStatus = LoginResult | { status: "waiting" } | { status: "cancelled" };
@@ -338,6 +447,8 @@ type PersistableSession = {
   userKeyPassphrases: Record<string, string>;
   /** How it was signed in; absent from a session saved before the browser sign-in. */
   method?: "password" | "browser";
+  /** The account's address, shown while Proton cannot be reached; absent from older sessions. */
+  email?: string;
 };
 
 /**
@@ -362,6 +473,19 @@ export class ProtonSession {
   /** The key password a browser sign-in delivers, in place of the account password. */
   private keyPassword = "";
   private method: "password" | "browser" = "password";
+  /**
+   * Opened from a session that was signed in with the Proton password, which this app no
+   * longer asks for: the user picks once how the app opens from now on (`keepSignIn`).
+   */
+  private legacySignIn = false;
+  /** The user keys of the account whose session lapsed, while its sign-in again is awaited. */
+  private reloginKeys: string[] | null = null;
+  /** Set when a sign-in again turned out to be another account, whose leftovers then went. */
+  private switchedAccount = false;
+  /** The minute-by-minute session check, started with the first signed-in account. */
+  private sessionWatch: ReturnType<typeof setInterval> | null = null;
+  /** The signed-in account's http client, which the session check asks through. */
+  private sessionClient: ReturnType<typeof makeSdkHttpClient> | null = null;
   private browser: BrowserSignIn | null = null;
   private browserFinish: Promise<LoginResult> | null = null;
   /** A browser sign-in is open but not yet saved: the user has not picked a protection. */
@@ -376,30 +500,61 @@ export class ProtonSession {
    * the first is still using it, and Proton answers one of the two with a sign-in.
    */
   private resuming: Promise<LoginResult> | null = null;
+  /** How a retry run in the background came out, kept for the window's next ask. */
+  private retried: LoginResult | null = null;
   /** What both Drive clients are built from, kept for the My files one built on first use. */
   private sdkBase: Record<string, unknown> | null = null;
   /** The client for My files, where the Android app keeps its copies of people and labels. */
   private myFiles: any = null;
+  /** Its decrypted keys, shared with the client each shared-backup round opens. */
+  private myFilesKeys: BoundedCache<any> | null = null;
   /** Those copies, read once a session and again only when asked, with the kinds they cover. */
   private driveCollections: { kinds: string; run: Promise<DriveReply> } | null = null;
   /** The search copies the last read brought, in the text encoder's space. */
   private searchCopies: SearchSnapshot[] = [];
+  /** Which folders of My files hold photos, as the picker found, and since when. */
+  private myFoldersKnown = new Map<string, boolean>();
+  private myFoldersAt = 0;
+  /** What the shared backup reads from Drive each round: the kinds the window shows. */
+  private backupKinds: DriveKinds | null = null;
+  /** The labels' version their copy on Drive was made from. */
+  private savedLabelsVersion = -1;
+  /** The hidden list's version its copy on Drive was made from. */
+  private savedHiddenVersion = -1;
+  private readonly savedCopies = new SavedCopies(
+    () => {
+      try {
+        return JSON.parse(readSealedOrDiscard(join(storeDir(), BACKUP_STATE_FILE))?.toString("utf8") ?? "{}");
+      } catch {
+        return {};
+      }
+    },
+    (saved) => writeSealedAtomic(join(storeDir(), BACKUP_STATE_FILE), Buffer.from(JSON.stringify(saved), "utf8")),
+  );
+  /** The Drive data files moved to the trash from here, which a listing can still show for a while. */
+  private readonly trashedCopies = new Set<string>();
+  readonly backup = new SharedBackup(
+    async () => {
+      if (this.backupKinds) await this.getDriveCollections(true, this.backupKinds);
+    },
+    () => [
+      {
+        kind: "faces",
+        dirty: (all) => faceScanner.facesDirty(all) || readBackupFlags().trashPending,
+        save: async (all) => {
+          const wrote = await faceScanner.saveFaces(all);
+          await this.trashOtherFaceCopies();
+          return wrote;
+        },
+      },
+      { kind: "search", dirty: (all) => faceScanner.searchDirty(all), save: (all) => faceScanner.saveSearch(all) },
+      { kind: "labels", dirty: (all) => this.labelsDirty(all), save: (all) => this.saveLabels(all) },
+      { kind: "hidden", dirty: (all) => this.hiddenDirty(all), save: (all) => this.saveHidden(all) },
+    ],
+  );
   private photos: any = null;
   /** Which sign-in a pending-step timer belongs to; a newer attempt disarms older ones. */
   private attempt = 0;
-
-  async login(username: string, password: string): Promise<LoginResult> {
-    initCrypto();
-    this.attempt++;
-    this.browser?.cancel();
-    this.browser = null;
-    this.username = username;
-    this.password = password;
-    this.keyPassword = "";
-    this.method = "password";
-    this.userKeyPassphrases = {};
-    return this.authenticate();
-  }
 
   /** Opens a sign-in on Proton's own page; the link for the browser comes back. */
   async startBrowserLogin(): Promise<{ url: string }> {
@@ -416,8 +571,9 @@ export class ProtonSession {
    * Where the browser sign-in stands. Once Proton answers, the account opens here, the
    * same way a password sign-in finishes; asked again meanwhile, the same answer comes.
    */
-  async browserLoginStatus(): Promise<BrowserLoginStatus> {
+  async browserLoginStatus(nudge = false): Promise<BrowserLoginStatus> {
     const signIn = this.browser;
+    if (nudge) signIn?.checkNow();
     if (!signIn) return this.browserFinish ?? { status: "cancelled" };
     const s = signIn.state();
     if (s.state === "waiting") return { status: "waiting" };
@@ -427,7 +583,13 @@ export class ProtonSession {
       return { status: "error", error: s.error };
     }
     this.browserFinish ??= this.openForked(s.session);
-    return this.browserFinish;
+    const result = await this.browserFinish;
+    // The switch is told once: the host empties the previous account's folder on hearing it, and
+    // a second ask arriving after the new account's fill must not empty that one.
+    if (result.status === "protect" && result.switched) {
+      this.browserFinish = Promise.resolve({ status: "protect", email: result.email });
+    }
+    return result;
   }
 
   cancelBrowserLogin(): { ok: boolean } {
@@ -454,7 +616,9 @@ export class ProtonSession {
     // first one waits for the user to choose how it is sealed.
     if (isReady()) return result;
     this.awaitingProtection = true;
-    return { status: "protect", email: result.email };
+    const switched = this.switchedAccount;
+    this.switchedAccount = false;
+    return switched ? { status: "protect", email: result.email, switched } : { status: "protect", email: result.email };
   }
 
   /**
@@ -473,96 +637,36 @@ export class ProtonSession {
     this.awaitingProtection = false;
     this.browserFinish = null;
     this.persistSession();
+    this.attachFaceScan();
     return { status: "ok", email: this.email };
   }
 
   /**
-   * A sign-in waiting on a second step (a 2FA code, a captcha) holds the account
-   * password in memory until that step completes. One the user walks away from would
-   * hold it for the life of the process, so it is dropped after a while, along with the
-   * half-made session: coming back later means signing in again, which costs a retype.
+   * Whether this session was signed in with the Proton password, and so still waits for the
+   * user to pick how the app opens from now on. Only while the account is open.
    */
-  private expirePendingSignIn(): void {
-    const attempt = this.attempt;
-    const timer = setTimeout(() => {
-      if (attempt !== this.attempt || this.photos) return;
-      this.password = "";
-      this.session = null;
-    }, PENDING_SIGN_IN_MS);
-    timer.unref?.();
+  signInChoice(): { legacy: boolean; mode: VaultMode | null } {
+    const open = !!this.photos && isReady();
+    return { legacy: open && this.legacySignIn, mode: vaultMode() };
   }
 
   /**
-   * The SRP handshake. A 9001 means the API wants human verification, so the
-   * caller gets a captcha URL to embed and replays this through
-   * `submitCaptcha`. The handshake is redone from scratch on that retry, so a
-   * spent SRP session is never replayed.
+   * The pick of a user signed in with the Proton password, which this app no longer asks for:
+   * `device` opens the app with this Windows account from now on (Windows Hello is a setting
+   * on top), `password` keeps the password that opens it now. Either way the vault keeps its
+   * key, so nothing is downloaded or indexed again, and the session counts as a browser
+   * sign-in from here on: a lapsed one is signed in again on Proton's page.
    */
-  private async authenticate(hv?: HvProof): Promise<LoginResult> {
-    const { username, password } = this;
-
-    const info: any = await ProtonApi.authInfo(username);
-    const proofs = await getSrp(
-      {
-        Version: info.Version,
-        Modulus: info.Modulus,
-        ServerEphemeral: info.ServerEphemeral,
-        Salt: info.Salt,
-        Username: username,
-      } as any,
-      { username, password },
-      info.Version,
-    );
-
-    let auth: any;
-    try {
-      auth = await ProtonApi.auth(
-        {
-          Username: username,
-          ClientEphemeral: proofs.clientEphemeral,
-          ClientProof: proofs.clientProof,
-          SRPSession: info.SRPSession,
-        },
-        hv,
-      );
-    } catch (e: any) {
-      if (e?.hv) {
-        const methods: string[] = e.hv.methods ?? [];
-        process.stderr.write(`[sidecar] human verification required (methods: ${methods.join(",")})\n`);
-        if (methods.length > 0 && !methods.includes("captcha")) {
-          const list = methods.join(" or ");
-          return { status: "error", error: `This sign-in needs ${list} verification, which this app cannot show yet.` };
-        }
-        this.expirePendingSignIn();
-        return { status: "hv", url: captchaUrl(e.hv.token) };
-      }
-      return { status: "error", error: (e as Error).message };
+  keepSignIn(choice: "device" | "password"): { ok: boolean; mode: VaultMode | null } {
+    if (!this.photos || !isReady() || !this.legacySignIn) return { ok: false, mode: vaultMode() };
+    if (choice === "device" && vaultMode() === "password" && !convertToDeviceVault()) {
+      return { ok: false, mode: vaultMode() };
     }
-
-    if (auth.ServerProof !== proofs.expectedServerProof) {
-      return { status: "error", error: "Server proof mismatch (do not trust this session)" };
-    }
-
-    this.session = { uid: auth.UID, accessToken: auth.AccessToken, refreshToken: auth.RefreshToken };
-
-    const twoFa = auth["2FA"]?.Enabled ?? 0;
-    if (twoFa & 1) {
-      this.expirePendingSignIn();
-      return { status: "2fa" };
-    }
-    return this.finishFreshLogin();
-  }
-
-  /** Replay the sign-in with the token the embedded captcha page produced. */
-  async submitCaptcha(token: string): Promise<LoginResult> {
-    if (!this.password) return { status: "error", error: "No sign-in is in progress" };
-    return this.authenticate({ token, type: "captcha" });
-  }
-
-  async submit2fa(code: string): Promise<LoginResult> {
-    if (!this.session) return { status: "error", error: "No session in progress" };
-    await ProtonApi.auth2fa(this.session, code);
-    return this.finishFreshLogin();
+    this.method = "browser";
+    this.keyPassword = Object.values(this.userKeyPassphrases)[0] ?? "";
+    this.legacySignIn = false;
+    this.persistSession();
+    return { ok: true, mode: vaultMode() };
   }
 
   /**
@@ -624,6 +728,23 @@ export class ProtonSession {
    * session, resume it, and unlock the Proton keys with the same password. A
    * wrong password sets no key and reveals nothing (see `unlockVault`).
    */
+  /** What Hidden and the app lock ask for where no Windows Hello answers (see `vault.ts`). */
+  localLockState(): { kind: "vault" | "own" | "none" } {
+    return { kind: localLockKind() };
+  }
+
+  localLockCheck(password: string): { ok: boolean } {
+    return { ok: typeof password === "string" && password.length > 0 && checkLocalLock(password) };
+  }
+
+  localLockSet(password: string, current?: string): { ok: boolean } {
+    return { ok: typeof password === "string" && setLocalLock(password, typeof current === "string" ? current : undefined) };
+  }
+
+  localLockClear(current: string): { ok: boolean } {
+    return { ok: typeof current === "string" && clearLocalLock(current) };
+  }
+
   async unlock(password: string): Promise<LoginResult> {
     if (!vaultExists()) return { status: "error", error: "No saved account" };
     if (!unlockVault(password)) return { status: "error", error: "wrong password" };
@@ -638,19 +759,39 @@ export class ProtonSession {
    */
   getDriveCollections(refresh: boolean, kinds: DriveKinds): Promise<DriveReply> {
     if (!this.sdkBase) return Promise.reject(new Error("Not signed in"));
-    if (!this.myFiles) {
-      this.myFiles = new ProtonDriveClient({
-        ...this.sdkBase,
-        entitiesCache: new BoundedCache(ENTITY_CACHE_LIMIT),
-        cryptoCache: new BoundedCache(CRYPTO_CACHE_LIMIT),
-      } as any);
-    }
-    const key = `${kinds.faces}:${kinds.labels}:${kinds.search}`;
+    const key = `${kinds.faces}:${kinds.labels}:${kinds.search}:${!!kinds.faceData}`;
     if (refresh || !this.driveCollections || this.driveCollections.kinds !== key) {
-      const run = loadDriveData(this.myFiles, this.sdkBase.account, kinds, driveCopyCache(), SEARCH_MODEL_ID).then(
+      const client = this.backupClient();
+      const own = installDeviceId();
+      // After a fresh install or a sign-out, the files under this install's id hold what an
+      // earlier install on this PC saved: read like another device's until a round has read them all.
+      const readBack = !readBackupFlags().ownTaken;
+      // The other devices' hidden lists are always read: what is hidden on one is hidden on all.
+      const reading = { ...kinds, hidden: true, ownDeviceId: own, readBack, trashed: this.trashedCopies };
+      const run = diag
+        .time("drive", "read_copies", () => loadDriveData(client, this.sdkBase!.account, reading, driveCopyCache(), SEARCH_MODEL_ID))
+        .then(
         (data) => {
           this.searchCopies = data.search;
-          const { search, searchOtherModel, ...collections } = data;
+          keepDeviceNames(data.deviceNames);
+          if (kinds.faceData) faceScanner.setPhoneCopies(data.faceCopies, readBack);
+          faceScanner.setPhoneSearch(data.search);
+          // The other devices' labels are put together with the ones kept here.
+          if (kinds.labels && data.labelCopies.length > 0) {
+            const before = labelStore.version;
+            labelStore.change(
+              (state) => data.labelCopies.map((copy) => takeInLabels(state, copy, readBack ? "" : own)).some(Boolean),
+              (changed) => changed,
+            );
+            if (labelStore.version !== before) this.backup.changed();
+          }
+          this.takeInHidden(data.hiddenCopies);
+          // A photo put into a hidden album since, from any app, is hidden with it, and one put
+          // into an album kept offline is fetched.
+          void this.hiddenRefresh().catch(() => undefined);
+          void this.refreshOfflineAlbums();
+          if (readBack && data.ownRead) writeBackupFlags({ ownTaken: true });
+          const { search, searchOtherModel, faceCopies, labelCopies, hiddenCopies, ownRead, deviceNames, ...collections } = data;
           return {
             ...collections,
             searchPhotos: new Set(search.flatMap((copy) => copy.keys)).size,
@@ -673,18 +814,241 @@ export class ProtonSession {
    * phone saved to Drive: their link ids and scores. Empty without the text model or an index.
    */
   async semanticSearch(query: string, limit?: number): Promise<{ key: string; score: number }[]> {
-    if (!query.trim() || this.searchCopies.length === 0) return [];
+    // One source at a time, as chosen in Settings: the index made on this computer when it is
+    // being made, else the phone's.
+    const local = faceScanner.localSearch();
+    const copies = local ? [local] : this.searchCopies;
+    if (!query.trim() || copies.length === 0) return [];
     const vector = await encodeText(query);
     if (!vector) return [];
-    return rank(this.searchCopies, vector, limit);
+    return rank(copies, vector, limit);
   }
 
-  /** Tries again to resume a session that `offline` left waiting for the network. */
-  async retryResume(): Promise<LoginResult> {
+  /**
+   * Turns the shared backup on or off, with the kinds the window shows, which each round reads
+   * from Drive before it saves.
+   */
+  setSharedBackup(on: boolean, kinds: DriveKinds): BackupStatus {
+    this.backupKinds = kinds;
+    return this.backup.setOn(on && !!this.sdkBase);
+  }
+
+  /** How the shared backup stands, with when this computer's labels were last saved. */
+  sharedBackupStatus(): BackupStatus {
+    return this.backup.getStatus();
+  }
+
+  /**
+   * "Back up now": one round of the shared backup whether its automatic rounds are on or not, every
+   * copy of this computer's written, after the other devices' were read.
+   */
+  async backUpNow(): Promise<BackupStatus> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    await faceScanner.shareOnce(() => this.backup.backUpNow());
+    return this.backup.getStatus();
+  }
+
+  /**
+   * "Load from Drive": brings in every other device's newest copies again, also the ones taken in
+   * before. It puts them together with what is here, deletes nothing and writes nothing itself.
+   */
+  async loadFromDrive(): Promise<DriveReply> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    const kinds = this.backupKinds ?? { faces: true, labels: true, search: false, faceData: false };
+    faceScanner.forgetTakenIn();
+    const labels = labelStore.get();
+    if (Object.keys(labels.applied).length > 0) {
+      labels.applied = {};
+      labelStore.write();
+    }
+    return faceScanner.shareOnce(() => this.getDriveCollections(true, kinds));
+  }
+
+  /**
+   * "Delete face data", only on this PC, while the shared backup is on: the face data here goes,
+   * and the copies on Drive are read back in at once, this install's own too, so the faces and
+   * names saved there return.
+   */
+  async clearFacesHere(): Promise<void> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    await faceScanner.clearHere();
+    void this.loadFromDrive().catch(() => undefined);
+  }
+
+  /**
+   * "Delete face data" everywhere: face recognition turns off and the face data here goes, then a
+   * round reads the other devices' copies (those from before the delete are turned away) and saves
+   * this computer's empty copy carrying the delete, after which their face copies go to the trash.
+   */
+  async clearFacesEverywhere(): Promise<void> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    await faceScanner.clearEverywhere();
+    void this.backUpNow().catch(() => undefined);
+  }
+
+  /**
+   * After a delete everywhere made here, once this computer's copy on Drive carries it: the other
+   * devices' face copies go to the Drive trash. Kept pending until that went through.
+   */
+  private async trashOtherFaceCopies(): Promise<void> {
+    if (!readBackupFlags().trashPending || !faceScanner.wipeSaved()) return;
+    const client = this.backupClient();
+    const uids = await otherFaceCopies(client, installDeviceId(), this.trashedCopies);
+    const moved = uids.length > 0 ? await trashDriveFiles(client, uids) : [];
+    for (const uid of moved) this.trashedCopies.add(uid);
+    if (moved.length < uids.length) throw new Error("the other devices' face copies did not all go to the trash");
+    writeBackupFlags({ trashPending: false });
+    process.stderr.write(`[backup] moved ${moved.length} face copies of other devices to the trash\n`);
+  }
+
+  /** The backups on Drive, device by device, newest first, for the backup settings. */
+  async driveBackups(): Promise<DriveBackup[]> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    const own = installDeviceId();
+    const { backups, names } = await listDriveBackups(
+      this.backupClient(),
+      this.sdkBase.account,
+      driveCopyCache(),
+      own,
+      readBackupFlags().names,
+      this.trashedCopies,
+    );
+    keepDeviceNames(names);
+    return backups;
+  }
+
+  /** Moves another device's backup, every file of it, to the Drive trash. */
+  async trashDriveBackup(device: string): Promise<{ moved: number }> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    const own = installDeviceId();
+    if (device === own) throw new Error("This PC's own backup is not trashed from here");
+    const backup = (await this.driveBackups()).find((b) => b.device === device);
+    if (!backup) return { moved: 0 };
+    const moved = await trashDriveFiles(this.backupClient(), backup.files);
+    for (const uid of moved) this.trashedCopies.add(uid);
+    diag.log("backup", "trash_device", { files: backup.files.length, moved: moved.length });
+    if (moved.length < backup.files.length) throw new Error("Some of the files did not go to the trash");
+    return { moved: moved.length };
+  }
+
+  private labelsDirty(all = false): boolean {
+    if (!this.backupKinds?.labels || (!all && labelStore.version === this.savedLabelsVersion)) return false;
+    const state = labelStore.get();
+    return Object.keys(state.photos).length + Object.keys(state.names).length + Object.keys(state.deleted).length > 0;
+  }
+
+  /** Puts the other devices' hidden lists together with this one, the later change winning. */
+  private takeInHidden(copies: HiddenCopy[]): void {
+    const newAlbums: string[] = [];
+    let changed = false;
+    for (const copy of copies) {
+      const result = hiddenStore.takeIn(copy);
+      if (!result) continue;
+      changed = true;
+      newAlbums.push(...result);
+    }
+    if (!changed) return;
+    this.backup.changed();
+    if (newAlbums.length > 0) void this.readHiddenAlbums(newAlbums);
+  }
+
+  /** Reads the photos of albums another device hid, known here by their link ids only. */
+  private async readHiddenAlbums(links: string[]): Promise<void> {
+    if (!this.photos) return;
+    try {
+      const root = await this.photos.getMyPhotosRootFolder();
+      const rootUid: string = root?.uid ?? root?.value?.uid ?? "";
+      const volume = rootUid.slice(0, rootUid.lastIndexOf("~"));
+      if (!volume) return;
+      for (const link of links) {
+        const uid = `${volume}~${link}`;
+        hiddenStore.setAlbumUid(uid);
+        hiddenStore.setMembers(uid, await this.albumMemberUids(uid));
+      }
+    } catch (e) {
+      if (!isTransient(e)) process.stderr.write(`[hidden] a hidden album could not be read: ${(e as Error)?.name ?? "error"}\n`);
+    }
+  }
+
+  private hiddenDirty(all = false): boolean {
+    return (all || hiddenStore.version !== this.savedHiddenVersion) && !hiddenStore.isEmpty();
+  }
+
+  /** Writes this computer's hidden list to Drive, sealed as the labels are. */
+  private async saveHidden(all = false): Promise<boolean> {
+    const version = hiddenStore.version;
+    const id = installDeviceId();
+    const at = Date.now();
+    const copy = hiddenStore.forDrive(id, deviceLabel(), at);
+    const wrote = await this.upload("hidden", writeHiddenCopy({ ...copy, createdAt: 0 }), writeHiddenCopy(copy), HIDDEN_FOLDER, hiddenFileName(id), at, all);
+    this.savedHiddenVersion = version;
+    if (wrote) process.stderr.write(`[hidden] saved the hidden list to Drive: ${copy.photos.length} photos, ${copy.albums.length} albums\n`);
+    return wrote;
+  }
+
+  /** Writes this computer's labels to Drive, sealed as the phone seals its own. */
+  private async saveLabels(all = false): Promise<boolean> {
+    const version = labelStore.version;
+    const id = installDeviceId();
+    const at = Date.now();
+    const copy = labelsForDrive(labelStore.get(), id, deviceLabel(), at);
+    const wrote = await this.upload("labels", writeLabelCopy({ ...copy, createdAt: 0 }), writeLabelCopy(copy), LABELS_FOLDER, labelsFileName(id), at, all);
+    this.savedLabelsVersion = version;
+    if (wrote) process.stderr.write(`[labels] saved the labels to Drive: ${copy.photos.length} photos\n`);
+    return wrote;
+  }
+
+  /**
+   * Writes one of this computer's copies to Drive unless it holds what the copy there already
+   * does (`all` writes it anyway): `same` is the copy with its time left out, which is what is
+   * compared. A save that fails on the network is tried again twice, after 2 and 5 seconds. Answers
+   * whether it was written.
+   */
+  private async upload(
+    kind: BackupKind,
+    same: Buffer,
+    plain: Buffer,
+    folder: string,
+    name: string,
+    at: number,
+    all = false,
+  ): Promise<boolean> {
+    if (!all && this.savedCopies.unchanged(kind, same)) return false;
+    const sealed = await this.sealForDrive(plain);
+    await withRetry(() => saveCopy(this.backupClient(), folder, name, sealed, new Date(at)), UPLOAD_RETRY_MS);
+    this.savedCopies.record(kind, same);
+    return true;
+  }
+
+  /** Seals `plain` to the account's primary address key and signs it with it, as the phone does. */
+  private async sealForDrive(plain: Buffer): Promise<Buffer> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    const address = await (this.sdkBase.account as any).getOwnPrimaryAddress();
+    const key = (address.keys ?? [])[address.primaryKeyIndex ?? 0]?.key;
+    if (!key) throw new Error("no address key");
+    return sealEnvelope(plain, key, key);
+  }
+
+  /**
+   * Tries again to resume a session that `offline` left waiting for the network. The try runs
+   * in the background and this answers at once: with no network a refresh can take most of a
+   * minute, and the photos kept offline are open meanwhile on the same channel. The outcome
+   * is the answer to the next call.
+   */
+  retryResume(): LoginResult {
+    if (this.retried) {
+      const result = this.retried;
+      this.retried = null;
+      return result;
+    }
+    if (this.resuming) return { status: "offline" };
     if (!isReady() || this.offlineResume === null) {
       return { status: "error", error: "Nothing is waiting to be resumed" };
     }
-    return this.resumeSaved(this.offlineResume);
+    void this.resumeSaved(this.offlineResume).then((result) => {
+      if (result.status !== "offline") this.retried = result;
+    });
+    return { status: "offline" };
   }
 
   /** Cold start of a vault that needs no password: this Windows account opens it. */
@@ -710,7 +1074,7 @@ export class ProtonSession {
   }
 
   private async resumeOnce(password: string): Promise<LoginResult> {
-    this.offlineResume = null;
+    // Left as it is until this try is decided: the photos kept offline stay open meanwhile.
     try {
       // A blob that will not open is no more recoverable than one that is not there, so
       // it is answered the same way: the password has just been proved correct, and this
@@ -729,37 +1093,31 @@ export class ProtonSession {
         }
       }
       if (!blob) {
+        this.offlineResume = null;
         lockVault();
         return { status: "error", error: "No saved session" };
       }
-      let result = await this.resumeSession(blob, password);
+      const result = await this.resumeSession(blob, password);
+      if (result.status !== "offline") this.offlineResume = null;
       if (result.status === "offline") {
         // Nothing says the session is gone, only that it could not be asked about: the
         // vault stays open and the window tries again, instead of a full sign-in that
         // would ask for the password and the second factor all over.
         this.offlineResume = password;
-        return result;
+        // The photos kept offline open as they are until Proton answers again.
+        const kept = offlineLibrary().length;
+        diag.log("session", "offline_library", { kept });
+        return kept > 0 ? { status: "offline", email: blob.email || blob.username || undefined, kept } : result;
       }
-      if (result.status !== "ok" && (blob.method === "browser" || !password)) {
-        // No account password to sign in again with: Proton's page has to do it, and
-        // the vault stays open so the new session lands in it with the cache intact.
-        this.session = null;
-        return { status: "relogin" };
-      }
+      // A session first signed in with the Proton password, which the app no longer asks for.
+      if ((blob.method ?? "password") === "password") this.legacySignIn = true;
       if (result.status !== "ok") {
-        // The stored tokens are dead (e.g. the refresh token expired), but the
-        // vault opened, so the password is correct. Fall back to a fresh SRP
-        // login for new tokens, keeping the vault key and the cache intact.
-        this.attempt++;
-        this.username = blob.username;
-        this.password = password;
-        this.userKeyPassphrases = {};
-        result = await this.authenticate();
-      }
-      // Only a hard failure relocks; an in-progress hv/2fa keeps the unlocked
-      // vault so the follow-up step can persist the freshly issued session.
-      if (result.status === "error") {
-        this.lock();
+        // Proton's page signs in again, and the vault stays open so the new session lands
+        // in it with the cache intact. The password that opened the vault is not used for
+        // that, even where it is the account's own.
+        this.session = null;
+        this.reloginKeys = Object.keys(blob.userKeyPassphrases ?? {});
+        return { status: "relogin" };
       }
       return result;
     } catch (e) {
@@ -770,20 +1128,36 @@ export class ProtonSession {
 
   /** Drop the in-memory session and forget the vault key; the next use needs an unlock. */
   lock(): { ok: boolean } {
-    // First, so no thumbnail is served from a session that is going away.
+    // First, so no thumbnail is served from a session that is going away, and the faces are
+    // written while the key that seals them is still here.
     void stopThumbServer();
+    dateEditor.detach();
+    this.backup.stop();
+    this.backupKinds = null;
+    this.trashedCopies.clear();
+    this.savedLabelsVersion = -1;
+    this.savedHiddenVersion = -1;
+    faceScanner.setDriveWriter(null);
+    faceScanner.setSource(null);
+    duplicateFinder.setSource(null);
+    labelStore.unload();
+    hiddenStore.unload();
     this.thumbWaiting.clear();
     lockVault();
     this.offlineResume = null;
+    this.retried = null;
     this.timelineRun = null;
     this.browser?.cancel();
     this.browser = null;
     this.browserFinish = null;
     this.awaitingProtection = false;
+    this.reloginKeys = null;
     this.session = null;
     this.photos = null;
     this.sdkBase = null;
     this.myFiles = null;
+    this.myFilesKeys = null;
+    this.ocrRead.clear();
     this.driveCollections = null;
     this.searchCopies = [];
     this.email = "";
@@ -810,9 +1184,16 @@ export class ProtonSession {
     const live = this.session;
     if (live) void ProtonApi.revoke(live).catch(() => {});
     this.lock();
+    this.removeStoredAccount();
+    return { ok: true };
+  }
+
+  /** What sign-out deletes on disk: the saved session, the vault, the host's mount state, the cache. */
+  private removeStoredAccount(): void {
     try {
       rmSync(join(storeDir(), SESSION_FILE), { force: true });
       rmSync(join(storeDir(), VAULT_META_FILE), { force: true });
+      rmSync(join(storeDir(), LOCAL_LOCK_FILE), { force: true });
       // The host's mount state lives in this same directory and is plaintext:
       // the auto-download baseline is a list of this account's photo uids, and
       // the album list is what it chose to keep offline. Neither survives the
@@ -828,7 +1209,76 @@ export class ProtonSession {
       );
     }
     wipeCache();
-    return { ok: true };
+  }
+
+  /**
+   * Asks Proton now and then whether the session stands. A refusal reaches `sessionLost` through
+   * the http client's refresh; a network that is down is only waited out.
+   */
+  private watchSession(): void {
+    if (this.sessionWatch) return;
+    this.sessionWatch = setInterval(() => {
+      const client = this.sessionClient;
+      if (!this.session || !client) return;
+      void client
+        .fetchJson({ url: SESSION_CHECK_URL, method: "GET", headers: new Headers(), timeoutMs: 15_000 })
+        .catch(() => {});
+    }, SESSION_CHECK_MS);
+    this.sessionWatch.unref?.();
+  }
+
+  /**
+   * Proton refused the session while the app was open: it was ended elsewhere. Nothing more is
+   * shown or fetched from it, and the window goes to the sign-in at once. The vault stays, as when
+   * a lapsed session is found at start: the same account signing in again finds everything, and
+   * another account clears it first (`forgetPreviousAccount`).
+   */
+  private sessionLost(): void {
+    if (!this.session) return;
+    diag.log("session", "lost");
+    this.reloginKeys = Object.keys(this.userKeyPassphrases);
+    void stopThumbServer();
+    dateEditor.detach();
+    this.backup.stop();
+    faceScanner.setDriveWriter(null);
+    faceScanner.setSource(null);
+    duplicateFinder.setSource(null);
+    this.thumbWaiting.clear();
+    this.timelineRun = null;
+    this.session = null;
+    this.photos = null;
+    this.sdkBase = null;
+    this.myFiles = null;
+    this.myFilesKeys = null;
+    this.email = "";
+    resetDownloadState();
+    process.stderr.write("[sidecar] the session was ended on Proton's side\n");
+    hostNotice("sessionEnded");
+  }
+
+  /**
+   * Lets go of everything the previous account kept on this PC while the session of the
+   * account now signing in stays: what sign-out unloads and deletes, minus the session.
+   */
+  private forgetPreviousAccount(): void {
+    void stopThumbServer();
+    dateEditor.detach();
+    this.backup.stop();
+    this.backupKinds = null;
+    this.trashedCopies.clear();
+    this.savedLabelsVersion = -1;
+    this.savedHiddenVersion = -1;
+    faceScanner.setDriveWriter(null);
+    faceScanner.setSource(null);
+    duplicateFinder.setSource(null);
+    labelStore.unload();
+    hiddenStore.unload();
+    this.thumbWaiting.clear();
+    this.legacySignIn = false;
+    lockVault();
+    this.removeStoredAccount();
+    resetDownloadState();
+    resetOfflineState();
   }
 
   /**
@@ -837,9 +1287,13 @@ export class ProtonSession {
    * never lost. A no-op while the vault is locked (nothing to seal with).
    */
   private persistSession(): void {
-    if (!isReady()) return;
+    if (!isReady()) {
+      diag.log("session", "persist_skipped", { reason: "locked" });
+      return;
+    }
     const blob = this.getPersistable();
     if (!blob) return;
+    diag.log("session", "persist");
     try {
       // Written aside and renamed rather than in place: this runs on every token
       // refresh, so a write torn by a crash would leave an unreadable session behind
@@ -862,6 +1316,7 @@ export class ProtonSession {
     try {
       // A network that is still coming up (the app starts with Windows, a VPN is
       // connecting) is asked again a few times before the session is given up on.
+      diag.log("session", "resume_refresh");
       const fresh = await withRetry(() => refreshSession(blob.uid, blob.refreshToken), RESUME_RETRY_MS);
       this.session = fresh;
       this.username = blob.username;
@@ -881,6 +1336,13 @@ export class ProtonSession {
       this.persistSession();
       return this.finishLogin();
     } catch (e) {
+      const err = e as { status?: number; protonCode?: number; name?: string };
+      diag.log("session", "resume_failed", {
+        transient: isTransient(e),
+        status: typeof err.status === "number" ? err.status : null,
+        code: typeof err.protonCode === "number" ? err.protonCode : null,
+        kind: err.name ?? null,
+      });
       if (isTransient(e)) return { status: "offline" };
       return { status: "error", error: `resume failed: ${(e as Error).message}` };
     }
@@ -902,6 +1364,7 @@ export class ProtonSession {
       username: this.username,
       userKeyPassphrases: this.userKeyPassphrases,
       method: this.method,
+      ...(this.email ? { email: this.email } : {}),
     };
   }
 
@@ -916,13 +1379,21 @@ export class ProtonSession {
   }
 
   private async finishLogin(): Promise<LoginResult> {
-    // Capture the password before `buildAccount` clears it: a fresh sign-in needs
-    // it to derive the vault key. Resume/unlock arrive with the vault already open.
-    const password = this.password;
+    const live = this.session!;
     try {
       const account = await this.buildAccount();
       const sdkBase = {
-        httpClient: makeSdkHttpClient(this.session!, () => this.persistSession()),
+        httpClient: withListingTap(
+          makeSdkHttpClient(
+            live,
+            () => this.persistSession(),
+            () => {
+              if (this.session === live) this.sessionLost();
+            },
+            // A call still running after a lock or a sign-out must not swap the saved refresh token.
+            () => this.session === live && isReady(),
+          ),
+        ),
         account,
         openPGPCryptoModule: makeOpenPGPCryptoModule(),
         // Read per call, so a token refresh (which rewrites the session in
@@ -945,14 +1416,21 @@ export class ProtonSession {
         cryptoCache: new BoundedCache(CRYPTO_CACHE_LIMIT),
       } as any);
       this.sdkBase = sdkBase;
+      this.sessionClient = sdkBase.httpClient;
       const primary = await account.getOwnPrimaryAddress();
       this.email = primary.email;
-      // Fresh sign-in: derive the vault key from the just-verified password. It
-      // is not re-run when unlock already opened the vault (avoids a second scrypt).
-      if (password && !isReady()) openOrResetVault(password);
+      // Another account signing in where a lapsed one left its vault open inherits nothing:
+      // the vault goes as at sign-out, and this sign-in is sealed afresh like a first one.
+      if (this.reloginKeys && isReady() && !sameAccount(this.reloginKeys, Object.keys(this.userKeyPassphrases))) {
+        this.forgetPreviousAccount();
+        this.switchedAccount = true;
+      }
+      this.reloginKeys = null;
+      this.watchSession();
       // Persist the session (rotated refresh token included) whenever the vault is
       // open, so a cold start can resume without a full re-login.
       if (isReady()) this.persistSession();
+      if (isReady()) this.attachFaceScan();
       return { status: "ok", email: primary.email };
     } catch (e) {
       if (isTransient(e)) return { status: "offline" };
@@ -1103,6 +1581,296 @@ export class ProtonSession {
     };
   }
 
+  /** Hands the face scan this account's library to read, and the way to its copy on Drive. */
+  private attachFaceScan(): void {
+    const photos = this.photos;
+    const base = this.sdkBase;
+    if (!photos || !base) return;
+    faceScanner.setSource({
+      listUids: async () => (await this.getTimeline()).map((item) => item.uid),
+      pictures: (uids, ahead) => this.scanPictures(photos, uids, ahead),
+      listTrashed: async () => {
+        const links = new Set<string>();
+        for await (const uid of withStallGuard(photos.iterateTrashedNodeUids(), SDK_STALL_MS, "iterateTrashedNodeUids")) {
+          const text = String(uid);
+          links.add(text.slice(text.indexOf("~") + 1));
+        }
+        return links;
+      },
+      // As on the phone, a hidden photo's faces are neither looked for nor shared.
+      hiddenTest: () => hiddenStore.hiddenPhotoTest(),
+    });
+    duplicateFinder.setSource({
+      // As on the phone, a hidden photo is in no group.
+      list: async () => {
+        const hidden = hiddenStore.hiddenPhotoTest();
+        return (await this.getTimeline()).filter((item) => !hidden(item.uid)).map((item) => ({ uid: item.uid, captureTime: item.captureTime }));
+      },
+      thumbnails: (uids) => this.duplicateThumbnails(photos, uids),
+    });
+    faceScanner.setDriveWriter(
+      (copy, all) =>
+        this.upload(
+          "faces",
+          writeFaceCopy({ ...copy, createdAt: 0 }),
+          writeFaceCopy(copy),
+          ML_FOLDER,
+          facesFileName(copy.deviceId),
+          copy.createdAt,
+          all,
+        ),
+      (copy, all) =>
+        this.upload(
+          "search",
+          writeSearchCopy({ ...copy, createdAt: 0 }),
+          writeSearchCopy(copy),
+          ML_FOLDER,
+          searchFileName(copy.deviceId),
+          copy.createdAt,
+          all,
+        ),
+      () => this.backup.changed(),
+    );
+    dateEditor.attach({
+      photos,
+      addToAlbum: (albumUid, uids) => this.addPhotosToAlbum(albumUid, uids),
+      trash: (uids) => this.trashPhotos(uids),
+      carry: (oldUid, newUid) => this.carryToCopy(oldUid, newUid),
+    });
+  }
+
+  // ---- Changing photos' dates (dateEdit.ts) ----
+
+  /** What the date editor shows of each photo: its name, date, the date its name records, whether it can change. */
+  async dateEditInfo(uids: string[]): Promise<DateEditInfo[]> {
+    if (!this.photos) throw new Error("Not signed in");
+    return readDateEditInfo(this.photos, uids);
+  }
+
+  /** Queues photos for a new capture date; answers at once, the window follows `dateEditStatus`. */
+  startDateEdit(items: DateEditItem[]): DateEditStatus {
+    if (!this.photos) throw new Error("Not signed in");
+    return dateEditor.start(items);
+  }
+
+  dateEditStatus(): DateEditStatus {
+    return dateEditor.getStatus();
+  }
+
+  stopDateEdit(): DateEditStatus {
+    return dateEditor.stop();
+  }
+
+  /**
+   * Moves what this computer keeps by a photo to the copy that replaced it: hidden, labels, faces,
+   * the search index, kept offline, and an album cover. Each part on its own, so one that fails
+   * costs that part and never the date change, as on the phone.
+   */
+  private async carryToCopy(oldUid: string, newUid: string): Promise<void> {
+    const step = async (what: string, run: () => unknown) => {
+      try {
+        await run();
+      } catch (e) {
+        process.stderr.write(`[dateedit] carrying the ${what} over failed: ${(e as Error)?.message ?? e}\n`);
+      }
+    };
+    const link = (uid: string) => uid.slice(uid.indexOf("~") + 1);
+    await step("hidden mark", () => hiddenStore.rekeyPhoto(oldUid, newUid));
+    await step("labels", () =>
+      labelStore.change((state) => rekeyLabels(state, link(oldUid), link(newUid), Date.now()), (moved) => moved),
+    );
+    await step("faces", () => {
+      const store = faceScanner.store;
+      const moved = store.movePhoto(oldUid, newUid);
+      if (!moved) return;
+      rekeyPeople(store.people, oldUid, newUid, moved.ids, moved.merged);
+      store.markPeople();
+      store.edits++;
+      faceScanner.changed();
+    });
+    await step("search index", () => {
+      if (faceScanner.search.move(oldUid, newUid)) faceScanner.search.flush();
+    });
+    await step("offline copy", () => {
+      if (!isPinned(oldUid) || !this.photos) return;
+      runPinOffline(this.photos, [newUid]);
+      runUnpinOffline([oldUid]);
+    });
+    await step("album cover", async () => {
+      if (!this.photos) return;
+      for (const album of await readAlbums(this.photos)) {
+        if (album.coverUid === oldUid) await runSetAlbumCover(this.photos, album.uid, newUid);
+      }
+    });
+    this.backup.changed();
+  }
+
+  /** The Drive client for My files, made the first time it is needed. */
+  private myFilesClient(): any {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    if (!this.myFiles) {
+      this.myFilesKeys = new BoundedCache(CRYPTO_CACHE_LIMIT);
+      this.myFiles = new ProtonDriveClient({
+        ...this.sdkBase,
+        entitiesCache: new BoundedCache(ENTITY_CACHE_LIMIT),
+        cryptoCache: this.myFilesKeys,
+      } as any);
+    }
+    return this.myFiles;
+  }
+
+  /**
+   * A Drive client for one read or save of the shared backup, whose nodes come fresh from the
+   * server: the long-lived client's node cache never learns of a revision, a file or a folder
+   * another device wrote. The decrypted keys, which a new revision does not change, are shared.
+   */
+  private backupClient(): any {
+    this.myFilesClient();
+    return new ProtonDriveClient({
+      ...this.sdkBase,
+      entitiesCache: new BoundedCache(ENTITY_CACHE_LIMIT),
+      cryptoCache: this.myFilesKeys,
+    } as any);
+  }
+
+  /**
+   * What the scan reads for `uids`, as the phone reads it: a photo's full-resolution original,
+   * downloaded into memory and dropped once read (or the copy kept offline, when there is one),
+   * and the large preview of a video, or of a photo in a format this side cannot decode. The
+   * next originals, up to `ahead` at once, download while the one before is read. A photo whose
+   * download failed for now is left out, to be asked for again on a later pass.
+   */
+  private async *scanPictures(
+    photos: any,
+    uids: string[],
+    ahead = SCAN_DOWNLOADS_AHEAD,
+  ): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+    ahead = Math.max(1, Math.min(SCAN_DOWNLOADS_MAX, Math.floor(ahead) || SCAN_DOWNLOADS_AHEAD));
+    let types = new Map<string, string | null>();
+    try {
+      types = await resolveMediaTypesBatch(photos, uids);
+    } catch {
+      /* the type is read off each node below instead */
+    }
+    const previewOnly: string[] = [];
+    const originals: string[] = [];
+    for (const uid of uids) {
+      const type = (types.get(uid) ?? metaGet(uid)?.mediaType ?? "").toLowerCase();
+      if (type.startsWith("image/") && !PREVIEW_ONLY_TYPES.has(type)) originals.push(uid);
+      else previewOnly.push(uid);
+    }
+    const fetchOne = async (uid: string): Promise<Buffer | "later" | null> => {
+      const kept = originalGet(uid);
+      if (kept) return kept;
+      try {
+        const downloader = await photos.getFileDownloader(uid);
+        const claimed = downloader.getClaimedSizeInBytes?.() ?? 0;
+        if (claimed > SCAN_ORIGINAL_MAX_BYTES) return null;
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        const sink = new WritableStream<Uint8Array>({
+          write(chunk) {
+            total += chunk.byteLength;
+            if (total > SCAN_ORIGINAL_MAX_BYTES) throw new Error("too large to read");
+            chunks.push(chunk);
+          },
+        });
+        await downloader.downloadToStream(sink as any).completion();
+        return Buffer.concat(chunks);
+      } catch (e) {
+        return isTransient(e) || isStall(e) ? "later" : null;
+      }
+    };
+    // A few downloads under way at once, taken in order, so the next originals are arriving
+    // while one is read.
+    const inFlight: (Promise<Buffer | "later" | null> | null)[] = originals.slice(0, ahead).map(fetchOne);
+    for (let i = 0; i < originals.length; i++) {
+      const uid = originals[i];
+      const got = await inFlight[i];
+      // Let go here, so a read original is held only by the scan until it is decoded.
+      inFlight[i] = null;
+      if (i + ahead < originals.length) inFlight.push(fetchOne(originals[i + ahead]));
+      if (got === "later") continue;
+      if (got && (await decodable(got))) yield { uid, bytes: got };
+      else previewOnly.push(uid);
+    }
+    if (previewOnly.length) yield* this.scanPreviews(photos, previewOnly);
+  }
+
+  /**
+   * The small thumbnails the duplicate finder fingerprints: the cached ones first, the rest
+   * fetched and cached, as the grid would. It waits while the grid has thumbnails of its own
+   * waiting, so a page on screen is never held up by it. A photo a fetch did not answer is left
+   * out and asked for again.
+   */
+  private async *duplicateThumbnails(photos: any, uids: string[]): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+    const missing: string[] = [];
+    for (const uid of uids) {
+      const cached = thumbGet(uid, ThumbnailType.Type1);
+      if (cached) yield { uid, bytes: cached };
+      else missing.push(uid);
+    }
+    if (missing.length === 0) return;
+    for (let waited = 0; this.thumbWaiting.size > 0 && waited < 20; waited++) await new Promise((r) => setTimeout(r, 250));
+    try {
+      for await (const r of withStallGuard(
+        photos.iterateThumbnails(missing, ThumbnailType.Type1),
+        THUMBNAIL_STALL_MS,
+        "iterateThumbnails(duplicates)",
+      )) {
+        const uid = (r as any).nodeUid;
+        if ((r as any).ok) {
+          const bytes = Buffer.from((r as any).thumbnail);
+          thumbPut(uid, ThumbnailType.Type1, bytes);
+          yield { uid, bytes };
+        } else if (!isTransient((r as any).error)) {
+          yield { uid, bytes: null };
+        }
+      }
+    } catch (e) {
+      if (!isStall(e) && !isTransient(e)) throw e;
+    }
+  }
+
+  /**
+   * The large previews of `uids` for the face scan: the cached ones first, the rest fetched and
+   * not cached, since a scan reads the whole library once. A photo without a large preview
+   * falls back to its small one. One a fetch did not answer (a stall, a network error) is left
+   * out, so the scan asks for it again later instead of taking it for a photo without faces.
+   */
+  private async *scanPreviews(photos: any, uids: string[]): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+    const missing: string[] = [];
+    for (const uid of uids) {
+      const cached = thumbGet(uid, ThumbnailType.Type2);
+      if (cached) yield { uid, bytes: cached };
+      else missing.push(uid);
+    }
+    // Large previews first; the photos that have none are asked for their small one.
+    let ask = missing;
+    for (const type of [ThumbnailType.Type2, ThumbnailType.Type1]) {
+      if (ask.length === 0) return;
+      const without: string[] = [];
+      try {
+        for await (const r of withStallGuard(
+          photos.iterateThumbnails(ask, type),
+          THUMBNAIL_STALL_MS,
+          "iterateThumbnails(faces)",
+        )) {
+          const uid = (r as any).nodeUid;
+          if ((r as any).ok) yield { uid, bytes: Buffer.from((r as any).thumbnail) };
+          // A network error is not a missing preview: that photo is asked for again later.
+          else if (!isTransient((r as any).error)) without.push(uid);
+        }
+      } catch (e) {
+        if (!isStall(e) && !isTransient(e)) throw e;
+        return;
+      }
+      ask = without;
+    }
+    // Neither size there: a photo the scan has nothing to read in.
+    for (const uid of ask) yield { uid, bytes: null };
+  }
+
   /** The whole timeline in one answer, for callers that need it complete. */
   async getTimeline(): Promise<TimelineItem[]> {
     const out: TimelineItem[] = [];
@@ -1137,6 +1905,17 @@ export class ProtonSession {
     }
   }
 
+  /** Open on the photos kept offline only: the vault is open, but Proton could not be reached
+   *  to resume the session, and the window tries again on its own. */
+  private get offlineOnly(): boolean {
+    return !this.photos && this.offlineResume !== null && isReady();
+  }
+
+  /** Whether the account is open on the photos kept offline only, for the RPC layer's errors. */
+  isOfflineOnly(): boolean {
+    return this.offlineOnly;
+  }
+
   /** The timeline read in progress, which `timelinePage` answers from. */
   private timelineRun: TimelineRun | null = null;
   private timelineRuns = 0;
@@ -1148,6 +1927,11 @@ export class ProtonSession {
    * all of it. A new start replaces the run before it.
    */
   startTimeline(): { run: number } {
+    if (!this.photos && this.offlineOnly) {
+      const run: TimelineRun = { id: ++this.timelineRuns, items: offlineLibrary(), done: true, error: null };
+      this.timelineRun = run;
+      return { run: run.id };
+    }
     if (!this.photos) throw new Error("Not signed in");
     const run: TimelineRun = { id: ++this.timelineRuns, items: [], done: false, error: null };
     this.timelineRun = run;
@@ -1157,6 +1941,8 @@ export class ProtonSession {
           if (this.timelineRun !== run) return;
           run.items.push(item);
         }
+        // Kept for a start with no network, where these photos are all the timeline there is.
+        noteOfflineTimes(run.items);
       } catch (e) {
         run.error = (e as Error).message;
       }
@@ -1188,7 +1974,7 @@ export class ProtonSession {
    * appends a uid to. A fresh token each time, so a base from before a lock is dead.
    */
   async thumbServer(): Promise<{ base: string }> {
-    if (!this.photos) throw new Error("Not signed in");
+    if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
     return { base: await startThumbServer((uid, gone) => this.thumbnailFor(uid, gone)) };
   }
 
@@ -1199,9 +1985,10 @@ export class ProtonSession {
    * A tile the webview stopped waiting for leaves the queue unfetched.
    */
   private thumbnailFor(uid: string, gone: AbortSignal): Promise<Buffer | null> {
-    if (!this.photos || gone.aborted) return Promise.resolve(null);
+    if (gone.aborted) return Promise.resolve(null);
     const cached = thumbGet(uid, ThumbnailType.Type1);
     if (cached) return Promise.resolve(cached);
+    if (!this.photos) return Promise.resolve(null);
     return new Promise((resolve) => {
       const waiting = this.thumbWaiting.get(uid);
       if (waiting) waiting.push(resolve);
@@ -1284,6 +2071,12 @@ export class ProtonSession {
     uids: string[],
     fetchLimit = THUMBNAIL_FETCH_PER_CALL,
   ): Promise<{ uid: string; dataUrl: string | null }[]> {
+    if (!this.photos && this.offlineOnly) {
+      return uids.map((uid) => {
+        const cached = thumbGet(uid, ThumbnailType.Type1);
+        return { uid, dataUrl: cached ? toDataUrl(cached) : null };
+      });
+    }
     if (!this.photos) throw new Error("Not signed in");
     const out: { uid: string; dataUrl: string | null }[] = [];
     const missing: string[] = [];
@@ -1336,9 +2129,10 @@ export class ProtonSession {
 
   /** HD preview (Type2 thumbnail) for the image viewer / lightbox. */
   async getPreview(uid: string): Promise<string | null> {
-    if (!this.photos) throw new Error("Not signed in");
+    if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
     const cached = thumbGet(uid, ThumbnailType.Type2);
     if (cached) return toDataUrl(cached);
+    if (!this.photos) return null;
 
     // The same guard as the grid's thumbnails above, for the same reason: this is the
     // identical SDK call, and the viewer holds the channel while it runs.
@@ -1365,7 +2159,8 @@ export class ProtonSession {
   // ---- Download ----
 
   async getVideo(uid: string): Promise<VideoBytes> {
-    if (!this.photos) throw new Error("Not signed in");
+    // A copy kept offline plays from the disk, with or without Proton.
+    if (!this.photos && !(this.offlineOnly && isOfflineReady(uid))) throw new Error("Not signed in");
     return readVideo(this.photos, uid);
   }
 
@@ -1395,7 +2190,33 @@ export class ProtonSession {
 
   async listForMount(offset: number, limit: number): Promise<MountPage> {
     if (!this.photos) throw new Error("Not signed in");
-    return readMountPage(this.photos, offset, limit);
+    return readMountPage(this.photos, offset, limit, hiddenStore.hiddenPhotoTest());
+  }
+
+  /** What became of photos the Explorer folder kept copies of: see `mountFates`. Host-only. */
+  async mountFates(uids: string[]): Promise<Record<string, MountFate>> {
+    if (!this.photos) throw new Error("Not signed in");
+    return readMountFates(this.photos, uids, hiddenStore.hiddenPhotoTest());
+  }
+
+  /**
+   * Whether the hidden list can be trusted for keeping every photo on this PC. With the shared
+   * backup on, another device's hides arrive with a round, so the first round of this session has
+   * to have finished; until then a photo hidden elsewhere would still read as an ordinary one.
+   */
+  keepReady(): { hidden: boolean } {
+    const status = this.backup.getStatus();
+    return { hidden: !status.on || (status.lastAt !== null && !status.failed) };
+  }
+
+  /**
+   * The photos hidden in the app, as the ends of their uids the folder can match a downloaded
+   * copy against: the link ids of photos hidden on their own, and the uids of hidden albums'
+   * photos. Host-only, so a copy of a hidden photo never stays in the plain folder.
+   */
+  mountHidden(): string[] {
+    const s = hiddenStore.snapshot();
+    return [...s.photos, ...s.albumPhotos];
   }
 
   async hydrateFile(uid: string, dir?: string): Promise<HydratedFile> {
@@ -1474,7 +2295,8 @@ export class ProtonSession {
    * photo and reports it on every later one, so the viewer polls this single method.
    */
   async getOriginal(uid: string): Promise<OriginalStatus> {
-    if (!this.photos) throw new Error("Not signed in");
+    // A copy kept offline opens from the disk, with or without Proton.
+    if (!this.photos && !(this.offlineOnly && isOfflineReady(uid))) throw new Error("Not signed in");
     return readOriginal(this.photos, uid);
   }
 
@@ -1515,11 +2337,47 @@ export class ProtonSession {
     return readOfflineStatus();
   }
 
+  /** The albums kept available offline in the app. */
+  offlineAlbums(): string[] {
+    return readOfflineAlbums();
+  }
+
+  /**
+   * Keeps an album available offline in the app, its photos and the ones added to it later, or
+   * stops: what it fetched goes, unless something else keeps it. Nothing is written to Explorer.
+   */
+  async offlineAlbumSet(uid: string, on: boolean): Promise<OfflineStatus> {
+    if (!this.photos) throw new Error("Not signed in");
+    return setAlbumOffline(this.photos, uid, on ? await this.albumMemberUids(uid) : null);
+  }
+
+  /** Reads the albums kept offline again, so a photo added to one from anywhere arrives too. */
+  private async refreshOfflineAlbums(): Promise<void> {
+    if (!this.photos) return;
+    for (const uid of readOfflineAlbums()) {
+      try {
+        setAlbumOffline(this.photos, uid, await this.albumMemberUids(uid));
+      } catch (e) {
+        if (!isTransient(e)) process.stderr.write(`[offline] an album could not be read: ${(e as Error)?.name ?? "error"}\n`);
+      }
+    }
+  }
+
   // ---- Albums (see albums.ts) ----
 
-  async getAlbums(): Promise<AlbumSummary[]> {
+  /**
+   * The albums, the hidden ones left out unless asked for: only the unlocked Hidden page asks.
+   * An album whose cover is a hidden photo is listed without a cover, so no list anywhere
+   * draws a hidden photo.
+   */
+  async getAlbums(includeHidden = false): Promise<AlbumSummary[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return readAlbums(this.photos);
+    const albums = await readAlbums(this.photos);
+    if (includeHidden) return albums;
+    const hidden = hiddenStore.hiddenPhotoTest();
+    return albums
+      .filter((a) => !hiddenStore.isHiddenAlbum(a.uid))
+      .map((a) => (a.coverUid && hidden(a.coverUid) ? { ...a, coverUid: null } : a));
   }
 
   async getAlbumPhotoUids(): Promise<string[]> {
@@ -1537,7 +2395,8 @@ export class ProtonSession {
   /** The album members as last read, or null before they ever were: answered from disk at
    *  once, so the timeline can hide them before the albums are walked again. */
   cachedAlbumPhotoUids(): string[] | null {
-    if (!isReady()) return null;
+    // Kept offline is all there is to show: none of it is hidden for being in an album.
+    if (!isReady() || this.offlineOnly) return null;
     const raw = readSealedOrDiscard(join(storeDir(), ALBUM_MEMBERS_FILE));
     if (!raw) return null;
     try {
@@ -1553,9 +2412,17 @@ export class ProtonSession {
     return readAlbumPhotos(this.photos, uid);
   }
 
-  async listAlbumsForMount(): Promise<AlbumMount[]> {
+  async listAlbumsForMount(offset?: number, limit?: number): Promise<{ total: number; items: AlbumMount[] }> {
     if (!this.photos) throw new Error("Not signed in");
-    return readAlbumsForMount(this.photos);
+    const page = await readAlbumsForMount(this.photos, offset, limit);
+    // A hidden album, and a hidden photo in any album, stay out of the folder too.
+    const hidden = hiddenStore.hiddenPhotoTest();
+    return {
+      total: page.total,
+      items: page.items
+        .filter((a) => !hiddenStore.isHiddenAlbum(a.uid))
+        .map((a) => ({ ...a, uids: a.uids.filter((u) => !hidden(u)) })),
+    };
   }
 
   async createAlbum(name: string): Promise<AlbumSummary> {
@@ -1583,7 +2450,11 @@ export class ProtonSession {
 
   async addPhotosToAlbum(albumUid: string, uids: string[]): Promise<AlbumResult[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return runAddToAlbum(this.photos, albumUid, uids);
+    const results = await runAddToAlbum(this.photos, albumUid, uids);
+    const added = results.filter((r) => r.ok).map((r) => r.uid);
+    hiddenStore.addMembers(albumUid, added);
+    addToOfflineAlbum(this.photos, albumUid, added);
+    return results;
   }
 
   async removePhotosFromAlbum(albumUid: string, uids: string[]): Promise<AlbumResult[]> {
@@ -1601,15 +2472,18 @@ export class ProtonSession {
       : this.photos.iterateSharedNodes();
 
     const out: SharedSummary[] = [];
+    // What is hidden here stays hidden from what is shared too.
+    const hidden = hiddenStore.hiddenPhotoTest();
     for await (const node of withStallGuard(nodes, SDK_STALL_MS, "iterateSharedNodes")) {
       const n = node as any;
+      if (hidden(n.uid) || hiddenStore.isHiddenAlbum(n.uid)) continue;
       out.push({
         uid: n.uid,
         name: nodeName(n),
         type: n.type,
         mediaType: n.mediaType ?? null,
         isShared: !!n.isShared,
-        isSharedPublicly: !!n.isSharedPublicly,
+        isSharedPublicly: !!(n.isSharedByUrl ?? n.isSharedPublicly),
         captureTime: n.photo?.captureTime ? toMillis(n.photo.captureTime) : null,
         coverUid: n.album?.coverPhotoNodeUid ?? null,
         photoCount: n.album?.photoCount ?? null,
@@ -1676,6 +2550,12 @@ export class ProtonSession {
    * batches the lookups, so callers may pass large uid chunks.
    */
   async getMetadata(uids: string[]): Promise<NodeMeta[]> {
+    if (!this.photos && this.offlineOnly) {
+      return uids.flatMap((uid) => {
+        const m = metaGet(uid);
+        return m ? [{ uid, name: m.name, mediaType: m.mediaType, size: m.size ?? null }] : [];
+      });
+    }
     if (!this.photos) throw new Error("Not signed in");
     const out: NodeMeta[] = [];
     const missing: string[] = [];
@@ -1703,7 +2583,7 @@ export class ProtonSession {
       // claimedSize the reconcile guard checks — a node without one stays size-less.
       // The video length comes off the same revision, so the grid's pill costs nothing
       // extra for any photo search has already indexed.
-      const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+      const revision = activeRevisionOf(n);
       const size = Number(revision?.claimedSize ?? 0);
       const durationMs = nodeDurationMs(n) ?? 0;
       const geo = nodeLocation(n);
@@ -1721,7 +2601,7 @@ export class ProtonSession {
    * Cache-first, so a library read once answers from disk; the rest are read once, in
    * batches, and kept, with the name and the rest of the record beside the place.
    */
-  async getLocations(uids: string[]): Promise<{ uid: string; lat: number; lon: number }[]> {
+  async getLocations(uids: string[]): Promise<{ points: { uid: string; lat: number; lon: number }[]; read: number }> {
     if (!this.photos) throw new Error("Not signed in");
     const out: { uid: string; lat: number; lon: number }[] = [];
     const missing: string[] = [];
@@ -1739,14 +2619,15 @@ export class ProtonSession {
         const n = node as any;
         if (n.missingUid) continue;
         const geo = nodeLocation(n);
-        const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+        const revision = activeRevisionOf(n);
         const size = Number(revision?.claimedSize ?? 0);
         const meta = { name: nodeName(n), mediaType: n.mediaType ?? null, durationMs: nodeDurationMs(n) ?? 0, geo };
         metaPut(n.uid, size > 0 ? { ...meta, size } : meta);
         if (geo) out.push({ uid: n.uid, lat: geo[0], lon: geo[1] });
       }
     }
-    return out;
+    // `read`: how many had to come from Drive, so the map says it is looking only when it is.
+    return { points: out, read: missing.length };
   }
 
   /**
@@ -1758,6 +2639,12 @@ export class ProtonSession {
    * a still for good.
    */
   async getMediaTypes(uids: string[]): Promise<{ uid: string; mediaType: string | null }[]> {
+    if (!this.photos && this.offlineOnly) {
+      return uids.flatMap((uid) => {
+        const m = metaGet(uid);
+        return m ? [{ uid, mediaType: m.mediaType }] : [];
+      });
+    }
     if (!this.photos) throw new Error("Not signed in");
     const resolved = await resolveMediaTypesBatch(this.photos, uids);
     return [...resolved].map(([uid, mediaType]) => ({ uid, mediaType }));
@@ -1769,6 +2656,12 @@ export class ProtonSession {
    * rather than one per tile. Only the videos that have a length come back.
    */
   async getDurations(uids: string[]): Promise<{ uid: string; durationMs: number }[]> {
+    if (!this.photos && this.offlineOnly) {
+      return uids.flatMap((uid) => {
+        const d = metaGet(uid)?.durationMs;
+        return typeof d === "number" && d > 0 ? [{ uid, durationMs: d }] : [];
+      });
+    }
     if (!this.photos) throw new Error("Not signed in");
     const resolved = await resolveDurationsBatch(this.photos, uids);
     return [...resolved].map(([uid, durationMs]) => ({ uid, durationMs }));
@@ -1803,6 +2696,56 @@ export class ProtonSession {
   startImport(paths: string[]): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
     runImport(paths);
+    return { started: true };
+  }
+
+  /** A folder of My files for the picker: the sub-folders holding photos, and its own photos. */
+  myFilesList(uid?: string): Promise<MyFolderListing> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    // What was learned about which folders hold photos is kept for a while, so walking back up
+    // and down again is quick, and forgotten after it, so new files show.
+    if (Date.now() - this.myFoldersAt > MY_FOLDERS_FRESH_MS) {
+      this.myFoldersKnown = new Map();
+      this.myFoldersAt = Date.now();
+    }
+    return listMyFolder(this.myFilesClient(), isMediaName, uid, this.myFoldersKnown);
+  }
+
+  /** Whether each of these folders of My files holds a photo or video somewhere. */
+  myFilesCheck(uids: string[]): Promise<Record<string, boolean>> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    return checkMyFolders(this.myFilesClient(), uids, isMediaName, this.myFoldersKnown);
+  }
+
+  /** Small previews of photos in My files, for the picker, as data URLs by uid. */
+  async myFilesThumbs(uids: string[]): Promise<Record<string, string>> {
+    if (!this.sdkBase) throw new Error("Not signed in");
+    const out: Record<string, string> = {};
+    try {
+      for await (const r of withStallGuard(
+        this.myFilesClient().iterateThumbnails(uids, ThumbnailType.Type1),
+        THUMBNAIL_STALL_MS,
+        "iterateThumbnails(my files)",
+      )) {
+        if ((r as any).ok) out[(r as any).nodeUid] = `data:image/jpeg;base64,${Buffer.from((r as any).thumbnail).toString("base64")}`;
+      }
+    } catch {
+      /* what came is shown; the rest keep their placeholder */
+    }
+    return out;
+  }
+
+  /**
+   * Starts bringing the photos and videos of folders in My files into Photos, through the
+   * import's review; with `move`, the originals go to the Drive trash once they are in.
+   */
+  startMyFilesImport(
+    folders: { uid: string; name: string }[],
+    files: { uid: string; folder: string }[],
+    move: boolean,
+  ): { started: boolean } {
+    if (!this.photos || !this.sdkBase) throw new Error("Not signed in");
+    runMyFilesImport(this.myFilesClient(), folders, files, move);
     return { started: true };
   }
 
@@ -1850,6 +2793,11 @@ export class ProtonSession {
     return { started: true };
   }
 
+  /** The File Explorer drops that went up lighter since the host last asked. Host-only. */
+  dropReplaced(): string[] {
+    return takeDropReplaced();
+  }
+
   uploadStatus(): UploadStatus & { itemsTotal: number } {
     return readUploadStatus();
   }
@@ -1868,9 +2816,15 @@ export class ProtonSession {
 
   /** Everything the details panel shows. Size and hashes live on the revision. */
   async getNodeDetails(uid: string): Promise<Record<string, unknown>> {
+    if (!this.photos && this.offlineOnly) {
+      const m = metaGet(uid);
+      if (!m) throw new Error("Not signed in");
+      const taken = offlineLibrary().find((p) => p.uid === uid)?.captureTime ?? null;
+      return { uid, name: m.name, mediaType: m.mediaType, captureTime: taken, size: m.size ?? null, tags: [] };
+    }
     if (!this.photos) throw new Error("Not signed in");
     const n: any = await this.photos.getNode(uid);
-    const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+    const revision = activeRevisionOf(n);
 
     return {
       uid: n.uid,
@@ -1890,7 +2844,7 @@ export class ProtonSession {
       tags: n.photo?.tags ?? [],
       albumCount: (n.photo?.albums ?? []).length,
       isShared: !!n.isShared,
-      isSharedPublicly: !!n.isSharedPublicly,
+      isSharedPublicly: !!(n.isSharedByUrl ?? n.isSharedPublicly),
       owner: n.ownedBy?.email ?? null,
     };
   }
@@ -1919,7 +2873,159 @@ export class ProtonSession {
           : { uid: result.uid, ok: false, error: String(result.error?.message ?? result.error) },
       );
     }
+    duplicateFinder.removed(out.filter((r) => r.ok).map((r) => r.uid));
     return out;
+  }
+
+  // ---- Hidden photos and albums (hidden.ts) ----
+
+  hiddenState(): HiddenState {
+    return hiddenStore.snapshot();
+  }
+
+  /** Hides or shows photos or albums; a hidden album's photos are read first, to hide them with it. */
+  async hiddenSet(kind: HiddenKind, uids: string[], hidden: boolean): Promise<HiddenState> {
+    if (!this.photos) throw new Error("Not signed in");
+    const members = new Map<string, string[]>();
+    if (kind === "albums" && hidden) for (const uid of uids) members.set(uid, await this.albumMemberUids(uid));
+    hiddenStore.set(kind, uids, hidden, Date.now(), members);
+    diag.log("hidden", hidden ? "hide" : "show", { kind, count: uids.length });
+    this.backup.changed();
+    return hiddenStore.snapshot();
+  }
+
+  /** Reads each hidden album's photos again, so one added since is hidden too. */
+  async hiddenRefresh(): Promise<HiddenState> {
+    if (!this.photos) throw new Error("Not signed in");
+    for (const uid of hiddenStore.hiddenAlbumUids()) {
+      if (!uid.includes("~")) continue;
+      try {
+        hiddenStore.setMembers(uid, await this.albumMemberUids(uid));
+      } catch (e) {
+        if (!isTransient(e)) process.stderr.write(`[hidden] an album could not be read: ${(e as Error)?.name ?? "error"}\n`);
+      }
+    }
+    return hiddenStore.snapshot();
+  }
+
+  private async albumMemberUids(albumUid: string): Promise<string[]> {
+    const uids: string[] = [];
+    for await (const item of withStallGuard(this.photos.iterateAlbum(albumUid), SDK_STALL_MS, "iterateAlbum(hidden)")) {
+      const uid = (item as any).nodeUid;
+      if (uid) uids.push(uid);
+    }
+    return uids;
+  }
+
+  // ---- Copy text ----
+
+  private ocrJobs = new Map<number, OcrJob>();
+  private ocrNext = 0;
+  /** The last photos read, by what was read, so going back to one shows its text at once. */
+  private ocrRead = new Map<string, OcrJob["result"]>();
+
+  /**
+   * Starts reading the text in a photo of the library (its full-resolution original, or its
+   * large preview for a format this side cannot decode) or in a picture file on this computer,
+   * and answers at once with the read's id; `ocrResult` follows it.
+   */
+  ocrStart(source: { uid?: string; path?: string }): { id: number } {
+    const id = ++this.ocrNext;
+    const job: OcrJob = { state: "working", stage: null, result: null };
+    this.ocrJobs.set(id, job);
+    for (const old of this.ocrJobs.keys()) if (old <= id - 4) this.ocrJobs.delete(old);
+    if (ocrModelStatus().state !== "ready") {
+      job.state = "unavailable";
+      return { id };
+    }
+    const key = source.path ? `path:${source.path}` : `uid:${source.uid ?? ""}`;
+    const known = this.ocrRead.get(key);
+    if (known) {
+      job.result = known;
+      job.state = "done";
+      return { id };
+    }
+    const started = Date.now();
+    void (async () => {
+      let bytes: Buffer | null = null;
+      if (source.path) bytes = await readPictureFile(source.path);
+      else if (source.uid && this.photos) {
+        // The original the viewer is showing is read as it is, not fetched a second time.
+        bytes = await viewedOriginal(source.uid);
+        if (!bytes) for await (const got of this.scanPictures(this.photos, [source.uid])) bytes = got.bytes;
+      }
+      if (!bytes) {
+        job.state = "failed";
+        return;
+      }
+      const fetched = Date.now();
+      const result = await readText(bytes, (stage) => (job.stage = stage));
+      job.result = result;
+      job.state = result ? "done" : "failed";
+      if (result) {
+        this.ocrRead.delete(key);
+        this.ocrRead.set(key, result);
+        for (const old of this.ocrRead.keys()) {
+          if (this.ocrRead.size <= OCR_KEPT) break;
+          this.ocrRead.delete(old);
+        }
+      }
+      diag.log("ocr", "read", { ms: Date.now() - started, fetch_ms: fetched - started, blocks: result?.blocks.length ?? -1 });
+    })().catch((e) => {
+      job.state = "failed";
+      process.stderr.write(`[ocr] read failed: ${(e as Error)?.name ?? "error"}\n`);
+    });
+    return { id };
+  }
+
+  ocrResult(id: number): OcrJob | null {
+    return this.ocrJobs.get(id) ?? null;
+  }
+
+  // ---- Duplicates ----
+
+  duplicatesStart(): DuplicateStatus {
+    if (!this.photos) throw new Error("Not signed in");
+    return duplicateFinder.start();
+  }
+
+  duplicatesStatus(): DuplicateStatus {
+    return duplicateFinder.getStatus();
+  }
+
+  duplicatesGroups(): ShownGroups {
+    if (!this.photos) throw new Error("Not signed in");
+    return duplicateFinder.groups();
+  }
+
+  /** Moves the chosen copies to the trash, as far as the finder's own groups allow (duplicates.ts). */
+  async duplicatesTrash(
+    picks: { uids: string[]; keep: string[] }[],
+    whole: string[][],
+  ): Promise<{ trashed: string[]; failed: number; skipped: number }> {
+    if (!this.photos) throw new Error("Not signed in");
+    const photos = this.photos;
+    const result = await duplicateFinder.trash(
+      picks,
+      whole,
+      (uids) => this.trashPhotos(uids),
+      async (uids) => {
+        const there = new Set<string>();
+        for await (const node of withStallGuard(photos.iterateNodes(uids), SDK_STALL_MS, "iterateNodes(duplicates)")) {
+          const n = node as any;
+          if (n?.uid && !n.missingUid && !n.trashTime) there.add(n.uid);
+        }
+        return there;
+      },
+    );
+    diag.log("duplicates", "trash", { trashed: result.trashed.length, failed: result.failed, skipped: result.skipped });
+    return result;
+  }
+
+  duplicatesIgnore(uids: string[], on: boolean): DuplicateStatus {
+    if (on) duplicateFinder.ignore(uids);
+    else duplicateFinder.unignore(uids);
+    return duplicateFinder.getStatus();
   }
 
   // ---- Trash (SDK: iterateTrashedNodeUids / restoreNodes / deleteNodes / emptyTrash) ----
@@ -1931,7 +3037,9 @@ export class ProtonSession {
 
   async restorePhotos(uids: string[]): Promise<TrashResult[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return runRestore(this.photos, uids);
+    const results = await runRestore(this.photos, uids);
+    duplicateFinder.restored(results.filter((r) => r.ok).map((r) => r.uid));
+    return results;
   }
 
   async deletePhotosForever(uids: string[]): Promise<TrashResult[]> {

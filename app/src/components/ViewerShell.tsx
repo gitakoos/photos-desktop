@@ -38,9 +38,11 @@ import {
   InfoIcon,
   ListIcon,
   MoreHorizIcon,
+  TextIcon,
   ZoomInIcon,
   ZoomOutIcon,
 } from "./icons";
+import { SelectionCopy, TextPill, useViewerText, type TextSource } from "./ViewerText";
 import { useT } from "../lib/i18n";
 import "../styles/Lightbox.css";
 
@@ -106,6 +108,8 @@ type Props = {
    * loading line rather than nothing.
    */
   details?: ReactNode;
+  /** More of the details panel, under the rows: the people on the photo. */
+  detailsExtra?: ReactNode;
   error?: string;
   busy?: boolean;
   hasPrev?: boolean;
@@ -141,6 +145,15 @@ type Props = {
   /** Right-click on the stage, so the caller can raise a context menu. Called with the
    *  native menu already prevented and the shell's own dead menu suppressed. */
   onContextMenu?: (e: MouseEvent) => void;
+  /** Where copy text reads this item from; absent where it cannot be read. */
+  textSource?: TextSource | null;
+  /** The side panel the viewer opens with, if any. */
+  initialSide?: "details" | "contents";
+  /**
+   * A panel of the caller's own, docked beside the picture where the details go (the date
+   * editor). While it is given it takes the side, and the picture narrows to make room.
+   */
+  aside?: ReactNode;
   /** Dialogs and notices that belong over the whole viewer. */
   children?: ReactNode;
 };
@@ -165,6 +178,7 @@ export function ViewerShell({
   toolbar,
   menuItems,
   details,
+  detailsExtra,
   error,
   busy = false,
   hasPrev = false,
@@ -179,12 +193,16 @@ export function ViewerShell({
   onKey,
   onVideoError,
   onContextMenu,
+  textSource,
+  initialSide,
+  aside,
   children,
 }: Props) {
   const t = useT();
+  const text = useViewerText(stage.kind === "image" ? (textSource ?? null) : null, itemKey);
   // One side panel at a time, beside the picture: the details or the list of everything
   // the viewer can open. A closed one stays a moment, to slide out with its track.
-  const [side, setSide] = useState<SidePanel | null>(null);
+  const [side, setSide] = useState<SidePanel | null>(initialSide ?? null);
   const [leaving, setLeaving] = useState<SidePanel | null>(null);
   const leaveTimer = useRef<number | null>(null);
   const showDetails = side === "details";
@@ -273,10 +291,14 @@ export function ViewerShell({
         if (e.key === "Escape") setRenaming(false);
         return;
       }
+      // Typing in a field of the details panel (a person's name) is not a shortcut.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
       // Escape takes back the last thing opened, and only closes the viewer once
       // nothing is over it: dismissing a panel is what the key is for while one is up.
       if (e.key === "Escape") {
-        if (fullscreen) void toggleFullscreen();
+        if (text.active) text.leave();
+        else if (fullscreen) void toggleFullscreen();
         else if (showContents) toggleContents(false);
         else if (showDetails) toggleDetails(false);
         else onClose();
@@ -335,7 +357,7 @@ export function ViewerShell({
   return (
     <div
       className={`lbx${ownsWindow ? " owns-window" : ""}${strip ? " with-strip" : ""}${fullscreen ? " fullscreen" : ""}${
-        (showDetails && details) || (showContents && list) ? " with-aside" : ""
+        aside || (showDetails && details) || (showContents && list) ? " with-aside" : ""
       }`}
       onClick={guardedClose}
     >
@@ -352,6 +374,17 @@ export function ViewerShell({
             photo has, because it does not share their column. */}
         <div className="lbx-left">
           {toolbar}
+          {textSource && stage.kind === "image" && (
+            <button
+              className={`lbx-ibtn ${text.active ? "sel" : ""}`}
+              onClick={() => (text.active ? text.leave() : void text.start())}
+              title={t("viewer.recognizeText")}
+              aria-label={t("viewer.recognizeText")}
+              aria-pressed={text.active}
+            >
+              <TextIcon size={17} />
+            </button>
+          )}
           {details && (
             <button
               className={`lbx-ibtn ${showDetails ? "sel" : ""}`}
@@ -490,8 +523,18 @@ export function ViewerShell({
             {stage.detail && <p className="lbx-stage-msg-detail">{stage.detail}</p>}
           </div>
         ) : (
-          <PhotoViewer src={stage.src} loading={stage.loading} photoKey={itemKey} apiRef={zoomApi} onZoom={onZoom} />
+          <PhotoViewer
+            src={stage.src}
+            loading={stage.loading}
+            photoKey={itemKey}
+            apiRef={zoomApi}
+            onZoom={onZoom}
+            textRead={text.state.kind === "ready" || text.state.kind === "quiet" ? text.state.read : null}
+            textQuiet={text.state.kind === "quiet"}
+          />
         )}
+        <TextPill state={text.state} onLeave={text.leave} />
+        <SelectionCopy state={text.state} />
 
         {hasNext && (
           <button
@@ -599,7 +642,13 @@ export function ViewerShell({
         />
       )}
 
-      {(showDetails || leaving === "details") && details && (
+      {aside && (
+        <aside className="lbx-aside" onClick={(e) => e.stopPropagation()}>
+          {aside}
+        </aside>
+      )}
+
+      {!aside && (showDetails || leaving === "details") && details && (
         // Docked beside the picture, which narrows to make room, as Windows Photos does.
         // Stopped here: the whole viewer closes on a click, and a click in this panel is
         // never meant to take the photo with it.
@@ -616,6 +665,7 @@ export function ViewerShell({
             </button>
           </div>
           {details}
+          {detailsExtra}
         </aside>
       )}
 

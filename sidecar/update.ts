@@ -134,7 +134,7 @@ function fromThisRepo(url: string): boolean {
  * side, instead of being handed one to execute.
  */
 export function updatePath(): string {
-  return join(tmpdir(), "pfp-update.exe");
+  return join(process.env.PFP_UPDATE_DIR || tmpdir(), "pfp-update.exe");
 }
 
 /** What a part file beside the launch path is a part of, so only that download resumes it. */

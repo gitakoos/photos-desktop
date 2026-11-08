@@ -41,22 +41,28 @@ import { pinOffline, unpinOffline, watchOffline } from "../lib/offline";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { Avatar } from "../components/Avatar";
 import { ProfileMenu, type Account } from "../components/ProfileMenu";
-import { Sidebar, type Activity } from "../components/Sidebar";
+import { Sidebar, type Activity, type SidebarEntry, type SidebarSection } from "../components/Sidebar";
 import { WHATS_NEW_ID, WhatsNew } from "../components/WhatsNew";
 import { describeMount, useMountActivity, type SyncInfo } from "../lib/mountActivity";
 import { SearchField, TopStrip, type SearchPill, type SearchSuggestion } from "../components/TopStrip";
 import { foldPhrase, termAtEnd, termsStartedAtEnd, wordForms, type SearchTerm } from "../lib/searchTerms";
-import { Settings, DEFAULT_SETTINGS, type AppSettings } from "./Settings";
+import { Settings, DEFAULT_SETTINGS, type AppSettings, type Category as SettingsCategory } from "./Settings";
 import { applyTheme } from "../lib/theme";
 import { Albums, type Album, type AlbumSort } from "./Albums";
 import { Shared, type Invitation, type SharedItem, type Tab } from "./Shared";
 import { Trash } from "./Trash";
+import { Duplicates } from "./Duplicates";
+import { FixDates } from "./FixDates";
+import { Hidden, type HiddenAccess } from "./Hidden";
+import { useHidden } from "../hooks/useHidden";
 import {
   CallMadeIcon,
+  CallMergeIcon,
   CallReceivedIcon,
   ChevronLeftIcon,
   CloseIcon,
   CollectionsIcon,
+  ContentCopyIcon,
   DownloadIcon,
   FaceIcon,
   FolderOpenIcon,
@@ -64,7 +70,9 @@ import {
   FilterIcon,
   HeartIcon,
   LabelIcon,
+  ListIcon,
   LibraryAddIcon,
+  LockIcon,
   MapIcon,
   MoreHorizIcon,
   NavAlbumsIcon,
@@ -78,6 +86,8 @@ import {
   ShareIcon,
   SwapHorizIcon,
   TrashIcon,
+  VisibilityIcon,
+  VisibilityOffIcon,
 } from "../components/icons";
 import {
   ArrowDownIcon,
@@ -100,6 +110,7 @@ import {
   EntryGrid,
   LibraryPage,
   LibraryTiles,
+  LocalPeoplePage,
   type CollectionSection,
   type DriveCollection,
   type DriveCollections,
@@ -110,6 +121,8 @@ import {
 import { MapView, type MapPoint } from "../components/MapView";
 import { ImportReview } from "../components/ImportReview";
 import { AlbumAddPhotos } from "../components/AlbumAddPhotos";
+import { LabelPicker } from "../components/LabelPicker";
+import { useLocalLabels } from "../hooks/useLocalLabels";
 import { Lightbox } from "../components/Lightbox";
 import { Confirm } from "../components/Confirm";
 import { ContextMenu, type MenuAction, type MenuAt } from "../components/ContextMenu";
@@ -127,11 +140,20 @@ import {
 import { useThumbnails } from "../hooks/useThumbnails";
 import { DebugHud } from "../components/DebugHud";
 import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
+import { useLocalFaces } from "../hooks/useLocalFaces";
+import { inTimelineOrder, isScanSpeed, scanBusy, statusLine, type PersonView } from "../lib/localFaces";
+import { PersonActions, PersonPicker } from "../components/PersonActions";
+import { PersonFindPanel } from "../components/PersonFindPanel";
+import { DateEditPanel } from "../components/DateEditPanel";
+import { photoSpanLabel } from "../lib/albumSpan";
+import type { DateEditMode, DateEditStatus } from "../lib/dateEdit";
+import { PhotoFaces } from "../components/PhotoFaces";
 import { useWarmViews } from "../hooks/useWarmViews";
 import { CATEGORIES, isVideo, TAG, withFavorite } from "../lib/tags";
 import { cachedMediaType } from "../lib/mediaTypes";
 import { useUploads } from "../hooks/useUploads";
 import { useLang, useT } from "../lib/i18n";
+import { isWindows } from "../lib/platform";
 import { onThisDay, seasons } from "../lib/memories";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
 import "../styles/Photos.css";
@@ -257,9 +279,24 @@ function AlbumHero({
 const TIMELINE_PAGE = 20_000;
 const TIMELINE_POLL_MS = 250;
 
-export function Photos({ email, onSignOut }: { email: string; onSignOut: () => void }) {
+export function Photos({
+  email,
+  offline = false,
+  onSignOut,
+}: {
+  email: string;
+  /** Open on the photos kept offline while Proton cannot be reached. */
+  offline?: boolean;
+  onSignOut: () => void;
+}) {
   const t = useT();
-  const [items, setItems] = useState<TimelineItem[]>([]);
+  const [allItems, setItems] = useState<TimelineItem[]>([]);
+  // What is hidden stays out of every list below; only the Hidden page reads `allItems`.
+  const hidden = useHidden(true);
+  const items = useMemo(
+    () => (hidden.photoCount + hidden.albumCount > 0 ? allItems.filter((it) => !hidden.isPhoto(it.uid)) : allItems),
+    [allItems, hidden],
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   // Timeline content filter (view state, not persisted): multi-select categories
@@ -304,9 +341,24 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     name: string;
     uids: Set<string>;
     back: LibraryPageKind | "albums";
+    /** A person found on this computer, whose name and photos the page can change. */
+    personId?: string;
+    /** Hidden photos shown too: a look into the Hidden page. */
+    includeHidden?: boolean;
+    /** The Offline page, which also shows the photos of albums kept offline. */
+    offline?: boolean;
+    /** The Favorites page: whatever carries the heart now, so un-favouriting takes it off. */
+    favorites?: boolean;
   } | null>(null);
   // The photos that carry a place, read in batches the first time the map is opened.
-  const [places, setPlaces] = useState<{ points: MapPoint[]; done: number; total: number; finished: boolean } | null>(
+  const [places, setPlaces] = useState<{
+    points: MapPoint[];
+    done: number;
+    total: number;
+    finished: boolean;
+    /** Places are being read from Drive in this round, not only from this computer's cache. */
+    reading: boolean;
+  } | null>(
     null,
   );
   // Those Drive copies, read when the Albums tab is first shown and again on request.
@@ -320,8 +372,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // A view's own tab or sidebar row takes it back to where it starts: from inside an
   // album to the albums, from inside a shared album to everything shared.
   // Settings and Upload are pages over the current view; opening one closes the other.
-  const openSettings = () => {
+  const openSettings = (page?: SettingsCategory) => {
     setUploadOpen(false);
+    setSettingsPage(page);
     setSettingsOpen(true);
   };
   const openUpload = () => {
@@ -337,8 +390,69 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     if (next === "shared") setSharedAlbumOpen(null);
     setView(next);
   };
+  // Hidden, as on the phone: open only after Windows Hello, and locked again on leaving it or
+  // when the window goes away, which also closes whatever was opened from it.
+  const [hiddenAccess, setHiddenAccess] = useState<HiddenAccess>("locked");
+  const inHidden =
+    libraryPage === "hidden" || uidFilter?.back === "hidden" || (!!albumOpen && hidden.isAlbum(albumOpen.uid));
+  useEffect(() => {
+    if (!inHidden) setHiddenAccess("locked");
+  }, [inHidden]);
+  useEffect(() => {
+    let live = true;
+    let off: (() => void) | null = null;
+    void listen("window-hidden", () => setHiddenAccess("locked")).then((unlisten) => {
+      if (live) off = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, []);
+  useEffect(() => {
+    if (hiddenAccess !== "locked" || !inHidden || libraryPage === "hidden") return;
+    setLightboxIdx(null);
+    setUidFilter(null);
+    setAlbumOpen(null);
+    setView("albums");
+    setLibraryPage("hidden");
+  }, [hiddenAccess, inHidden, libraryPage]);
+  const [confirmHide, setConfirmHide] = useState<string[] | null>(null);
+  const [confirmHideAlbum, setConfirmHideAlbum] = useState<Album | null>(null);
+  /** Moves photos into Hidden or out of it, and says so. */
+  async function hidePhotos(uids: string[], hide: boolean) {
+    try {
+      await hidden.set("photos", uids, hide);
+      setToast(
+        t(hide ? (uids.length === 1 ? "hidden.hiddenToast.one" : "hidden.hiddenToast.other") : "hidden.shownToast", {
+          count: uids.length,
+        }),
+      );
+    } catch (e) {
+      setToast(String(e));
+    }
+  }
+  async function hideAlbum(album: Album, hide: boolean) {
+    try {
+      await hidden.set("albums", [album.uid], hide);
+      if (hide && albumOpen?.uid === album.uid) setAlbumOpen(null);
+      setToast(t(hide ? "hidden.albumHiddenToast" : "hidden.albumShownToast"));
+    } catch (e) {
+      setToast(String(e));
+    }
+  }
+
   /** The timeline narrowed to a set of photos, with a way back to where they were picked. */
-  const openFiltered = (filter: { name: string; uids: Set<string>; back: LibraryPageKind | "albums" }) => {
+  const openFiltered = (filter: {
+    name: string;
+    uids: Set<string>;
+    back: LibraryPageKind | "albums";
+    personId?: string;
+    includeHidden?: boolean;
+    offline?: boolean;
+    favorites?: boolean;
+  }) => {
     goToView("photos");
     setUidFilter(filter);
   };
@@ -437,6 +551,26 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // The sidecar owns the state, so this only watches it.
   const [offlineUids, setOfflineUids] = useState<Set<string>>(new Set());
   useEffect(() => watchOffline((s) => setOfflineUids(new Set(s.pinned))), []);
+  // The photos of the albums kept offline, read when the Offline page opens: an album can hold
+  // photos that are on no timeline, and they belong on that page too.
+  const [offlineAlbumItems, setOfflineAlbumItems] = useState<TimelineItem[]>([]);
+  const offlinePage = !!uidFilter?.offline;
+  useEffect(() => {
+    if (!offlinePage) return;
+    let live = true;
+    void (async () => {
+      const albums = await rpc<string[]>("offlineAlbums").catch(() => [] as string[]);
+      const found: TimelineItem[] = [];
+      for (const uid of albums) {
+        const rows = await rpc<{ uid: string; captureTime: number }[]>("getAlbumPhotos", { uid }).catch(() => []);
+        for (const row of rows) found.push({ uid: row.uid, captureTime: row.captureTime, tags: [] });
+      }
+      if (live) setOfflineAlbumItems(found);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [offlinePage]);
 
   // The single sidecar serves one request at a time, so the background warmer must
   // yield to more urgent work. It pauses while a photo is open (its full-res load) or
@@ -522,6 +656,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const [account, setAccount] = useState<Account | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<SettingsCategory | undefined>(undefined);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   // The photos filed in an album, hidden from the timeline when the setting asks: null
   // while not yet known. Read from the last start's copy at once, then fresh.
@@ -538,6 +673,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   /** The open shared album's photo uids, for its masthead's Download. */
   const [sharedAlbumPhotoUids, setSharedAlbumPhotoUids] = useState<string[]>([]);
   const [albumMoreAt, setAlbumMoreAt] = useState<{ x: number; y: number } | null>(null);
+  // The open album's photos' first and last date, which its header shows, and a counter the
+  // More menu's "Contents" raises to open the viewer on that list.
+  const [albumSpan, setAlbumSpan] = useState<[number, number] | null>(null);
+  const [sharedSpan, setSharedSpan] = useState<[number, number] | null>(null);
+  const [albumContents, setAlbumContents] = useState(0);
   const [addPhotosOpen, setAddPhotosOpen] = useState(false);
   /** Where the open album's "Add photos" choice opens: from the library or from disk. */
   const [addPhotosAt, setAddPhotosAt] = useState<{ x: number; y: number } | null>(null);
@@ -549,6 +689,8 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const [albumStranded, setAlbumStranded] = useState<number | null>(null);
   const [albumBusy, setAlbumBusy] = useState(false);
   const [pickAlbum, setPickAlbum] = useState(false);
+  /** The photos the label picker is open for, by their Drive link ids. */
+  const [pickLabels, setPickLabels] = useState<string[] | null>(null);
   // Creating an album from the sidebar's own "New album" affordance, which the grid
   // offers from its first tile too; both end in a reload that keeps the two in step.
   const [albumCreating, setAlbumCreating] = useState(false);
@@ -569,6 +711,22 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   // a photo back in the timeline. Stable identity, so the upload poller is not
   // restarted on every render.
   const bumpReload = useCallback(() => setReloadKey((k) => k + 1), []);
+  // F5 and Ctrl+R read the page again where it is, instead of reloading the window back to the
+  // timeline; the shell's Reload asks for the same. Ctrl+Shift+R still reloads the window.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const refresh = (e.key === "F5" && !e.ctrlKey && !e.shiftKey) || (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "r");
+      if (!refresh) return;
+      e.preventDefault();
+      bumpReload();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pfp-refresh", bumpReload);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pfp-refresh", bumpReload);
+    };
+  }, [bumpReload]);
   const uploads = useUploads(bumpReload);
 
   // This window is only mounted while the account is unlocked, so the thumbnail server's
@@ -616,6 +774,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   useEffect(() => {
     if (uploads.error) setToast(uploads.error);
   }, [uploads.error]);
+  useEffect(() => {
+    if (uploads.nothingFound) setToast(t("upload.nothingFound"));
+  }, [uploads.nothingFound, t]);
 
   // Account identity and Drive storage, for the avatar arc and the profile menu.
   useEffect(() => {
@@ -638,7 +799,17 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       try {
         const raw = await invoke<string | null>("store_get", { name: "settings" });
         if (raw) {
-          const merged: AppSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+          const saved = JSON.parse(raw);
+          // The faces' share with the phone became the shared backup of everything.
+          if (saved.sharedBackup === undefined && typeof saved.faceSync === "boolean") saved.sharedBackup = saved.faceSync;
+          delete saved.faceSync;
+          const merged: AppSettings = { ...DEFAULT_SETTINGS, ...saved };
+          // Faces and the search are on or off now: what showed the phone's alone is on, here
+          // and put together with the phone's through the shared backup.
+          if (merged.driveFaces && !merged.localFaces) merged.localFaces = true;
+          merged.driveFaces = false;
+          if (merged.semanticSearch && !merged.localSearch) merged.localSearch = true;
+          if (!isScanSpeed(merged.scanSpeed)) merged.scanSpeed = null;
           // The sidebar layout is the app's only layout now; one saved off from before still opens it.
           merged.sidebarLayout = true;
           // AMOLED was a palette before it became a switch beside them.
@@ -878,7 +1049,196 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         .filter((e) => e.uids.length > 0),
     [byLinkId],
   );
-  const peopleEntries = useMemo(() => toEntries(drive?.data?.people), [toEntries, drive]);
+  // Another device deleted the face data everywhere: face recognition is off here too, as there.
+  const facesOffElsewhere = useCallback(() => {
+    setSettings((s) => {
+      if (!s.localFaces) return s;
+      const next = { ...s, localFaces: false };
+      void invoke("store_set", { name: "settings", value: JSON.stringify(next) }).catch(() => {});
+      return next;
+    });
+  }, []);
+  // Face recognition on this computer, when it is on, stands in for the people the phone saved.
+  const localFaces = useLocalFaces(
+    settings.localFaces,
+    settingsLoaded,
+    settings.faceAutoMerge,
+    settings.faceFindMore,
+    settings.sharedBackup,
+    settings.semanticSearch && settings.localSearch,
+    facesOffElsewhere,
+    settings.scanSpeed,
+  );
+  // The labels kept on this computer: the phone's copies are put together with them on every read.
+  const localLabels = useLocalLabels(settingsLoaded && settings.driveLabels);
+  const timelineOrder = useMemo(() => new Map(items.map((it, i) => [it.uid, i])), [items]);
+  const localEntries = useMemo(() => {
+    const toEntry = (person: PersonView): LibraryEntry => {
+      const uids = inTimelineOrder(person.uids, timelineOrder);
+      const cover = person.cover && timelineOrder.has(person.cover.uid) ? person.cover : null;
+      return {
+        name: person.name ?? t("faces.unnamed"),
+        uids,
+        cover: cover?.uid ?? uids[0] ?? null,
+        box: cover?.box ?? null,
+        personId: person.id,
+      };
+    };
+    const people = localFaces.people;
+    const named = (people?.named ?? []).map(toEntry).filter((e) => e.uids.length > 0);
+    const unnamed = (people?.unnamed ?? []).map(toEntry).filter((e) => e.uids.length > 0);
+    const byId = new Map([...named, ...unnamed].map((e) => [e.personId!, e]));
+    const suggestions = (people?.suggestions ?? [])
+      .map((s) => ({ unnamed: byId.get(s.unnamed), named: byId.get(s.named) }))
+      .filter((s): s is { unnamed: LibraryEntry; named: LibraryEntry } => !!s.unnamed && !!s.named);
+    return { loaded: people !== null, named, unnamed, suggestions };
+  }, [localFaces.people, timelineOrder, t]);
+  const drivePeople = useMemo(() => toEntries(drive?.data?.people), [toEntries, drive]);
+  const peopleEntries = settings.localFaces ? localEntries.named : drivePeople;
+  const scanLine = useMemo(() => {
+    if (!settings.localFaces || !scanBusy(localFaces.status)) return null;
+    const line = statusLine(localFaces.status);
+    return line ? t(line.key, line.values) : null;
+  }, [settings.localFaces, localFaces.status, t]);
+  // A person's page follows the person: new photos join it, a rename retitles it, and when the
+  // person is gone (put with another, or left out) the page goes back to the people.
+  useEffect(() => {
+    const id = uidFilter?.personId;
+    if (!id || !localEntries.loaded) return;
+    const entry = [...localEntries.named, ...localEntries.unnamed].find((e) => e.personId === id);
+    if (!entry) {
+      goToView("albums");
+      setLibraryPage("people");
+      return;
+    }
+    const same =
+      entry.name === uidFilter.name &&
+      entry.uids.length === uidFilter.uids.size &&
+      entry.uids.every((u) => uidFilter.uids.has(u));
+    if (!same) setUidFilter({ ...uidFilter, name: entry.name, uids: new Set(entry.uids) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localEntries]);
+
+  // People picked on the People page, the right-click menu over one, and what it asked for.
+  const [peopleSel, setPeopleSel] = useState<Set<string>>(new Set());
+  const peopleAnchor = useRef<string | null>(null);
+  const [peopleMenu, setPeopleMenu] = useState<{ x: number; y: number; entry: LibraryEntry } | null>(null);
+  const [mergeFor, setMergeFor] = useState<LibraryEntry | null>(null);
+  const [rejectPeople, setRejectPeople] = useState<string[] | null>(null);
+  // Set once after another account signed out: its File Explorer folder was turned off, and
+  // this many files it downloaded are still in the folder.
+  const [explorerOff, setExplorerOff] = useState<number | null>(null);
+  useEffect(() => {
+    void invoke<number | null>("take_explorer_notice")
+      .then((left) => {
+        if (left !== null && left !== undefined) setExplorerOff(left);
+      })
+      .catch(() => {});
+  }, []);
+  const [peopleBusy, setPeopleBusy] = useState(false);
+  // The side panel of photos that might be the person open on screen.
+  const [findOpen, setFindOpen] = useState(false);
+  // The photos the date editor is open for, and the run it started, followed while it lasts.
+  const [dateEditUids, setDateEditUids] = useState<string[] | null>(null);
+  const [dateStatus, setDateStatus] = useState<DateEditStatus | null>(null);
+  const [dateRun, setDateRun] = useState(false);
+  const [dateEditMode, setDateEditMode] = useState<DateEditMode>("set");
+  /** Opens the date editor beside the grid for `uids`; the viewer opens its own beside the photo. */
+  const openDateEdit = (uids: string[], mode: DateEditMode = "set") => {
+    if (uids.length === 0) return;
+    setDateEditMode(mode);
+    setDateEditUids(uids);
+  };
+  // A run a restart cut short carries on by itself in the sidecar: followed here too.
+  useEffect(() => {
+    void rpc<DateEditStatus>("dateEditStatus")
+      .then((s) => s.running && setDateRun(true))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!dateRun) return;
+    let stopped = false;
+    let seen = 0;
+    const ask = async () => {
+      try {
+        const s = await rpc<DateEditStatus>("dateEditStatus");
+        if (stopped) return;
+        setDateStatus(s);
+        // The grid shows each replaced photo at its new place, a few at a time rather than on every one.
+        if (s.changed >= seen + 10 || (!s.running && s.changed > seen)) {
+          seen = s.changed;
+          bumpReload();
+        }
+        if (!s.running) {
+          setDateRun(false);
+          setToast(t("dateEdit.toast", { changed: s.changed, failed: s.failed }));
+          return;
+        }
+      } catch {
+        /* asked again below */
+      }
+      if (!stopped) window.setTimeout(ask, 1000);
+    };
+    void ask();
+    return () => {
+      stopped = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateRun]);
+  const allPeople = useMemo(() => [...localEntries.named, ...localEntries.unnamed], [localEntries]);
+  useEffect(() => {
+    if (view !== "albums" || libraryPage !== "people") setPeopleSel(new Set());
+  }, [view, libraryPage]);
+  useEffect(() => {
+    if (!uidFilter?.personId) setFindOpen(false);
+  }, [uidFilter?.personId]);
+  // Only people still there stay picked.
+  useEffect(() => {
+    setPeopleSel((sel) => {
+      const ids = new Set(allPeople.map((e) => e.personId!));
+      const kept = [...sel].filter((id) => ids.has(id));
+      return kept.length === sel.size ? sel : new Set(kept);
+    });
+  }, [allPeople]);
+  const togglePerson = (entry: LibraryEntry, range: boolean) => {
+    const id = entry.personId!;
+    setPeopleSel((sel) => {
+      const next = new Set(sel);
+      const order = allPeople.map((e) => e.personId!);
+      const from = peopleAnchor.current ? order.indexOf(peopleAnchor.current) : -1;
+      if (range && from >= 0) {
+        const to = order.indexOf(id);
+        for (let i = Math.min(from, to); i <= Math.max(from, to); i++) next.add(order[i]);
+      } else if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    peopleAnchor.current = id;
+  };
+  /** Puts people together under the named one among them (the one in most photos first). */
+  const mergeIntoOne = async (ids: string[]) => {
+    const picked = allPeople.filter((e) => ids.includes(e.personId!));
+    if (picked.length < 2) return;
+    const named = localEntries.named.filter((e) => ids.includes(e.personId!));
+    const into = (named[0] ?? [...picked].sort((a, b) => b.uids.length - a.uids.length)[0]).personId!;
+    const rest = picked.map((e) => e.personId!).filter((id) => id !== into);
+    for (let i = 0; i < rest.length; i++) {
+      const params = { from: rest[i], into };
+      if (i < rest.length - 1) await rpc("facePersonMerge", params);
+      else await localFaces.act("facePersonMerge", params);
+    }
+  };
+  const runPeople = async (action: () => Promise<void>) => {
+    if (peopleBusy) return;
+    setPeopleBusy(true);
+    try {
+      await action();
+    } catch {
+      /* the people stay as they were */
+    } finally {
+      setPeopleBusy(false);
+    }
+  };
   const { lang } = useLang();
   const memoryEntries = useMemo(() => {
     const plural = new Intl.PluralRules(lang);
@@ -892,7 +1252,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       seasons: seasons(items).map(({ season, year, uids }) => entry(`${t(`library.season.${season}`)} ${year}`, uids)),
     };
   }, [items, lang, t]);
-  const labelEntries = useMemo(() => toEntries(drive?.data?.labels), [toEntries, drive]);
+  const labelEntries = useMemo(
+    () => toEntries(localLabels.labels.map((l) => ({ name: l.name, keys: l.keys, cover: null, box: null }))),
+    [toEntries, localLabels.labels],
+  );
+  const openLabelPicker = () => setPickLabels([...selected].map((uid) => uid.slice(uid.indexOf("~") + 1)));
 
   // A name or a label typed into the search finds that person's or label's photos, matched
   // as the names are folded elsewhere: case and accents aside, anywhere in the name.
@@ -941,7 +1305,14 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       }
       return timelineSort.asc ? [...list].reverse() : list;
     };
-    if (uidFilter) return ordered(items.filter((it) => uidFilter.uids.has(it.uid)));
+    if (uidFilter?.favorites) return ordered(items.filter((it) => it.tags?.includes(TAG.Favorite)));
+    if (uidFilter) {
+      const base = uidFilter.includeHidden ? allItems : items;
+      // An album kept offline can hold photos that are in no timeline: they come from the album.
+      const inBase = new Set(base.map((it) => it.uid));
+      const extra = uidFilter.offline ? offlineAlbumItems.filter((it) => !inBase.has(it.uid) && !hidden.isPhoto(it.uid)) : [];
+      return ordered([...base, ...extra].filter((it) => uidFilter.uids.has(it.uid)));
+    }
     // Categories are multi-select: an item matches if it carries a tag from ANY
     // selected category (OR) — the same union a single category already forms over
     // its own tag list (e.g. Live = Live + Motion photos).
@@ -983,11 +1354,50 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     }
     return ordered(base);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, categories, mediaType, query_, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namedUids]);
+  }, [items, allItems, categories, mediaType, query_, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namedUids, offlineAlbumItems, hidden]);
 
 
   // What the phone's copies are read for, from the settings: each kind on its own switch.
-  const driveKinds = `${settings.driveFaces}:${settings.driveLabels}:${settings.semanticSearch}`;
+  const driveKinds = `${settings.driveFaces}:${settings.driveLabels}:${settings.semanticSearch}:${settings.localFaces || settings.sharedBackup}`;
+  // Detailed diagnostics: every photo and file step noted, not only the slow ones.
+  useEffect(() => {
+    if (settingsLoaded) void rpc("diagSetDetailed", { on: settings.diagDetailed }).catch(() => {});
+  }, [settingsLoaded, settings.diagDetailed]);
+
+  // Compression on upload, as Settings has it: the sidecar decides each file by it.
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    void rpc("uploadCompressionSet", {
+      photos: settings.compressPhotos,
+      hdr: settings.compressHdr,
+      tier: settings.compressTier,
+      videos: settings.compressVideos,
+      videoTier: settings.compressVideoTier,
+      codec: settings.compressCodec,
+    }).catch(() => {});
+  }, [
+    settingsLoaded,
+    settings.compressPhotos,
+    settings.compressHdr,
+    settings.compressTier,
+    settings.compressVideos,
+    settings.compressVideoTier,
+    settings.compressCodec,
+  ]);
+
+  // The shared backup reads the same kinds each round before it saves this computer's copies.
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    void rpc("sharedBackupSet", {
+      on: settings.sharedBackup,
+      faces: settings.driveFaces,
+      labels: settings.driveLabels,
+      search: settings.semanticSearch,
+      // With the backup on, the face copies are read with face recognition off too: a delete of
+      // the face data everywhere made on another device reaches this PC through them.
+      faceData: settings.localFaces || settings.sharedBackup,
+    }).catch(() => {});
+  }, [settingsLoaded, settings.sharedBackup, driveKinds]);
   const loadDrive = useCallback(
     (refresh: boolean) => {
       // A read over data already shown keeps showing it, and a failed one leaves it be.
@@ -997,6 +1407,8 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         faces: settings.driveFaces,
         labels: settings.driveLabels,
         search: settings.semanticSearch,
+        // Faces found on this PC are set beside the phone's, so its copy is read for them too.
+        faceData: settings.localFaces || settings.sharedBackup,
       })
         .then((data) => setDrive({ state: "ready", data, at: Date.now() }))
         .catch(() =>
@@ -1032,7 +1444,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   }, [settingsLoaded, loadDrive]);
 
   // Search by what a photo shows: the phone's index on Drive, asked once the typing settles.
-  const semanticOn = settings.semanticSearch && (drive?.data?.searchPhotos ?? 0) > 0;
+  const semanticOn =
+    settings.semanticSearch &&
+    (settings.localSearch
+      ? (localFaces.status?.search?.indexed ?? 0) > 0
+      : (drive?.data?.searchPhotos ?? 0) > 0);
   const [semanticHits, setSemanticHits] = useState<TimelineItem[]>([]);
   useEffect(() => {
     const q = textQuery.trim();
@@ -1076,27 +1492,59 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     () => (semanticItems.length > 0 ? [...filtered, ...semanticItems] : filtered),
     [filtered, semanticItems],
   );
-
-  // The places, newest photos first and a batch at a time, so the map fills as they come.
-  const placesStarted = useRef(false);
+  // A photo to open in the viewer as soon as the list it was opened into is on screen.
+  const [openOnShow, setOpenOnShow] = useState<string | null>(null);
   useEffect(() => {
-    if (libraryPage !== "map" || placesStarted.current || items.length === 0) return;
-    placesStarted.current = true;
-    const all = items.map((it) => it.uid);
+    if (!openOnShow || view !== "photos") return;
+    const at = shown.findIndex((f) => f.uid === openOnShow);
+    if (at < 0) return;
+    setOpenOnShow(null);
+    setLightboxIdx(at);
+  }, [openOnShow, view, shown]);
+
+  // The places, newest photos first and a batch at a time, so the map fills as they come. Once
+  // the map has been opened, photos that arrive later are looked up too, and only they are.
+  // The progress line shows only while places are read from Drive: the ones this computer has
+  // read before come from its cache in a moment, and counting through them read as a search
+  // starting over on every launch.
+  const placesAsked = useRef(new Set<string>());
+  const placesFound = useRef(new Map<string, { lat: number; lon: number }>());
+  const placesBusy = useRef(false);
+  const [placesRound, setPlacesRound] = useState(0);
+  useEffect(() => {
+    if ((libraryPage !== "map" && placesAsked.current.size === 0) || placesBusy.current || items.length === 0) return;
+    const fresh = items.map((it) => it.uid).filter((uid) => !placesAsked.current.has(uid));
+    if (fresh.length === 0) return;
+    placesBusy.current = true;
+    fresh.forEach((uid) => placesAsked.current.add(uid));
     const takenAt = new Map(items.map((it) => [it.uid, it.captureTime]));
-    setPlaces({ points: [], done: 0, total: all.length, finished: false });
-    void (async () => {
+    const publish = (done: number, finished: boolean, reading: boolean) => {
       const points: MapPoint[] = [];
-      for (let at = 0; at < all.length; at += PLACES_BATCH) {
-        const found = await rpc<{ uid: string; lat: number; lon: number }[]>("getLocations", {
-          uids: all.slice(at, at + PLACES_BATCH),
-        }).catch(() => []);
-        for (const f of found) points.push({ ...f, captureTime: takenAt.get(f.uid) ?? 0 });
-        const done = Math.min(all.length, at + PLACES_BATCH);
-        setPlaces({ points: points.slice(), done, total: all.length, finished: done >= all.length });
+      for (const [uid, at] of placesFound.current) points.push({ uid, ...at, captureTime: takenAt.get(uid) ?? 0 });
+      setPlaces({ points, done, total: fresh.length, finished, reading });
+    };
+    void (async () => {
+      let reading = false;
+      for (let at = 0; at < fresh.length; at += PLACES_BATCH) {
+        const found = await rpc<{ points: { uid: string; lat: number; lon: number }[]; read: number }>("getLocations", {
+          uids: fresh.slice(at, at + PLACES_BATCH),
+        }).catch(() => ({ points: [], read: 0 }));
+        for (const f of found.points) placesFound.current.set(f.uid, { lat: f.lat, lon: f.lon });
+        if (found.read > 0) reading = true;
+        const done = Math.min(fresh.length, at + PLACES_BATCH);
+        publish(done, done >= fresh.length, reading);
       }
+      placesBusy.current = false;
+      // Photos that arrived while this round ran are taken in the next.
+      setPlacesRound((n) => n + 1);
     })();
-  }, [libraryPage, items]);
+  }, [libraryPage, items, placesRound]);
+  // A photo moved to the trash or hidden leaves the map with the timeline.
+  const mapPoints = useMemo(() => {
+    if (!places) return [];
+    const present = new Set(items.map((it) => it.uid));
+    return places.points.filter((p) => present.has(p.uid));
+  }, [places, items]);
 
   // The shortcut row over the album list, in the Android app's order where they overlap.
   const collectionSections: CollectionSection[] = [
@@ -1119,10 +1567,14 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       ? "shared"
       : view === "albums" && libraryPage
         ? libraryPage
+        : view === "albums" && albumOpen && hidden.isAlbum(albumOpen.uid)
+          ? "hidden"
         : view === "photos" && uidFilter
-          ? uidFilter.back === "albums"
-            ? "offline"
-            : uidFilter.back
+          ? uidFilter.favorites
+            ? "favorites"
+            : uidFilter.back === "albums"
+              ? "offline"
+              : uidFilter.back
           : null;
   /** A library page, opened from any view: the sidebar's shortcuts sit beside every page,
    *  not only on the Albums tab the tiles live on. */
@@ -1166,12 +1618,87 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       key: "offline",
       label: t("library.offline"),
       icon: <OfflinePinIcon size={18} />,
-      onClick: () => openFiltered({ name: t("library.offline"), uids: new Set(offlineUids), back: "albums" }),
+      onClick: () => openFiltered({ name: t("library.offline"), uids: new Set(offlineUids), back: "albums", offline: true }),
     },
+    { key: "hidden", label: t("library.hidden"), icon: <LockIcon size={18} />, onClick: () => openLibrary("hidden") },
   ];
   const libraryTiles = libraryTilesAll.filter(
-    (tile) => (tile.key !== "people" || settings.driveFaces) && (tile.key !== "labels" || settings.driveLabels),
+    (tile) =>
+      (tile.key !== "people" || settings.driveFaces || settings.localFaces) &&
+      (tile.key !== "labels" || settings.driveLabels),
   );
+  /** The sidebar's groups: the photos themselves, the ways into them, and the tools. */
+  const fromTiles = (keys: string[]): SidebarEntry[] =>
+    keys.flatMap((key) => {
+      const tile = libraryTiles.find((x) => x.key === key);
+      return tile
+        ? [{ key, label: tile.label, icon: tile.icon, badge: tile.badge, selected: librarySelected === key, onClick: tile.onClick }]
+        : [];
+    });
+  const sidebarSections: SidebarSection[] = [
+    {
+      key: "photos",
+      title: t("nav.photos"),
+      entries: [
+        {
+          key: "library",
+          label: t("nav.library"),
+          icon: <NavPhotosIcon size={19} />,
+          selected: view === "photos" && !uidFilter,
+          onClick: () => goToView("photos"),
+        },
+        {
+          key: "favorites",
+          label: t("library.favorites"),
+          icon: <HeartIcon size={18} />,
+          selected: librarySelected === "favorites",
+          onClick: () => openFiltered({ name: t("library.favorites"), uids: new Set(), back: "albums", favorites: true }),
+        },
+      ],
+    },
+    {
+      key: "collections",
+      title: t("sidebar.collections"),
+      entries: [
+        {
+          key: "albums",
+          label: t("nav.albums"),
+          icon: <NavAlbumsIcon size={19} />,
+          selected: view === "albums" && !librarySelected,
+          onClick: () => goToView("albums"),
+        },
+        ...fromTiles(["shared", "people", "labels", "map", "collection", "offline"]),
+      ],
+    },
+    {
+      key: "utilities",
+      title: t("sidebar.utilities"),
+      entries: [
+        {
+          key: "duplicates",
+          label: t("sidebar.duplicates"),
+          icon: <ContentCopyIcon size={18} />,
+          selected: librarySelected === "duplicates",
+          onClick: () => openLibrary("duplicates"),
+        },
+        {
+          key: "fixdates",
+          label: t("fixDates.title"),
+          icon: <CalendarIcon size={18} />,
+          selected: librarySelected === "fixdates",
+          onClick: () => openLibrary("fixdates"),
+        },
+        ...fromTiles(["hidden"]),
+        {
+          key: "trash",
+          label: t("nav.trash"),
+          icon: <NavTrashIcon size={19} />,
+          selected: view === "trash",
+          onClick: () => goToView("trash"),
+        },
+      ],
+    },
+  ];
 
   // What the viewer's filmstrip and contents list walk: the same order the grid
   // shows, so stepping through the viewer and scrolling the grid agree. Memoised
@@ -1215,6 +1742,28 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
     return semanticItems.length > 0 ? [...base, { key: t("search.byContent"), items: semanticItems }] : base;
   }, [shownSections, semanticItems, t]);
 
+  const hiddenPhotos = useMemo(
+    () => allItems.filter((it) => hidden.photos.has(it.uid.slice(it.uid.lastIndexOf("~") + 1))),
+    [allItems, hidden],
+  );
+  // The hidden albums are asked for only once the page is open: no other list carries them.
+  const [hiddenAlbums, setHiddenAlbums] = useState<Album[]>([]);
+  const hiddenOpen = libraryPage === "hidden" && hiddenAccess !== "locked";
+  useEffect(() => {
+    if (!hiddenOpen) {
+      setHiddenAlbums([]);
+      return;
+    }
+    let live = true;
+    void rpc<Album[]>("getAlbums", { includeHidden: true }).then(
+      (list) => live && setHiddenAlbums(list.filter((a) => hidden.isAlbum(a.uid))),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [hiddenOpen, hidden]);
+
   // The timeline photos not already in the open album, for the "Add photos" picker.
   // `albumPhotoUids` is what Albums reported up, so this stays in step with the album.
   const albumCandidates = useMemo(() => {
@@ -1235,9 +1784,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
   const albumMatches = useMemo(() => {
     const q = fold(textQuery);
     if (!q) return [];
-    return (warm.albums ?? []).filter((a) => fold(a.name ?? "").includes(q)).slice(0, 40);
+    return (warm.albums ?? []).filter((a) => !hidden.isAlbum(a.uid) && fold(a.name ?? "").includes(q)).slice(0, 40);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textQuery, warm.albums]);
+  }, [textQuery, warm.albums, hidden]);
   const albumMatchCovers = useThumbnails(
     useMemo(() => albumMatches.map((a) => a.coverUid).filter((u): u is string => !!u), [albumMatches]),
   );
@@ -1917,7 +2466,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       ? { title: t("sync.library"), why: t("sync.libraryWhy"), done: 0, total: 0 }
       : null;
 
-  const activity: Activity | null = uploads.running
+  const activity: Activity | null = offline
+    ? { kind: "sync", label: t("offlineMode.label"), why: t("offlineMode.why") }
+    : uploads.running
     ? {
         kind: "upload",
         label: uploads.progressLabel
@@ -1965,6 +2516,12 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           onSelect: () => void downloadAlbumFromList(albumMenu.target),
         },
         {
+          key: "hide",
+          label: t("hidden.hideAlbum"),
+          icon: <VisibilityOffIcon size={14} />,
+          onSelect: () => setConfirmHideAlbum(albumMenu.target),
+        },
+        {
           key: "delete",
           label: t("albums.delete"),
           icon: <TrashIcon size={14} />,
@@ -2002,6 +2559,15 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           label: t("selection.addToAlbum"),
           icon: <LibraryAddIcon size={14} />,
           onSelect: () => setPickAlbum(true),
+        },
+        ...(settings.driveLabels
+          ? [{ key: "labels", label: t("selection.labels"), icon: <LabelIcon size={14} />, onSelect: openLabelPicker }]
+          : []),
+        {
+          key: "editDate",
+          label: t("selection.editDate"),
+          icon: <CalendarIcon size={14} />,
+          onSelect: () => setDateEditUids([...selected]),
         },
         {
           key: "favorite",
@@ -2053,6 +2619,22 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               },
             ]
           : []),
+        uidFilter?.back === "hidden"
+          ? {
+              key: "unhide",
+              label: t("selection.unhide"),
+              icon: <VisibilityIcon size={14} />,
+              onSelect: () => void runSelection(async () => {
+                await hidePhotos([...selected], false);
+                sel.clear();
+              }),
+            }
+          : {
+              key: "hide",
+              label: t("selection.hide"),
+              icon: <VisibilityOffIcon size={14} />,
+              onSelect: () => setConfirmHide([...selected]),
+            },
         {
           key: "trash",
           label: t("selection.trash"),
@@ -2083,12 +2665,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       <div className="g-frame">
       {sidebar && (
         <Sidebar
-          view={librarySelected ? null : view === "shared" ? "albums" : view}
-          library={libraryTiles}
-          librarySelected={librarySelected}
+          sections={sidebarSections}
           onSettings={() => openSettings()}
           onSignOut={onSignOut}
-          onView={goToView}
           collapsed={settings.sidebarCollapsed}
           onToggleCollapsed={() =>
             updateSettings({ ...settings, sidebarCollapsed: !settings.sidebarCollapsed })
@@ -2123,7 +2702,13 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                       ? t("library.map")
                       : uidFilter.back === "collection"
                         ? t("library.collection")
-                        : t("nav.albums")
+                        : uidFilter.back === "duplicates"
+                          ? t("duplicates.title")
+                          : uidFilter.back === "fixdates"
+                            ? t("fixDates.title")
+                          : uidFilter.back === "hidden"
+                            ? t("hidden.title")
+                            : t("nav.albums")
               }
               onClick={() => {
                 const back = uidFilter.back;
@@ -2138,6 +2723,40 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               {t(filtered.length === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: filtered.length })}
             </span>
             <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
+            {uidFilter.personId && settings.localFaces && (
+              <PersonActions
+                key={uidFilter.personId}
+                name={localEntries.named.some((e) => e.personId === uidFilter.personId) ? uidFilter.name : null}
+                names={localEntries.named.filter((e) => e.personId !== uidFilter.personId).map((e) => e.name)}
+                others={[...localEntries.named, ...localEntries.unnamed].filter((e) => e.personId !== uidFilter.personId)}
+                onMerge={async (other) => {
+                  const here = uidFilter.personId!;
+                  const hereNamed = localEntries.named.some((e) => e.personId === here);
+                  const otherNamed = localEntries.named.some((e) => e.personId === other.personId);
+                  // The name stays: a named person takes in an unnamed one, whichever page this is.
+                  const [from, into] = hereNamed && !otherNamed ? [other.personId!, here] : [here, other.personId!];
+                  await localFaces.act("facePersonMerge", { from, into }, () =>
+                    setUidFilter((f) => (f && f.personId !== into ? { ...f, personId: into } : f)),
+                  );
+                }}
+                onRename={async (name) => {
+                  await localFaces.act<{ id: string }>(
+                    "facePersonRename",
+                    { id: uidFilter.personId, name },
+                    ({ id }) => setUidFilter((f) => (f && f.personId !== id ? { ...f, personId: id } : f)),
+                  );
+                }}
+                onReject={async () => {
+                  await localFaces.act("facePersonReject", { id: uidFilter.personId });
+                }}
+                findOpen={findOpen}
+                onFind={
+                  localEntries.named.some((e) => e.personId === uidFilter.personId)
+                    ? () => setFindOpen((o) => !o)
+                    : undefined
+                }
+              />
+            )}
           </>
         )}
         {view === "photos" && !uidFilter && sidebar && (
@@ -2231,7 +2850,13 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                       ? "library.people"
                       : libraryPage === "labels"
                         ? "library.labels"
-                        : "library.map",
+                        : libraryPage === "duplicates"
+                          ? "duplicates.title"
+                          : libraryPage === "fixdates"
+                            ? "fixDates.title"
+                          : libraryPage === "hidden"
+                            ? "hidden.title"
+                            : "library.map",
                 )}
               </h1>
             </div>
@@ -2258,7 +2883,19 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                   : collectionSection === "seasons"
                     ? t("library.seasons")
                     : t("library.collection")
-                : t(libraryPage === "people" ? "library.people" : libraryPage === "labels" ? "library.labels" : "library.map")}
+                : t(
+                    libraryPage === "people"
+                      ? "library.people"
+                      : libraryPage === "labels"
+                        ? "library.labels"
+                        : libraryPage === "duplicates"
+                          ? "duplicates.title"
+                          : libraryPage === "fixdates"
+                            ? "fixDates.title"
+                          : libraryPage === "hidden"
+                            ? "hidden.title"
+                            : "library.map",
+                  )}
             </span>
             <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
           </>
@@ -2327,7 +2964,15 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             count and actions all live in the masthead at the top of the grid. */}
         {view === "albums" && albumOpen && (
           <>
-            <button className="g-back" onClick={() => setAlbumOpen(null)} title={t("albums.backToAlbums")}>
+            <button
+              className="g-back"
+              onClick={() => {
+                // A hidden album was opened from Hidden, and goes back there.
+                if (hidden.isAlbum(albumOpen.uid)) setLibraryPage("hidden");
+                setAlbumOpen(null);
+              }}
+              title={hidden.isAlbum(albumOpen.uid) ? t("hidden.title") : t("albums.backToAlbums")}
+            >
               <ChevronLeftIcon />
             </button>
             <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
@@ -2520,7 +3165,12 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
 
       {/* Albums and Shared run their own selection, so only bind ours here. */}
       <div
-        className={`g-scroll${view === "albums" && libraryPage === "map" ? " map-mode" : ""}`}
+        className={`g-scroll${view === "albums" && libraryPage === "map" ? " map-mode" : ""}${
+          (findOpen && view === "photos" && uidFilter?.personId) ||
+          (dateEditUids && (view === "photos" || view === "albums"))
+            ? " with-panel"
+            : ""
+        }`}
         ref={scrollRef}
         onWheel={onWheel}
         {...(view === "photos" ? sel.containerProps : {})}
@@ -2535,7 +3185,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 heroRef={heroRef}
                 cover={albumOpen.coverUid ? albumCoverThumbs[albumOpen.coverUid] : null}
                 title={albumOpen.name || t("albums.untitled")}
-                sub={`${albumDateLabel(albumOpen.lastActivityTime)} · ${t(
+                sub={`${albumSpan ? photoSpanLabel(albumSpan, locale) : albumDateLabel(albumOpen.lastActivityTime)} · ${t(
                   albumOpen.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other",
                   { count: albumOpen.photoCount },
                 )}`}
@@ -2587,8 +3237,9 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             {albumOpen && <div className="g-albumhero-spacer" ref={heroSpacerRef} aria-hidden />}
             {libraryPage === "map" ? (
               <MapView
-                points={places?.points ?? []}
-                progress={places && !places.finished ? { done: places.done, total: places.total } : null}
+                points={mapPoints}
+                progress={places && !places.finished && places.reading ? { done: places.done, total: places.total } : null}
+                settled={places?.finished ?? false}
                 onOpen={(uids) => openFiltered({ name: t("library.map"), uids: new Set(uids), back: "map" })}
                 title={sidebar ? t("library.map") : undefined}
                 onOpenPlace={(name, uids) => openFiltered({ name, uids: new Set(uids), back: "map" })}
@@ -2607,11 +3258,82 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                   onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "collection" })}
                 />
               )
+            ) : libraryPage === "people" && settings.localFaces ? (
+              <LocalPeoplePage
+                named={localEntries.named}
+                unnamed={localEntries.unnamed}
+                suggestions={localEntries.suggestions}
+                onMerge={async (unnamed, named) => {
+                  await localFaces.act("facePersonMerge", { from: unnamed.personId, into: named.personId });
+                }}
+                onDismiss={async (unnamed, named) => {
+                  await localFaces.act("faceSuggestionDismiss", { unnamed: unnamed.personId, named: named.personId });
+                }}
+                loose={localFaces.people?.loose ?? { faces: [], total: 0 }}
+                names={localEntries.named.map((e) => e.name)}
+                onNameFaces={async (faceIds, name) => {
+                  await localFaces.act("faceNameFaces", { faceIds, name });
+                }}
+                onRejectFaces={async (faceIds) => {
+                  await localFaces.act("faceRejectFaces", { faceIds });
+                }}
+                selected={peopleSel}
+                onToggle={togglePerson}
+                onContext={(entry, e) => setPeopleMenu({ x: e.clientX, y: e.clientY, entry })}
+                loaded={localEntries.loaded}
+                scanning={scanLine}
+                cardSize={Math.round((albumCellSize * 140) / 190)}
+                onOpen={(entry) =>
+                  openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "people", personId: entry.personId })
+                }
+              />
+            ) : libraryPage === "hidden" ? (
+              <Hidden
+                access={hiddenAccess}
+                onAccess={setHiddenAccess}
+                photos={hiddenPhotos}
+                albums={hiddenAlbums}
+                cellSize={cellSize}
+                cardSize={Math.round((albumCellSize * 140) / 190)}
+                onOpenPhoto={(uid) => {
+                  openFiltered({ name: t("hidden.title"), uids: new Set(hiddenPhotos.map((p) => p.uid)), back: "hidden", includeHidden: true });
+                  setOpenOnShow(uid);
+                }}
+                onOpenAlbum={(album) => {
+                  setLibraryPage(null);
+                  setAlbumOpen(album);
+                }}
+                onEditDate={openDateEdit}
+                onUnhidePhotos={(uids) => void hidePhotos(uids, false)}
+                onUnhideAlbum={(album) => void hideAlbum(album, false)}
+              />
+            ) : libraryPage === "fixdates" ? (
+              <FixDates
+                items={items}
+                onEditDate={(uids, byName) => openDateEdit(uids, byName ? "name" : "set")}
+                onView={(uids, at) => {
+                  openFiltered({ name: t("fixDates.title"), uids: new Set(uids), back: "fixdates" });
+                  setOpenOnShow(at);
+                }}
+              />
+            ) : libraryPage === "duplicates" ? (
+              <Duplicates
+                onView={(uids, at) => {
+                  openFiltered({ name: t("duplicates.title"), uids: new Set(uids), back: "duplicates" });
+                  setOpenOnShow(at);
+                }}
+                onTrashed={(uids) => {
+                  const gone = new Set(uids);
+                  gone.forEach(dropPreview);
+                  setItems((prev) => prev.filter((it) => !gone.has(it.uid)));
+                }}
+              />
             ) : libraryPage ? (
               <LibraryPage
                 kind={libraryPage}
-                state={drive?.state ?? "loading"}
+                state={libraryPage === "labels" ? (localLabels.loaded ? "ready" : "loading") : (drive?.state ?? "loading")}
                 data={drive?.data ?? null}
+                local={libraryPage === "labels"}
                 entries={libraryPage === "people" ? peopleEntries : labelEntries}
                 // The person card's own width at the album list's default size, and in step with it after.
                 cardSize={Math.round((albumCellSize * 140) / 190)}
@@ -2636,12 +3358,17 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                   initial={warm.albums}
                   onChanged={bumpReload}
                   onPhotoUids={setAlbumPhotoUids}
+                  onSpan={setAlbumSpan}
+                  onEditDate={openDateEdit}
+                  onDateEditStarted={() => setDateRun(true)}
+                  contentsRequest={albumContents}
                   onAlbumContext={(album, e) =>
                     setAlbumMenu({ x: e.clientX, y: e.clientY, target: album })
                   }
                   favoriteUids={favoriteUids}
                   onFavoriteChanged={handleFavoriteChanged}
                   onData={warm.putAlbums}
+                  hidden={hidden}
                 />
               </>
             )}
@@ -2654,9 +3381,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 cover={sharedAlbumOpen.coverUid ? albumCoverThumbs[sharedAlbumOpen.coverUid] : null}
                 title={sharedAlbumOpen.name || t("albums.untitled")}
                 sub={[
-                  ...(sharedAlbumOpen.lastActivityTime
-                    ? [albumDateLabel(sharedAlbumOpen.lastActivityTime)]
-                    : []),
+                  ...(sharedSpan
+                    ? [photoSpanLabel(sharedSpan, locale)]
+                    : sharedAlbumOpen.lastActivityTime
+                      ? [albumDateLabel(sharedAlbumOpen.lastActivityTime)]
+                      : []),
                   ...(sharedCount != null
                     ? [
                         t(sharedCount === 1 ? "common.photoCount.one" : "common.photoCount.other", {
@@ -2708,6 +3437,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               onCount={setSharedCount}
               onData={(rows) => sharedTab === "by" && warm.putShared(rows)}
               onPhotoUids={setSharedAlbumPhotoUids}
+              onSpan={setSharedSpan}
               invitations={invitations}
               onInvitationAnswered={(uid) => {
                 setInvitations((list) => list.filter((i) => i.uid !== uid));
@@ -2806,13 +3536,149 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         )}
         </div>
       </div>
+      {dateEditUids && (view === "photos" || view === "albums") && (
+        <DateEditPanel
+          key={dateEditMode}
+          initialMode={dateEditMode}
+          uids={dateEditUids}
+          status={dateStatus}
+          onStarted={() => {
+            setDateRun(true);
+            sel.clear();
+          }}
+          onClose={() => setDateEditUids(null)}
+          top={scrollRef.current?.offsetTop ?? 0}
+        />
+      )}
+      {findOpen && view === "photos" && uidFilter?.personId && settings.localFaces && (
+        <PersonFindPanel
+          personId={uidFilter.personId}
+          name={uidFilter.name}
+          version={localFaces.status?.version ?? 0}
+          act={localFaces.act}
+          onClose={() => setFindOpen(false)}
+          top={scrollRef.current?.offsetTop ?? 0}
+        />
+      )}
+      {view === "albums" && libraryPage === "people" && settings.localFaces && (
+        <SelectionBar
+          count={peopleSel.size}
+          busy={peopleBusy}
+          countKey="common.peopleCount"
+          onCancel={() => setPeopleSel(new Set())}
+          onMergePeople={
+            peopleSel.size >= 2
+              ? () =>
+                  void runPeople(async () => {
+                    await mergeIntoOne([...peopleSel]);
+                    setPeopleSel(new Set());
+                  })
+              : undefined
+          }
+          onRejectPeople={() => setRejectPeople([...peopleSel])}
+        />
+      )}
+      {peopleMenu && (
+        <ContextMenu
+          x={peopleMenu.x}
+          y={peopleMenu.y}
+          onClose={() => setPeopleMenu(null)}
+          actions={[
+            {
+              key: "open",
+              label: t("faces.open"),
+              onSelect: () =>
+                openFiltered({
+                  name: peopleMenu.entry.name,
+                  uids: new Set(peopleMenu.entry.uids),
+                  back: "people",
+                  personId: peopleMenu.entry.personId,
+                }),
+            },
+            {
+              key: "select",
+              label: t(peopleSel.has(peopleMenu.entry.personId!) ? "faces.deselect" : "faces.select"),
+              onSelect: () => togglePerson(peopleMenu.entry, false),
+            },
+            {
+              key: "merge",
+              label: t("faces.mergeWith"),
+              icon: <CallMergeIcon size={17} />,
+              separator: true,
+              onSelect: () => setMergeFor(peopleMenu.entry),
+            },
+            {
+              key: "reject",
+              label: t("faces.notPerson"),
+              danger: true,
+              onSelect: () => setRejectPeople([peopleMenu.entry.personId!]),
+            },
+          ]}
+        />
+      )}
+      {mergeFor && (
+        <PersonPicker
+          people={allPeople.filter((e) => e.personId !== mergeFor.personId)}
+          onCancel={() => setMergeFor(null)}
+          onPick={async (other) => {
+            await mergeIntoOne([mergeFor.personId!, other.personId!]);
+            setMergeFor(null);
+          }}
+        />
+      )}
+      {explorerOff !== null && (
+        <Confirm
+          title={t("explorerOff.title")}
+          message={explorerOff > 0 ? t("explorerOff.messageLeft", { count: explorerOff.toLocaleString() }) : t("explorerOff.message")}
+          confirmLabel={t("explorerOff.openSettings")}
+          cancelLabel={t("common.close")}
+          onCancel={() => setExplorerOff(null)}
+          onConfirm={() => {
+            setExplorerOff(null);
+            // The File Explorer switch sits on the Storage page on Windows, the one place this shows.
+            openSettings("storage");
+          }}
+        />
+      )}
+      {rejectPeople && (
+        <Confirm
+          title={t("faces.notPersonTitle")}
+          message={t("faces.notPersonMessage")}
+          confirmLabel={t("faces.notPersonAction")}
+          danger
+          onCancel={() => setRejectPeople(null)}
+          onConfirm={() => {
+            const ids = rejectPeople;
+            setRejectPeople(null);
+            void runPeople(async () => {
+              for (let i = 0; i < ids.length; i++) {
+                if (i < ids.length - 1) await rpc("facePersonReject", { id: ids[i] });
+                else await localFaces.act("facePersonReject", { id: ids[i] });
+              }
+              setPeopleSel(new Set());
+            });
+          }}
+        />
+      )}
       {settingsOpen && (
         <Settings
+          startPage={settingsPage}
           settings={settings}
           onChange={updateSettings}
           onClose={() => setSettingsOpen(false)}
           drive={drive}
           onDriveRefresh={() => loadDrive(true)}
+          faces={localFaces}
+          labels={localLabels}
+          account={account}
+          onSignOut={onSignOut}
+          activity={activity}
+          onOpenActivity={openUpload}
+          onMyFilesImport={(folders, files, move) => {
+            void uploads.startMyFilesImport(folders, files, move);
+            openUpload();
+          }}
+          onOpenDuplicates={sidebar ? undefined : () => openLibrary("duplicates")}
         />
       )}
       {uploadOpen && (
@@ -2820,6 +3686,7 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           status={uploads.status}
           running={uploads.running}
           error={uploads.error}
+          nothingFound={uploads.nothingFound}
           start={uploads.start}
           startImport={uploads.startImport}
           cancel={uploads.cancel}
@@ -2867,8 +3734,11 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             busy={selectionBusy}
             onCancel={sel.clear}
             onAddToAlbum={() => setPickAlbum(true)}
+            onLabels={settings.driveLabels ? openLabelPicker : undefined}
+            onEditDate={() => setDateEditUids([...selected])}
             onDownload={() => void runSelection(downloadSelected)}
-            onFreeUp={() => void runSelection(freeUpSelected)}
+            // Local copies to free exist only in the File Explorer folder, on Windows.
+            onFreeUp={isWindows ? () => void runSelection(freeUpSelected) : undefined}
             onOfflineAdd={
               allSelectedOffline ? undefined : () => void runSelection(offlineAddSelected)
             }
@@ -2876,6 +3746,37 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
               allSelectedOffline ? () => void runSelection(offlineRemoveSelected) : undefined
             }
             onTrash={() => setConfirmTrash(true)}
+            onHide={uidFilter?.back === "hidden" ? undefined : () => setConfirmHide([...selected])}
+            onUnhide={
+              uidFilter?.back === "hidden"
+                ? () =>
+                    void runSelection(async () => {
+                      await hidePhotos([...selected], false);
+                      sel.clear();
+                    })
+                : undefined
+            }
+            onRemoveFromPerson={
+              uidFilter?.personId && settings.localFaces
+                ? () =>
+                    void runSelection(async () => {
+                      await localFaces.act("facePersonRemovePhotos", { id: uidFilter.personId, uids: [...selected] });
+                      sel.clear();
+                    })
+                : undefined
+            }
+            onSetCover={
+              uidFilter?.personId &&
+              settings.localFaces &&
+              selected.size === 1 &&
+              localEntries.named.some((e) => e.personId === uidFilter.personId)
+                ? () =>
+                    void runSelection(async () => {
+                      await localFaces.act("facePersonCover", { id: uidFilter.personId, uid: [...selected][0] });
+                      sel.clear();
+                    })
+                : undefined
+            }
           />
         </>
       )}
@@ -3012,6 +3913,12 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           onClose={() => setAlbumMoreAt(null)}
           actions={[
             {
+              key: "contents",
+              label: t("viewer.contents"),
+              icon: <ListIcon size={14} />,
+              onSelect: () => setAlbumContents((n) => n + 1),
+            },
+            {
               key: "rename",
               label: t("albums.rename"),
               icon: <PencilIcon size={14} />,
@@ -3020,6 +3927,19 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
                 setAlbumRenaming(true);
               },
             },
+            hidden.isAlbum(albumOpen.uid)
+              ? {
+                  key: "unhide",
+                  label: t("hidden.unhideAlbum"),
+                  icon: <VisibilityIcon size={14} />,
+                  onSelect: () => void hideAlbum(albumOpen, false),
+                }
+              : {
+                  key: "hide",
+                  label: t("hidden.hideAlbum"),
+                  icon: <VisibilityOffIcon size={14} />,
+                  onSelect: () => setConfirmHideAlbum(albumOpen),
+                },
             {
               key: "delete",
               label: t("albums.delete"),
@@ -3078,6 +3998,37 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
         </div>
       )}
 
+      {confirmHide && (
+        <Confirm
+          title={t("hidden.confirmTitle")}
+          message={t("hidden.confirmMessage")}
+          confirmLabel={t("selection.hide")}
+          onCancel={() => setConfirmHide(null)}
+          onConfirm={() => {
+            const uids = confirmHide;
+            setConfirmHide(null);
+            void runSelection(async () => {
+              await hidePhotos(uids, true);
+              sel.clear();
+            });
+          }}
+        />
+      )}
+
+      {confirmHideAlbum && (
+        <Confirm
+          title={t("hidden.confirmAlbumTitle")}
+          message={t("hidden.confirmAlbumMessage")}
+          confirmLabel={t("hidden.hideAlbum")}
+          onCancel={() => setConfirmHideAlbum(null)}
+          onConfirm={() => {
+            const album = confirmHideAlbum;
+            setConfirmHideAlbum(null);
+            void hideAlbum(album, true);
+          }}
+        />
+      )}
+
       {confirmTrash && (
         <Confirm
           title={t("confirm.trashTitle")}
@@ -3107,6 +4058,15 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
             setConfirmEmpty(false);
             void emptyTrash();
           }}
+        />
+      )}
+
+      {pickLabels && (
+        <LabelPicker
+          keys={pickLabels}
+          labels={localLabels.labels}
+          act={localLabels.act}
+          onClose={() => setPickLabels(null)}
         />
       )}
 
@@ -3186,6 +4146,17 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
       {current && (
         <Lightbox
           uid={current.uid}
+          onDateEditStarted={() => setDateRun(true)}
+          detailsExtra={
+            settings.localFaces ? (
+              <PhotoFaces
+                uid={current.uid}
+                names={localEntries.named.map((e) => e.name)}
+                version={localFaces.status?.version ?? 0}
+                act={localFaces.act}
+              />
+            ) : undefined
+          }
           isLocal={localUids.has(current.uid)}
           isOffline={offlineUids.has(current.uid)}
           // Only ever a definite answer, never a guess. A known video branches the
@@ -3211,6 +4182,13 @@ export function Photos({ email, onSignOut }: { email: string; onSignOut: () => v
           onEdited={bumpReload}
           isFavorite={!!current.tags?.includes(TAG.Favorite)}
           onFavoriteChanged={handleFavoriteChanged}
+          hiding={
+            hidden.photos.has(current.uid.slice(current.uid.lastIndexOf("~") + 1))
+              ? { hidden: true, toggle: () => void hidePhotos([current.uid], false) }
+              : hidden.isPhoto(current.uid)
+                ? undefined
+                : { hidden: false, toggle: () => setConfirmHide([current.uid]) }
+          }
         />
       )}
 

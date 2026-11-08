@@ -35,6 +35,9 @@
 //! deletes the album and keeps its photos, and nothing is ever deleted for good. Nothing
 //! here touches the disk or the network; it only decides.
 
+// The rules below are the Windows File Explorer folder's; elsewhere only the tests use them.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 /// Where a folder sits in the Proton Photos folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Place {
@@ -256,7 +259,7 @@ pub fn hold_departures(events: Vec<RawEvent>) -> (Vec<RawEvent>, Vec<RawEvent>) 
 /// What the library is asked to do, by uid. `album` is an album's uid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// To Proton's trash, where it can be restored for 30 days.
+    /// To Proton's trash, where it stays until it is deleted there.
     Trash { photo: String },
     /// Out of an album, still in the library.
     FromAlbum { album: String, photo: String },

@@ -350,6 +350,7 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
       // folder has to reset the fit and drop a half-typed rename, exactly as arriving at
       // a new file from Explorer does.
       itemKey={current}
+      textSource={{ path: current }}
       name={name}
       stage={stage}
       error={error || (needsSignIn ? "" : uploads.error)}

@@ -79,13 +79,13 @@ function makePhotos(opts: { type?: string; sharing?: any; shareResult?: any } = 
     shareNode: async (uid: string, settings: any) => {
       calls.push({ method: "shareNode", args: [uid, settings] });
       if (opts.shareResult) return opts.shareResult;
-      if (!settings?.publicLink) return sharing ?? emptyResult();
-      const wanted = settings.publicLink === true ? { role: "viewer" } : settings.publicLink;
-      const before = sharing?.publicLink;
+      if (!settings?.urlAccess) return sharing ?? emptyResult();
+      const wanted = settings.urlAccess === true ? { role: "viewer" } : settings.urlAccess;
+      const before = sharing?.urlAccess;
       sharing = {
         ...emptyResult(),
         ...sharing,
-        publicLink: {
+        urlAccess: {
           uid: before?.uid ?? "link-1",
           // An update keeps the URL it had; a creation mints one.
           url: before?.url ?? URL_WITH_SECRET,
@@ -100,7 +100,7 @@ function makePhotos(opts: { type?: string; sharing?: any; shareResult?: any } = 
     },
     unshareNode: async (uid: string, settings?: any) => {
       calls.push({ method: "unshareNode", args: [uid, settings] });
-      if (settings?.publicLink === "remove" && sharing) sharing = { ...sharing, publicLink: undefined };
+      if (settings?.urlAccess === "remove" && sharing) sharing = { ...sharing, urlAccess: undefined };
       else if (!settings) sharing = undefined;
       return undefined;
     },
@@ -112,7 +112,7 @@ const emptyResult = () => ({
   protonInvitations: [],
   nonProtonInvitations: [],
   members: [],
-  publicLink: undefined,
+  urlAccess: undefined,
   editorsCanShare: false,
 });
 
@@ -123,7 +123,7 @@ const emptyResult = () => ({
  */
 const linkResult = (url: string, extra: Record<string, unknown> = {}) => ({
   ...emptyResult(),
-  publicLink: {
+  urlAccess: {
     uid: "link-1",
     url,
     role: "viewer",
@@ -205,8 +205,8 @@ describe("the public link", () => {
       shareResult: linkResult(URL_WITH_SECRET),
     });
     await setPublicLink(photos, PHOTO_UID);
-    expect(named(photos, "unshareNode")[0].args[1]).toEqual({ publicLink: "remove" });
-    expect(named(photos, "shareNode")[0].args[1]).toEqual({ publicLink: { role: "viewer" } });
+    expect(named(photos, "unshareNode")[0].args[1]).toEqual({ urlAccess: "remove" });
+    expect(named(photos, "shareNode")[0].args[1]).toEqual({ urlAccess: { role: "viewer" } });
   });
 
   it("leaves a current link to the SDK's own create-or-update call", async () => {
@@ -216,7 +216,7 @@ describe("the public link", () => {
     });
     await setPublicLink(photos, PHOTO_UID);
     expect(named(photos, "unshareNode")).toHaveLength(0);
-    expect(named(photos, "shareNode")[0].args[1]).toEqual({ publicLink: { role: "viewer" } });
+    expect(named(photos, "shareNode")[0].args[1]).toEqual({ urlAccess: { role: "viewer" } });
   });
 
   // Photo links are viewer links. The object form the SDK takes has to say so,
@@ -224,7 +224,7 @@ describe("the public link", () => {
   it("asks for a viewer link, never an editor one", async () => {
     const photos = makePhotos();
     await setPublicLink(photos, PHOTO_UID);
-    expect(named(photos, "shareNode")[0].args[1].publicLink.role).toBe("viewer");
+    expect(named(photos, "shareNode")[0].args[1].urlAccess.role).toBe("viewer");
   });
 
   it("reports nothing shared once the last revoke deletes the share", async () => {
@@ -259,7 +259,7 @@ describe("the link's password and expiry", () => {
   const EXPIRY = Date.UTC(2027, 0, 15);
 
   /** The settings the last `shareNode` was handed. */
-  const sentLink = (photos: any) => named(photos, "shareNode").at(-1)!.args[1].publicLink;
+  const sentLink = (photos: any) => named(photos, "shareNode").at(-1)!.args[1].urlAccess;
 
   it("creates a link carrying a password", async () => {
     const photos = makePhotos();
@@ -371,7 +371,7 @@ describe("the link's password and expiry", () => {
       sharing: linkResult("https://drive.proton.me/urls/TOKEN#short"),
     });
     const info = await setPublicLink(photos, PHOTO_UID, { customPassword: PASSWORD });
-    expect(named(photos, "unshareNode")[0].args[1]).toEqual({ publicLink: "remove" });
+    expect(named(photos, "unshareNode")[0].args[1]).toEqual({ urlAccess: "remove" });
     expect(sentLink(photos).customPassword).toBe(PASSWORD);
     expect(info.publicLink?.hasCustomPassword).toBe(true);
   });

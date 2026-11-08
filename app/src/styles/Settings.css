@@ -51,9 +51,87 @@
 .st-page-body {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 20px;
   max-width: 1000px;
   padding: 18px 32px 48px;
+}
+/* A search's results: every part at once, only what matches left. */
+.st-results {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.st-results [data-miss] {
+  display: none !important;
+}
+
+/* Finding a setting by its name, at the head of the page. */
+.st-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(320px, 40%);
+  height: 36px;
+  margin-left: auto;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg-mute);
+  cursor: text;
+}
+.st-search:focus-within {
+  border-color: var(--fg-mute);
+}
+.st-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 13.5px;
+}
+.st-search input::-webkit-search-cancel-button {
+  display: none;
+}
+.st-search-clear {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+.st-search-clear:hover {
+  background: var(--line-hover);
+  color: var(--fg-primary);
+}
+
+/* The account's card: who is signed in and how full the storage is. */
+.st-avatar {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: var(--on-accent);
+  font-size: 16px;
+  font-weight: 600;
+}
+.st-account .st-text {
+  max-width: 460px;
+}
+.st-storage-bar {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border);
 }
 .st-section-title {
   display: flex;
@@ -88,6 +166,10 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+/* Two groups of rows one after the other keep the rows' own gap, never touching. */
+.st-rows + .st-rows:not(.st-rows-gap) {
+  margin-top: 4px;
 }
 
 .st-row {
@@ -200,6 +282,19 @@ label.st-row:hover,
 .st-row-btn:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* A status line under a row's text with its own small buttons beside it: the download
+   that keeps photos on this PC, and the answer about copies held back. */
+.st-keep-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.st-keep-line > .st-desc {
+  margin: 0;
 }
 
 /* A standalone explanation under a card, not attached to a control. */
@@ -392,6 +487,19 @@ label.st-row:hover,
   background: var(--accent-wash);
   color: var(--accent);
   font-weight: 600;
+}
+
+.st-seg-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* A choice too wide to sit beside its label: it goes under the text instead. */
+.st-seg.st-seg-under {
+  width: fit-content;
+  max-width: 100%;
+  flex-wrap: wrap;
+  margin-top: 8px;
 }
 
 /* ---- Dropdown (language picker) ----
@@ -588,6 +696,35 @@ label.st-row:hover,
 .st-status {
   color: var(--fg-dim);
 }
+/* A small info button beside a setting's name; what it says opens below the description. */
+.st-info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-left: 6px;
+  padding: 0;
+  vertical-align: -5px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+.st-info:hover,
+.st-info[aria-expanded="true"] {
+  background: var(--pill-bg);
+  color: var(--fg-primary);
+}
+.st-info:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* A line under a setting that warns rather than explains. */
+.st-desc.bad {
+  color: var(--error);
+}
 .st-progress {
   height: 4px;
   margin-top: 8px;
@@ -600,4 +737,161 @@ label.st-row:hover,
   border-radius: 2px;
   background: var(--accent);
   transition: width 0.3s ease;
+}
+
+/* The way back from a page under Machine learning, with the page's name. */
+.st-back {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px -6px;
+  padding: 6px 10px 6px 6px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.st-back:hover {
+  background: color-mix(in srgb, var(--surface), var(--fg-primary) 5%);
+}
+.st-back > svg {
+  color: var(--fg-dim);
+}
+
+/* The phone's block under the machine learning one, in the same pane. */
+.st-subhead-gap {
+  margin: 26px 0 10px;
+}
+
+/* The backups on Drive: a device per card, read only, so no hover; the note above sits close. */
+.st-subhead-gap + .st-note {
+  margin: -4px 0 10px;
+}
+.st-copies:not(:empty) + .st-note,
+.st-note + .st-copies {
+  margin-top: 0;
+}
+.st-copy {
+  cursor: default;
+  min-height: 58px;
+}
+
+/* ---- Labels: one card, a field that searches and makes, the list under it ---- */
+.st-labels {
+  display: flex;
+  flex-direction: column;
+  margin-top: 4px;
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+.st-labels-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--fg-mute);
+}
+.st-labels-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: none;
+  background: none;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 14px;
+}
+.st-labels-list {
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 6px;
+  scrollbar-width: thin;
+}
+.st-label-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-soft);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+}
+.st-label-row:hover {
+  background: color-mix(in srgb, var(--surface), var(--fg-primary) 5%);
+}
+.st-label-row > svg {
+  flex: none;
+  color: var(--fg-dim);
+}
+.st-label-new {
+  cursor: pointer;
+  color: var(--fg-primary);
+}
+.st-label-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-primary);
+}
+.st-label-count {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.st-label-act {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.st-label-row:hover .st-label-act,
+.st-label-act:focus-visible {
+  opacity: 1;
+}
+.st-label-act:hover {
+  background: var(--line-hover);
+  color: var(--fg-primary);
+}
+.st-label-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  outline: none;
+  background: var(--page-bg);
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 14px;
+}
+.st-labels-empty {
+  padding: 14px 12px;
+  font-size: 13px;
+  color: var(--fg-mute);
 }

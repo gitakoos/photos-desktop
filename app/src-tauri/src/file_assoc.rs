@@ -20,6 +20,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+// The "Open with" entries are Windows registry ones; elsewhere nothing registers them.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 // Which files the app is offered for in Explorer, and the registry entries that say so.
 //
 // The installer compiles this same file rather than keeping a copy of it, the way it

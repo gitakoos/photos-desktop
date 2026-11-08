@@ -85,8 +85,10 @@ function pinHtml(src: string | null | undefined, count: number): string {
 
 type Props = {
   points: MapPoint[];
-  /** Places still being read, for the line at the top; null once all are in. */
+  /** Places still being read from Drive, for the line at the top; null otherwise. */
   progress: { done: number; total: number } | null;
+  /** Every place known has been looked up, so an empty map means there are none. */
+  settled?: boolean;
   onOpen: (uids: string[]) => void;
   /** The page's name, floated over the map when the map takes the whole page. */
   title?: string;
@@ -98,7 +100,7 @@ type Props = {
 const PLACE_LIST_LIMIT = 200;
 
 /** Every photo that carries a place, on OpenStreetMap, one pin per neighbourhood. */
-export function MapView({ points, progress, onOpen, title, onOpenPlace }: Props) {
+export function MapView({ points, progress, settled = true, onOpen, title, onOpenPlace }: Props) {
   const t = useT();
   const { lang } = useLang();
   // The towns the photos were taken in, from the shipped list, and the list's search.
@@ -325,7 +327,7 @@ export function MapView({ points, progress, onOpen, title, onOpenPlace }: Props)
       {progress && (
         <div className="map-progress">{t("library.mapLoading", { done: progress.done, total: progress.total })}</div>
       )}
-      {!progress && points.length === 0 && <div className="map-progress">{t("library.mapEmpty")}</div>}
+      {!progress && settled && points.length === 0 && <div className="map-progress">{t("library.mapEmpty")}</div>}
     </div>
   );
 }

@@ -29,13 +29,21 @@ import { CryptoProxy, initCrypto } from "./crypto.ts";
 import {
   facesFileDevice,
   labelsFileDevice,
+  listDriveBackups,
   loadDriveData,
+  otherFaceCopies,
   mergeCollections,
   openEnvelope,
   readFacesSnapshot,
+  readLabelCopy,
   readLabelsSnapshot,
+  readFaceCopy,
   readSearchSnapshot,
+  saveCopy,
   searchFileDevice,
+  writeFaceCopy,
+  writeLabelCopy,
+  writeSearchCopy,
   type CopyCache,
 } from "./driveData.ts";
 
@@ -220,9 +228,146 @@ describe("the people of a face snapshot", () => {
   it("refuses a file cut short or of another version", () => {
     const whole = facesSnapshot();
     expect(() => readFacesSnapshot(whole.subarray(0, whole.length - 1))).toThrow();
-    const other = Buffer.from(whole);
-    other.writeUInt32LE(5, 8);
-    expect(() => readFacesSnapshot(other)).toThrow();
+    for (const version of [3, 7]) {
+      const other = Buffer.from(whole);
+      other.writeUInt32LE(version, 8);
+      expect(() => readFacesSnapshot(other)).toThrow(`face snapshot version ${version}`);
+    }
+  });
+});
+
+/** The body of the phone's golden face snapshot from the counts on, the same in versions 5 and 6. */
+const GOLDEN_V5_BODY = `
+02 00 00 00  02 00 00 00  01 00 00 00  01 00 00 00  01 00 00 00  01 00 00 00  01 00 00 00  01 00 00 00  02 00 00 00
+01 02 00 6B 31   01 02 00 6B 32
+02 03 00 41 6E 6E 05 00 00 00 00 00 00 00
+02 04 00 5A 6F C3 AB 00 00 00 00 00 00 00 00
+09 02 00 41 6C 03 00 41 6E 6E 08 00 00 00 00 00 00 00
+0A 01 03 00 41 6E 6E 02 00 6B 33 00 00 00 00 0A 00 00 00 00 00 00 00
+03 00 00 00 00 01 00 00 00 00 00 80 3E 00 00 00 3F 00 00 40 3F 00 00 80 3F 00 00 60 3F 00 00 00 40 02
+   00 00 00 00 FF FF FF FF 01 00 00 80 3F 00 00 00 40 00 00 80 3F 00 00 80 BF
+04 01 00 00 00 01 00 00 00 06 00 00 00 00 00 00 00
+05 00 00 00 00 00 00 00 00 01 00 00 00 07 00 00 00 00 00 00 00
+06 00 00 00 00 00 00 00 00 09 00 00 00 00 00 00 00
+07 00 00 00 00 00   07 01 00 00 00 01
+FF`;
+
+/** The phone's golden face snapshot, version 6: the same bytes its format test pins. */
+const GOLDEN_V6 = `
+50 50 4D 4C 53 4E 41 50  06 00 00 00  01  02 00 64 31  05 00 50 68 6F 6E 65  08 07 06 05 04 03 02 01
+07 00 00 00  02 00 61 62  01 00 00 00  02 00 00 00
+0B 00 00 00 00 00 00 00
+${GOLDEN_V5_BODY}`;
+
+/** The same file as version 5: no time of a delete everywhere in the header. */
+const GOLDEN_V5 = `
+50 50 4D 4C 53 4E 41 50  05 00 00 00  01  02 00 64 31  05 00 50 68 6F 6E 65  08 07 06 05 04 03 02 01
+07 00 00 00  02 00 61 62  01 00 00 00  02 00 00 00
+${GOLDEN_V5_BODY}`;
+
+/** The same file as version 4: 7 counts, people and curation without a time, no name changes or removals. */
+const GOLDEN_V4 = `
+50 50 4D 4C 53 4E 41 50  04 00 00 00  01  02 00 64 31  05 00 50 68 6F 6E 65  08 07 06 05 04 03 02 01
+07 00 00 00  02 00 61 62  01 00 00 00  02 00 00 00
+02 00 00 00  02 00 00 00  01 00 00 00  01 00 00 00  01 00 00 00  01 00 00 00  02 00 00 00
+01 02 00 6B 31   01 02 00 6B 32
+02 03 00 41 6E 6E
+02 04 00 5A 6F C3 AB
+03 00 00 00 00 01 00 00 00 00 00 80 3E 00 00 00 3F 00 00 40 3F 00 00 80 3F 00 00 60 3F 00 00 00 40 02
+   00 00 00 00 FF FF FF FF 01 00 00 80 3F 00 00 00 40 00 00 80 3F 00 00 80 BF
+04 01 00 00 00 01 00 00 00
+05 00 00 00 00 00 00 00 00 01 00 00 00
+06 00 00 00 00 00 00 00 00
+07 00 00 00 00 00   07 01 00 00 00 01
+FF`;
+
+const hex = (text: string) => Buffer.from(text.replace(/\s+/g, ""), "hex");
+
+describe("the face copy, version 6", () => {
+  it("is written in the phone's golden byte layout, and reads back", () => {
+    const written = writeFaceCopy({
+      deviceId: "d1",
+      deviceLabel: "Phone",
+      // The golden time is past what a double holds exactly; the writer takes it whole.
+      createdAt: 0x0102030405060708n as unknown as number,
+      faceModelVersion: 7,
+      faceModelSha256: "ab",
+      clusterParamsVersion: 1,
+      embeddingDim: 2,
+      facesWipedAt: 11,
+      faces: [
+        {
+          key: "k1",
+          index: 1,
+          box: [0.25, 0.5, 0.75, 1],
+          score: 0.875,
+          blur: 2,
+          rejected: false,
+          person: "Ann",
+          confirmed: null,
+          points: [1, 2],
+          embedding: new Float32Array([1, -1]),
+        },
+      ],
+      manual: [{ name: "Zoë", key: "k2", at: 6 }],
+      notPerson: [{ name: "Ann", key: "k1", index: 1, at: 7 }],
+      covers: [{ name: "Ann", key: "k1", at: 9 }],
+      namedAt: (name) => (name === "Ann" ? 5 : 0),
+      nameChanges: [{ from: "Al", to: "Ann", at: 8 }],
+      removals: [{ kind: 1, name: "Ann", key: "k3", index: 0, at: 10 }],
+      markers: [
+        { key: "k1", swept: false },
+        { key: "k2", swept: true },
+      ],
+    });
+    expect(written.toString("hex")).toBe(hex(GOLDEN_V6).toString("hex"));
+    const { copy } = readFaceCopy(hex(GOLDEN_V6));
+    expect(copy.deviceId).toBe("d1");
+    expect(copy.facesWipedAt).toBe(11);
+    expect(copy.namedAt).toEqual(new Map([["Ann", 5], ["Zoë", 0]]));
+    expect(copy.nameChanges).toEqual([{ from: "Al", to: "Ann", at: 8 }]);
+    expect(copy.faces[0]).toMatchObject({ key: "k1", index: 1, person: "Ann", confirmed: null, blur: 2, points: [1, 2] });
+    expect(copy.removals).toEqual([{ kind: 1, name: "Ann", key: "k3", index: 0, at: 10 }]);
+    expect(copy.notPerson).toEqual([{ name: "Ann", key: "k1", index: 1, at: 7 }]);
+    expect(copy.covers).toEqual(new Map([["Ann", "k1"]]));
+    expect(copy.coverSetAt).toEqual(new Map([["Ann", 9]]));
+    expect(copy.scanned).toEqual(["k1", "k2"]);
+  });
+
+  it("still reads version 5, as written before any delete everywhere", () => {
+    const v5 = readFaceCopy(hex(GOLDEN_V5)).copy;
+    const v6 = readFaceCopy(hex(GOLDEN_V6)).copy;
+    expect(v5.facesWipedAt).toBe(0);
+    expect({ ...v5, facesWipedAt: 11 }).toEqual(v6);
+  });
+
+  it("refuses a negative delete time", () => {
+    const bad = hex(GOLDEN_V6);
+    bad.writeBigInt64LE(-1n, hex(GOLDEN_V6).indexOf(Buffer.from([0x0b, 0, 0, 0, 0, 0, 0, 0])));
+    expect(() => readFaceCopy(bad)).toThrow("a negative delete time");
+  });
+
+  it("still reads version 4, as people named at no known time and no changes", () => {
+    const { copy, snapshot } = readFaceCopy(hex(GOLDEN_V4));
+    expect(copy.facesWipedAt).toBe(0);
+    expect(copy.namedAt).toEqual(new Map([["Ann", 0], ["Zoë", 0]]));
+    expect(copy.nameChanges).toEqual([]);
+    expect(copy.removals).toEqual([]);
+    expect(copy.notPerson).toEqual([{ name: "Ann", key: "k1", index: 1, at: 0 }]);
+    expect(copy.coverSetAt).toEqual(new Map([["Ann", 0]]));
+    expect(copy.faces).toHaveLength(1);
+    // Ann's one face is marked as not her; Zoë is on the photo added by hand.
+    expect(snapshot.people.map((p) => p.name)).toEqual(["Zoë"]);
+  });
+
+  it("refuses a negative change time and a removal of an unknown kind", () => {
+    const bad = hex(GOLDEN_V5);
+    const at = bad.indexOf(Buffer.from([0x09, 0x02, 0x00, 0x41, 0x6c])) + 11;
+    bad.writeBigInt64LE(-1n, at);
+    expect(() => readFaceCopy(bad)).toThrow("a negative change time");
+    const kind = hex(GOLDEN_V5);
+    kind[kind.indexOf(Buffer.from([0x0a, 0x01, 0x03, 0x00])) + 1] = 4;
+    expect(() => readFaceCopy(kind)).toThrow("a removal of kind 4");
   });
 });
 
@@ -246,6 +391,37 @@ describe("the labels of a label snapshot", () => {
     );
     expect([...snap.labels.keys()]).toEqual(["Beach", "Summer"]);
     expect([...snap.labels.get("Beach")!]).toEqual(["k0", "k1"]);
+  });
+});
+
+describe("a label copy", () => {
+  it("reads a copy without change times as changed at no known time", () => {
+    const copy = readLabelCopy(
+      Buffer.from(JSON.stringify({ v: 1, d: "dev", n: "Pixel", c: 50, p: [{ k: "k0", l: [" Beach "] }], m: ["Empty"] })),
+    );
+    expect(copy.photos).toEqual([{ key: "k0", labels: ["Beach"], changedAt: 0 }]);
+    expect(copy.names).toEqual([{ name: "Empty", changedAt: 0 }]);
+    expect(copy.deleted).toEqual([]);
+  });
+
+  it("is written with the fields the phone reads, and the change times beside them", () => {
+    const copy = {
+      deviceId: "dev",
+      deviceLabel: "Desk",
+      createdAt: 90,
+      photos: [
+        { key: "k0", labels: ["Beach", "Summer"], changedAt: 70 },
+        { key: "k1", labels: [], changedAt: 80 },
+      ],
+      names: [{ name: "Later", changedAt: 60 }],
+      deleted: [{ name: "Old", at: 85 }],
+    };
+    const bytes = writeLabelCopy(copy);
+    const json = JSON.parse(bytes.toString("utf8"));
+    expect(json).toMatchObject({ v: 1, d: "dev", n: "Desk", c: 90, m: ["Later"] });
+    expect(json.p[0]).toEqual({ k: "k0", l: ["Beach", "Summer"], t: 70 });
+    expect(readLabelCopy(bytes)).toEqual(copy);
+    expect([...readLabelsSnapshot(bytes).labels.keys()]).toEqual(["Beach", "Summer"]);
   });
 });
 
@@ -318,6 +494,29 @@ describe("a search snapshot", () => {
     );
   });
 
+  it("is written the way it is read, a photo that could not be read as a tombstone", () => {
+    const one = new Uint16Array([0x3c00, 0, 0, 0x3800]);
+    const bytes = writeSearchCopy({
+      deviceId: "0f0e0d0c-0b0a-4908-8706-050403020100",
+      deviceLabel: "Desk",
+      createdAt: 1234,
+      modelId: "space-a",
+      dim: 4,
+      entries: [
+        ["k0", one],
+        ["k1", null],
+        ["content://media/1", one],
+      ],
+    });
+    // Version 5 changed only the face copy: a search copy stays at 4.
+    expect(bytes.readUInt32LE(8)).toBe(4);
+    const snap = readSearchSnapshot(bytes);
+    expect(snap.deviceId).toBe("0f0e0d0c-0b0a-4908-8706-050403020100");
+    expect([snap.deviceLabel, snap.createdAt, snap.modelId, snap.dim]).toEqual(["Desk", 1234, "space-a", 4]);
+    expect(snap.keys).toEqual(["k0"]);
+    expect([...snap.vectors]).toEqual([...one]);
+  });
+
   it("refuses a face snapshot and a file cut short", () => {
     expect(() => readSearchSnapshot(facesSnapshot())).toThrow();
     const whole = searchSnapshot();
@@ -326,20 +525,23 @@ describe("a search snapshot", () => {
 });
 
 /** A stand-in for the My files client: the app folder with its ML data and Labels folders. */
-function fakeDrive(files: { uid: string; name: string; revision: string; bytes: Buffer }[]) {
-  const node = (uid: string, name: string, type: string, revision = "") => ({
+function fakeDrive(files: { uid: string; name: string; revision: string; bytes: Buffer; at?: number; trashed?: boolean }[]) {
+  const node = (uid: string, name: string, type: string, revision = "", at = 0, trashed = false) => ({
     uid,
     type,
     name: { ok: true, value: name },
     activeRevision: { ok: true, value: { uid: revision } },
-    modificationTime: new Date(0),
+    modificationTime: new Date(at),
+    trashTime: trashed ? new Date(1) : undefined,
   });
+  const fileNode = (f: (typeof files)[number]) => node(f.uid, f.name, "file", f.revision, f.at, f.trashed);
   const downloads: string[] = [];
   const children: Record<string, any[]> = {
     root: [node("app", "Photos for Proton", "folder")],
-    app: [node("ml", "ML data", "folder"), node("labels", "Labels", "folder")],
-    ml: files.filter((f) => !f.name.startsWith("labels")).map((f) => node(f.uid, f.name, "file", f.revision)),
-    labels: files.filter((f) => f.name.startsWith("labels")).map((f) => node(f.uid, f.name, "file", f.revision)),
+    app: [node("ml", "ML data", "folder"), node("labels", "Labels", "folder"), node("hidden", "Hidden", "folder")],
+    ml: files.filter((f) => !f.name.startsWith("labels") && !f.name.startsWith("hidden")).map(fileNode),
+    labels: files.filter((f) => f.name.startsWith("labels")).map(fileNode),
+    hidden: files.filter((f) => f.name.startsWith("hidden")).map(fileNode),
   };
   const client = {
     getMyFilesRootFolder: async () => ({ uid: "root" }),
@@ -377,6 +579,8 @@ function memoryCache(): CopyCache & { entries: Map<string, { revision: string; b
 
 describe("reading the phone's copies", () => {
   const id = "3f2a1b4c-0000-4000-8000-000000000001";
+  const other = "3f2a1b4c-0000-4000-8000-000000000002";
+  const labelCopy = (label: string) => Buffer.from(JSON.stringify({ v: 1, d: id, n: label, c: 5, p: [{ k: "k0", l: ["Beach"] }], m: [] }));
   const account = () => ({ getOwnAddresses: async () => [{ keys: [{ key }], primaryKeyIndex: 0 }] });
 
   it("downloads a copy once, and again only when its revision on Drive changes", async () => {
@@ -409,10 +613,144 @@ describe("reading the phone's copies", () => {
     expect(both.searchOtherModel).toBe(1);
   }, 30_000);
 
+  it("passes over files in the trash and those moved there from here", async () => {
+    const files = [
+      { uid: "s1", name: `search-${id}.pfpml`, revision: "r", bytes: await seal(searchSnapshot(), key), trashed: true },
+      { uid: "s2", name: `search-${other}.pfpml`, revision: "r", bytes: await seal(searchSnapshot(), key) },
+    ];
+    const drive = fakeDrive(files);
+    const data = await loadDriveData(drive.client, account(), { faces: false, labels: false, search: true, trashed: new Set(["s2"]) }, null, "space-a");
+    expect(data.search).toEqual([]);
+    expect(drive.downloads).toEqual([]);
+  });
+
+  it("reads this install's own files back only when asked, and says whether all of them were", async () => {
+    const files = [
+      { uid: "f1", name: `faces-${id}.pfpml`, revision: "r", bytes: await seal(facesSnapshot(), key) },
+      { uid: "l1", name: `labels-${id}.pfplb`, revision: "r", bytes: await seal(labelCopy("Desk"), key) },
+    ];
+    const own = { faces: false, faceData: true, labels: true, search: false, ownDeviceId: id };
+    const skipped = await loadDriveData(fakeDrive(files).client, account(), own, null, "space-a");
+    expect(skipped.faceCopies).toEqual([]);
+    expect(skipped.labelCopies).toEqual([]);
+    const back = await loadDriveData(fakeDrive(files).client, account(), { ...own, readBack: true }, null, "space-a");
+    expect(back.faceCopies.map((c) => c.deviceId)).toEqual([id]);
+    expect(back.labelCopies).toHaveLength(1);
+    expect(back.ownRead).toBe(true);
+    expect(back.deviceNames).toEqual(expect.arrayContaining([[id, "Desk"]]));
+    // Labels not read this time: the next round reads them back still.
+    const part = await loadDriveData(fakeDrive(files).client, account(), { ...own, labels: false, readBack: true }, null, "space-a");
+    expect(part.ownRead).toBe(false);
+  }, 30_000);
+
+  it("lists the backups device by device, newest first, named from a small copy", async () => {
+    const files = [
+      { uid: "f1", name: `faces-${id}.pfpml`, revision: "r", bytes: Buffer.alloc(0), at: 3_000 },
+      { uid: "s1", name: `search-${id}.pfpml`, revision: "r", bytes: Buffer.alloc(0), at: 1_000 },
+      { uid: "f2", name: `faces-${other}.pfpml`, revision: "r", bytes: Buffer.alloc(0), at: 1_000 },
+      { uid: "l2", name: `labels-${other}.pfplb`, revision: "r", bytes: await seal(labelCopy("Pixel 8"), key), at: 9_000 },
+      { uid: "x", name: "notes.txt", revision: "r", bytes: Buffer.alloc(0), at: 9_000 },
+    ];
+    const drive = fakeDrive(files);
+    const { backups, names } = await listDriveBackups(drive.client, account(), null, id, {});
+    expect(backups).toEqual([
+      { device: other, own: false, name: "Pixel 8", savedAt: 9_000, files: ["f2", "l2"] },
+      { device: id, own: true, name: null, savedAt: 3_000, files: ["f1", "s1"] },
+    ]);
+    expect(names).toEqual([[other, "Pixel 8"]]);
+    expect(drive.downloads).toEqual(["l2"]);
+    // A name kept from before is not read again.
+    const again = fakeDrive(files);
+    await listDriveBackups(again.client, account(), null, id, { [other]: "Pixel 8" });
+    expect(again.downloads).toEqual([]);
+    expect(await otherFaceCopies(drive.client, id)).toEqual(["f2"]);
+  }, 30_000);
+
   it("drops the cached copies of files no longer on Drive", async () => {
     const cache = memoryCache();
     cache.put("gone", "r", Buffer.from("x"));
     await loadDriveData(fakeDrive([]).client, account(), { faces: true, labels: true, search: true }, cache, "space-a");
     expect(cache.entries.size).toBe(0);
+  });
+});
+
+describe("saving this install's copy", () => {
+  /** A Drive with the app's folder and one sub-folder, whose uploads are recorded. */
+  function drive(conflict: { existingNodeUid?: string; isUnfinishedUpload?: boolean } | null, trashed: string[] = []) {
+    const calls: { kind: string; target: string; override?: boolean }[] = [];
+    const folder = (uid: string, name: string) => ({ uid, type: "folder", name: { ok: true, value: name } });
+    const uploader = (fail: boolean) => ({
+      uploadFromStream: async () => ({
+        completion: async () => {
+          if (fail && conflict) {
+            const e = Object.assign(new Error("exists"), { name: "NodeWithSameNameExistsValidationError", ...conflict });
+            throw e;
+          }
+          return { nodeUid: "saved" };
+        },
+      }),
+    });
+    return {
+      calls,
+      client: {
+        getMyFilesRootFolder: async () => ({ uid: "root" }),
+        iterateFolderChildren: async function* (uid: string) {
+          if (uid === "root") yield folder("app", "Photos for Proton");
+          if (uid === "app") yield folder("labels", "Labels");
+          if (uid === "labels" && trashed.includes("old")) {
+            yield { uid: "old", type: "file", name: { ok: true, value: "labels-x.pfplb" }, trashTime: new Date(1) };
+          }
+        },
+        getNode: async (uid: string) => ({ uid, trashTime: trashed.includes(uid) ? new Date(1) : undefined }),
+        restoreNodes: async function* (uids: string[]) {
+          for (const uid of uids) {
+            calls.push({ kind: "restore", target: uid });
+            yield { uid, ok: true };
+          }
+        },
+        createFolder: async () => {
+          throw new Error("no new folders here");
+        },
+        getFileUploader: async (parent: string, _name: string, meta: any) => {
+          calls.push({ kind: "new", target: parent, override: meta.overrideExistingDraftByOtherClient });
+          return uploader(true);
+        },
+        getFileRevisionUploader: async (uid: string, meta: any) => {
+          calls.push({ kind: "revision", target: uid, override: meta.overrideExistingDraftByOtherClient });
+          return uploader(false);
+        },
+      },
+    };
+  }
+
+  it("replaces a draft of its own name rather than failing every save", async () => {
+    const d = drive(null);
+    await saveCopy(d.client, "Labels", "labels-x.pfplb", Buffer.from("x"), new Date(1));
+    expect(d.calls).toEqual([{ kind: "new", target: "labels", override: true }]);
+  });
+
+  it("saves as the next revision of a finished file the listing did not show", async () => {
+    const d = drive({ existingNodeUid: "file-1", isUnfinishedUpload: false });
+    expect(await saveCopy(d.client, "Labels", "labels-x.pfplb", Buffer.from("x"), new Date(1))).toBe("saved");
+    expect(d.calls.map((c) => [c.kind, c.target])).toEqual([
+      ["new", "labels"],
+      ["revision", "file-1"],
+    ]);
+  });
+
+  it("brings a copy another device moved to the trash back out before saving into it", async () => {
+    const d = drive({ existingNodeUid: "file-1", isUnfinishedUpload: false }, ["file-1", "old"]);
+    expect(await saveCopy(d.client, "Labels", "labels-x.pfplb", Buffer.from("x"), new Date(1))).toBe("saved");
+    // The trashed file the listing showed is not taken for the one to write on.
+    expect(d.calls.map((c) => [c.kind, c.target])).toEqual([
+      ["new", "labels"],
+      ["restore", "file-1"],
+      ["revision", "file-1"],
+    ]);
+  });
+
+  it("does not take over anything else that fails", async () => {
+    const d = drive({ existingNodeUid: "file-1", isUnfinishedUpload: true });
+    await expect(saveCopy(d.client, "Labels", "labels-x.pfplb", Buffer.from("x"), new Date(1))).rejects.toThrow("exists");
   });
 });

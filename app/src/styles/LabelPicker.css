@@ -1,0 +1,118 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The label picker: the album picker's panel and search, with a list of labels in place of
+   the cover cards. */
+.cf-panel.lp-picker {
+  width: min(520px, 92vw);
+  height: auto;
+  max-height: min(70vh, 640px);
+}
+
+.lp-note {
+  margin: -8px 2px 12px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+
+.lp-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: thin;
+}
+
+.lp-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-soft);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.lp-row:hover:not(:disabled) {
+  background: var(--line-soft);
+}
+.lp-row:disabled {
+  cursor: default;
+}
+.lp-row.on {
+  color: var(--fg-primary);
+}
+.lp-row > svg {
+  flex: none;
+  color: var(--fg-dim);
+}
+
+/* The mark at the row's start: filled when every selected photo has the label, a dash when
+   some do, an empty box when none does. */
+.lp-mark {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  color: var(--on-accent);
+}
+.lp-mark.all,
+.lp-mark.some {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.lp-mark.new {
+  border-style: dashed;
+  color: var(--fg-dim);
+}
+.lp-dash {
+  width: 9px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+}
+
+.lp-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-count {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}

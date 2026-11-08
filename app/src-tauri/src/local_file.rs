@@ -20,6 +20,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+// The Windows decoders' helpers; elsewhere only part of this file is used.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 // Photos and videos that are already on this disk.
 //
 // Nothing here goes near the sidecar, and that is the whole point: double-clicking a
@@ -1101,7 +1104,7 @@ pub fn delete_local_file(app: AppHandle, path: String) -> Result<(), String> {
 /// COM has to be up on this thread first. A Tauri command runs on a pool thread that
 /// has never initialised it, and the shell object cannot be created without it.
 #[cfg(windows)]
-fn recycle(path: &Path) -> Result<(), String> {
+pub(crate) fn recycle(path: &Path) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,

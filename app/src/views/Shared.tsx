@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { photoSpan } from "../lib/albumSpan";
 import { rpc } from "../lib/rpc";
 import { downloadMessage, downloadPhotos } from "../lib/download";
 import { useThumbnails } from "../hooks/useThumbnails";
@@ -82,6 +83,7 @@ export function Shared({
   open,
   onOpenChange,
   onPhotoUids,
+  onSpan,
   initial,
   onCount,
   onData,
@@ -95,6 +97,8 @@ export function Shared({
   onOpenChange: (album: SharedItem | null) => void;
   /** The open album's photo uids, lifted for the masthead's Download; [] on the list. */
   onPhotoUids?: (uids: string[]) => void;
+  /** The open album's first and last capture time, for its header; null while loading or empty. */
+  onSpan?: (span: [number, number] | null) => void;
   /** What the shell warmed for this tab, for the first paint only. */
   initial?: SharedItem[] | null;
   onCount?: (n: number | null) => void;
@@ -214,6 +218,10 @@ export function Shared({
   useEffect(() => {
     onPhotoUids?.(openUid ? albumPhotos.map((p) => p.uid) : []);
   }, [openUid, albumPhotos, onPhotoUids]);
+
+  useEffect(() => {
+    onSpan?.(!openUid || albumLoading ? null : photoSpan(albumPhotos));
+  }, [openUid, albumLoading, albumPhotos, onSpan]);
 
   // Report the count up to the top bar (null while loading), so the header can show
   // it next to the tab toggle it owns. An open album reports its own, which is what

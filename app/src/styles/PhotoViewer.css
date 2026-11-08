@@ -113,3 +113,123 @@
     transform: rotate(360deg);
   }
 }
+
+/* ---- Copy text: the text read off the photo, over it, to select ---- */
+.vt-frame {
+  pointer-events: none;
+  animation: none;
+}
+.vt-layer {
+  position: absolute;
+  inset: 0;
+}
+/* Read ahead: nothing shows the text until it is selected, and the photo pans around it. */
+.vt-quiet {
+  pointer-events: none;
+}
+.vt-quiet .vt-run {
+  background: transparent;
+}
+.vt-run {
+  position: absolute;
+  transform-origin: 0 0;
+  white-space: pre;
+  color: transparent;
+  font-family: Arial, sans-serif;
+  pointer-events: auto;
+  user-select: text;
+  cursor: text;
+  border-radius: 3px;
+  background: rgba(var(--accent-rgb), 0.16);
+}
+.vt-sep {
+  font-size: 0;
+}
+.vt-run::selection,
+.vt-sep::selection {
+  color: transparent;
+  background: rgba(var(--accent-rgb), 0.5);
+}
+
+/* The copy button under text selected on a photo read ahead. */
+.vt-copy {
+  position: fixed;
+  z-index: 5;
+  transform: translateX(-50%);
+  padding: 4px;
+  border-radius: 20px;
+  background: var(--pill-bg-opaque);
+  border: 0.5px solid var(--border);
+  box-shadow: var(--menu-shadow);
+}
+.vt-copy.above {
+  transform: translate(-50%, -100%);
+}
+
+/* What copy text is doing, at the foot of the photo. */
+.vt-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  min-height: 40px;
+  padding: 0 6px 0 14px;
+  box-sizing: border-box;
+  border-radius: 20px;
+  background: var(--pill-bg-opaque);
+  border: 0.5px solid var(--border);
+  box-shadow: var(--menu-shadow);
+  color: var(--fg-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.vt-pill > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+.vt-spin {
+  flex: 0 0 auto;
+}
+.vt-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vt-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 15px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.vt-pill-btn:hover {
+  background: var(--accent-wash-strong);
+}
+.vt-pill-close {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 15px;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+.vt-pill-close:hover {
+  color: var(--fg-primary);
+  background: var(--line-06);
+}

@@ -217,7 +217,7 @@ function describe(uid: string, ctx: ShareContext, result: any): SharingInfo {
     uid,
     canShare: ctx.owns,
     supportsPublicLink: ctx.owns && !ctx.isAlbum,
-    publicLink: toPublicLink(result?.publicLink),
+    publicLink: toPublicLink(result?.urlAccess ?? result?.publicLink),
     people: toPeople(result),
     isShared: !!result,
   };
@@ -264,14 +264,14 @@ export async function setPublicLink(
     if (ctx.isAlbum) throw new Error(SHARE_NO_ALBUM_LINK);
 
     const current = await photos.getSharingInfo(uid);
-    const link = current?.publicLink;
+    const link = current?.urlAccess ?? current?.publicLink;
     const existing = toPublicLink(link);
 
     // A legacy link cannot be updated, only replaced, so it is dropped first and
     // the request becomes the creation it has to be. What it carried goes with
     // it: there is no link left to keep a setting from.
     const replacing = !!existing && !existing.canUpdate;
-    if (replacing) await photos.unshareNode(uid, { publicLink: "remove" });
+    if (replacing) await photos.unshareNode(uid, { urlAccess: "remove" });
     const kept = replacing ? undefined : link;
 
     // An emptied field arrives as an empty string or a zero, which is the same
@@ -287,7 +287,7 @@ export async function setPublicLink(
           : null;
 
     const result = await photos.shareNode(uid, {
-      publicLink: {
+      urlAccess: {
         // A photo's link is a viewer link, which is what the boolean form of
         // these settings meant and what the object form has to say outright.
         // Reading the link's own role back would widen it instead of keeping it.
@@ -305,7 +305,7 @@ export async function removePublicLink(photos: any, uid: string): Promise<Sharin
   return watch("removePublicLink", async () => {
     const ctx = await readContext(photos, uid);
     if (!ctx.owns) throw new Error(SHARE_NOT_OWNED);
-    const result = await photos.unshareNode(uid, { publicLink: "remove" });
+    const result = await photos.unshareNode(uid, { urlAccess: "remove" });
     return describe(uid, ctx, result);
   });
 }

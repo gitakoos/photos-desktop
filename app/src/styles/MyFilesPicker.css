@@ -1,0 +1,244 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The My files picker: the label picker's panel and rows, a path to walk back up, and the
+   choice between moving and copying under the list. */
+.cf-panel.mf-picker {
+  height: min(78vh, 720px);
+  max-height: none;
+}
+
+.mf-path {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: -6px 0 10px;
+  color: var(--fg-mute);
+}
+.mf-crumbwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.mf-crumb {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.mf-crumb:hover:not(:disabled) {
+  background: var(--line-soft);
+  color: var(--fg-primary);
+}
+.mf-crumb:disabled {
+  color: var(--fg-primary);
+  font-weight: 600;
+  cursor: default;
+}
+
+.mf-row {
+  padding: 0 4px 0 12px;
+  cursor: default;
+}
+.mf-check {
+  padding: 0;
+  cursor: pointer;
+}
+.mf-check:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.mf-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mf-open > svg {
+  flex: none;
+  color: var(--fg-dim);
+}
+.mf-open:disabled {
+  cursor: default;
+}
+.mf-count {
+  margin: -4px 0 8px 48px;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+
+.mf-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+.mf-mode {
+  align-self: flex-start;
+}
+.mf-modedesc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--fg-dim);
+}
+.mf-foot .cf-actions {
+  margin-top: 4px;
+}
+
+/* The photos and videos straight in the folder: previews to pick one by one. */
+.mf-fileshead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 4px 8px 12px;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.mf-all {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.mf-all:hover {
+  background: var(--line-soft);
+}
+.mf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 8px;
+  padding: 0 4px 8px;
+}
+.mf-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-dim);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.mf-tile:disabled {
+  cursor: default;
+}
+.mf-thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--fg-mute);
+  transition: border-color 0.12s ease;
+}
+.mf-tile.on .mf-thumb {
+  border-color: var(--accent);
+}
+.mf-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.mf-tilemark {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: color-mix(in srgb, var(--surface), transparent 30%);
+}
+.mf-tile:not(.on) .mf-tilemark {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.mf-tile:hover .mf-tilemark {
+  opacity: 1;
+}
+.mf-video {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+.mf-tilename {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+/* How far the look through the sub-folders has got, while it runs. */
+.mf-checking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 12px 10px;
+  font-size: 12.5px;
+  color: var(--fg-mute);
+}
+.mf-checkbar {
+  flex: 0 0 120px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--line-hover);
+}
+.mf-checkbar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}

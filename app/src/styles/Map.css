@@ -41,8 +41,11 @@
   height: 100%;
 }
 
+/* Its own stacking context: the map library layers its panes at z-index 400 and up, which
+   otherwise rise over the pages laid on top of this column (Settings, Upload). */
 .map-view {
   position: relative;
+  isolation: isolate;
   height: 100%;
   min-height: 300px;
   border-radius: 16px;

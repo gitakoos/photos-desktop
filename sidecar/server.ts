@@ -35,9 +35,16 @@ import { session } from "./proton/session.ts";
 import { initStore } from "./proton/store.ts";
 import { modelStatus as semanticModelStatus, removeModel, startModelDownload } from "./proton/semantic.ts";
 import { detectFaces, faceModelStatus, startFaceModelDownload } from "./proton/faces.ts";
+import { ocrModelStatus, removeOcrModels, startOcrModelDownload } from "./proton/ocr.ts";
+import { faceHandlers } from "./proton/faceApi.ts";
+import { labelHandlers } from "./proton/labelApi.ts";
 import { setVaultMetaKey } from "./proton/vault.ts";
 import { respond, type RpcWriter } from "./rpc.ts";
+import { setHostWriter, takeHostLine } from "./proton/hostCall.ts";
+import { readCompressionSettings, setCompression } from "./proton/compression.ts";
 import { scrubSecrets } from "./scrub.ts";
+import { diag, type DiagArea } from "./proton/diag.ts";
+import { diagnosticsReport, saveDiagnostics, watchJobs, withoutNames } from "./proton/diagReport.ts";
 import { checkUpdate, downloadUpdate, startUpdateDownload, updateStatus } from "./update.ts";
 
 // Two hard rules for the sidecar's output. (1) stdout carries ONLY JSON-RPC
@@ -53,8 +60,34 @@ const RELEASE = process.env.SIDECAR_RELEASE === "1";
 // it to disk.
 const rawStderrWrite = process.stderr.write.bind(process.stderr);
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-(process.stderr as any).write = (chunk: any, ...rest: any[]) =>
-  rawStderrWrite(typeof chunk === "string" ? scrubSecrets(chunk) : chunk, ...rest);
+(process.stderr as any).write = (chunk: any, ...rest: any[]) => {
+  if (typeof chunk !== "string") return rawStderrWrite(chunk, ...rest);
+  const clean = scrubSecrets(chunk);
+  keepInDiagnostics(clean);
+  return rawStderrWrite(clean, ...rest);
+};
+
+/** The log's tags whose lines the diagnostics keep too, and the part each belongs to. */
+const TAGGED: Record<string, DiagArea> = {
+  faces: "faces",
+  search: "search",
+  labels: "labels",
+  backup: "backup",
+  import: "import",
+  upload: "upload",
+  "drive-data": "drive",
+  sidecar: "app",
+  store: "app",
+};
+
+/** A tagged line some module wrote, kept in its part of the diagnostics as well. */
+function keepInDiagnostics(text: string): void {
+  for (const line of text.split("\n")) {
+    const m = /^\[([a-z-]+)\] (.*)$/.exec(line);
+    const area = m && TAGGED[m[1]];
+    if (area) diag.capture(area, withoutNames(m![2]));
+  }
+}
 
 // Library console.* is kept OFF both channels: never stdout, and in the packaged
 // build never the log either. It lands in a small in-memory ring (not persisted,
@@ -86,6 +119,17 @@ type Request = { id: number; method: string; params?: any };
 
 let initialised = false;
 
+/** A list of photo uids from the window: strings only, each at most once, at most a few thousand. */
+function uidList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return [...new Set(v.filter((u): u is string => typeof u === "string" && u.length > 0 && u.length < 512))].slice(0, 5000);
+}
+
+/** What a read of the copies on Drive takes, as the window asks for it. */
+function driveKinds(p: any) {
+  return { faces: p?.faces !== false, labels: p?.labels !== false, search: !!p?.search, faceData: !!p?.faceData };
+}
+
 const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   // Sent by the Rust host before anything else: the app directory, and the key
   // that seals the vault's own metadata. The store's data key is NOT passed here;
@@ -102,17 +146,29 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
     return { store: "ready" };
   },
   ping: () => ({ sdkVersion: VERSION, node: process.version }),
-  login: (p) => session.login(p.username, p.password),
-  submitCaptcha: (p) => session.submitCaptcha(p.token),
-  submit2fa: (p) => session.submit2fa(p.code),
   lockStatus: () => session.lockStatus(),
+  localLockState: () => session.localLockState(),
+  localLockCheck: (p) => session.localLockCheck(p?.password),
+  localLockSet: (p) => session.localLockSet(p?.password, p?.current),
+  localLockClear: (p) => session.localLockClear(p?.current),
   unlock: (p) => session.unlock(p.password),
   unlockDevice: () => session.unlockDevice(),
   retryResume: () => session.retryResume(),
   startBrowserLogin: () => session.startBrowserLogin(),
-  browserLoginStatus: () => session.browserLoginStatus(),
+  browserLoginStatus: (p) => session.browserLoginStatus(p?.nudge === true),
   cancelBrowserLogin: () => session.cancelBrowserLogin(),
   protectSession: (p) => session.protectSession(typeof p?.password === "string" ? p.password : null),
+  signInChoice: () => session.signInChoice(),
+  dateEditInfo: (p) => session.dateEditInfo(Array.isArray(p?.uids) ? p.uids.map(String).slice(0, 5000) : []),
+  startDateEdit: (p) =>
+    session.startDateEdit(
+      (Array.isArray(p?.items) ? p.items : [])
+        .slice(0, 5000)
+        .map((i: any) => ({ uid: String(i?.uid ?? ""), captureMs: Number(i?.captureMs) })),
+    ),
+  dateEditStatus: () => session.dateEditStatus(),
+  stopDateEdit: () => session.stopDateEdit(),
+  keepSignIn: (p) => session.keepSignIn(p?.choice === "device" ? "device" : "password"),
   lock: () => session.lock(),
   getTimeline: () => session.getTimeline(),
   startTimeline: () => session.startTimeline(),
@@ -127,21 +183,32 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   unpinOffline: (p) => session.unpinOffline(p.uids ?? []),
   unpinAllOffline: () => session.unpinAllOffline(),
   offlineStatus: () => session.offlineStatus(),
+  offlineAlbums: () => session.offlineAlbums(),
+  offlineAlbumSet: (p) => session.offlineAlbumSet(String(p?.uid ?? ""), p?.on === true),
   getVideo: (p) => session.getVideo(p.uid),
   startSaveOriginals: (p) => session.startSaveOriginals(p.uids, p.destDir),
   saveStatus: () => session.saveStatus(),
   listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50),
   hydrateFile: (p) => session.hydrateFile(p.uid, typeof p.dir === "string" ? p.dir : undefined),
+  // The same download for the "keep every photo" pass, on a lane that yields to the window.
+  hydrateFileBg: (p) => session.hydrateFile(p.uid, typeof p.dir === "string" ? p.dir : undefined),
+  mountFates: (p) => session.mountFates(Array.isArray(p?.uids) ? p.uids.map(String) : []),
+  keepReady: () => session.keepReady(),
+  mountHidden: () => session.mountHidden(),
   startHydrate: (p) => session.startHydrate(p.uid, typeof p.dir === "string" ? p.dir : undefined),
   hydrateProgress: (p) => session.hydrateProgress(String(p.path ?? "")),
   cancelHydrate: (p) => session.cancelHydrate(String(p.path ?? "")),
   listExtrasForMount: () => session.listExtrasForMount(),
   heapStats: () => process.memoryUsage(),
-  getAlbums: () => session.getAlbums(),
+  getAlbums: (p) => session.getAlbums(p?.includeHidden === true),
   getAlbumPhotos: (p) => session.getAlbumPhotos(p.uid),
   getAlbumPhotoUids: () => session.getAlbumPhotoUids(),
   cachedAlbumPhotoUids: () => session.cachedAlbumPhotoUids(),
-  listAlbumsForMount: () => session.listAlbumsForMount(),
+  listAlbumsForMount: (p) =>
+    session.listAlbumsForMount(
+      Math.max(0, Math.floor(Number(p?.offset) || 0)),
+      p?.limit === undefined ? undefined : Math.max(1, Math.floor(Number(p.limit) || 1)),
+    ),
   createAlbum: (p) => session.createAlbum(p.name),
   renameAlbum: (p) => session.renameAlbum(p.uid, p.name),
   setAlbumCover: (p) => session.setAlbumCover(p.uid, p.coverUid),
@@ -178,6 +245,21 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
       Array.isArray(p.paths) ? p.paths.filter((x: unknown) => typeof x === "string") : [],
     ),
   prepareImport: (p) => session.prepareImport(p.frames ?? {}, p.media ?? {}),
+  myFilesList: (p) => session.myFilesList(typeof p?.uid === "string" && p.uid ? p.uid : undefined),
+  myFilesCheck: (p) =>
+    session.myFilesCheck((Array.isArray(p?.uids) ? p.uids : []).filter((u: unknown) => typeof u === "string").slice(0, 32)),
+  myFilesThumbs: (p) =>
+    session.myFilesThumbs((Array.isArray(p?.uids) ? p.uids : []).filter((u: unknown) => typeof u === "string").slice(0, 48)),
+  startMyFilesImport: (p) =>
+    session.startMyFilesImport(
+      (Array.isArray(p?.folders) ? p.folders : [])
+        .filter((f: any) => typeof f?.uid === "string" && typeof f?.name === "string")
+        .slice(0, 200),
+      (Array.isArray(p?.files) ? p.files : [])
+        .filter((f: any) => typeof f?.uid === "string" && typeof f?.folder === "string")
+        .slice(0, 20_000),
+      p?.move === true,
+    ),
   getImportReview: () => session.getImportReview(),
   getImportChecks: () => session.getImportChecks(),
   confirmImport: (p) =>
@@ -187,6 +269,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
       p.live !== false,
     ),
   discardImport: () => session.discardImport(),
+  dropReplaced: () => session.dropReplaced(),
   startDropUpload: (p) =>
     session.startDropUpload(
       Array.isArray(p.paths) ? p.paths.filter((x: unknown) => typeof x === "string") : [],
@@ -197,12 +280,28 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
       p.favorite === true,
     ),
   uploadStatus: () => session.uploadStatus(),
-  getDriveCollections: (p) =>
-    session.getDriveCollections(!!p?.refresh, {
-      faces: p?.faces !== false,
-      labels: p?.labels !== false,
-      search: !!p?.search,
-    }),
+  uploadCompressionSet: (p) => {
+    setCompression(readCompressionSettings(p));
+    return { ok: true };
+  },
+  getDriveCollections: (p) => session.getDriveCollections(!!p?.refresh, driveKinds(p)),
+  sharedBackupSet: (p) => session.setSharedBackup(p?.on === true, driveKinds(p)),
+  sharedBackupStatus: () => session.sharedBackupStatus(),
+  sharedBackupNow: () => {
+    void session.backUpNow().catch(() => undefined);
+    return session.sharedBackupStatus();
+  },
+  sharedBackupLoad: () => session.loadFromDrive(),
+  driveBackups: () => session.driveBackups(),
+  driveBackupTrash: (p) => session.trashDriveBackup(String(p?.device ?? "").slice(0, 64)),
+  faceClearHere: async () => {
+    await session.clearFacesHere();
+    return { ok: true };
+  },
+  faceClearEverywhere: async () => {
+    await session.clearFacesEverywhere();
+    return { ok: true };
+  },
   semanticSearch: (p) =>
     session.semanticSearch(
       String(p?.query ?? "").slice(0, 500),
@@ -214,6 +313,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   faceModelStatus: () => faceModelStatus(),
   faceModelDownload: () => startFaceModelDownload(),
   detectFaces: (p) => detectFaces(String(p?.rgb ?? "")),
+  ...faceHandlers,
+  ...labelHandlers(() => session.backup.changed()),
   thumbServer: () => session.thumbServer(),
   cancelUpload: () => session.cancelUpload(),
   clearUploads: () => session.clearUploads(),
@@ -223,6 +324,28 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
+  hiddenState: () => session.hiddenState(),
+  hiddenSet: (p) =>
+    session.hiddenSet(p?.kind === "albums" ? "albums" : "photos", uidList(p?.uids), p?.hidden !== false),
+  hiddenRefresh: () => session.hiddenRefresh(),
+  ocrModelStatus: () => ocrModelStatus(),
+  ocrModelDownload: () => startOcrModelDownload(),
+  ocrModelRemove: () => removeOcrModels(),
+  ocrStart: (p) =>
+    session.ocrStart({
+      uid: typeof p?.uid === "string" ? p.uid : undefined,
+      path: typeof p?.path === "string" ? p.path : undefined,
+    }),
+  ocrResult: (p) => session.ocrResult(Number(p?.id)),
+  duplicatesStart: () => session.duplicatesStart(),
+  duplicatesStatus: () => session.duplicatesStatus(),
+  duplicatesGroups: () => session.duplicatesGroups(),
+  duplicatesTrash: (p) =>
+    session.duplicatesTrash(
+      (Array.isArray(p?.groups) ? p.groups : []).map((g: any) => ({ uids: uidList(g?.uids), keep: uidList(g?.keep) })),
+      (Array.isArray(p?.whole) ? p.whole : []).map(uidList),
+    ),
+  duplicatesIgnore: (p) => session.duplicatesIgnore(uidList(p?.uids), p?.on !== false),
   restorePhotos: (p) => session.restorePhotos(p.uids),
   deletePhotosForever: (p) => session.deletePhotosForever(p.uids),
   emptyTrash: () => session.emptyTrash(),
@@ -234,7 +357,16 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   downloadUpdate: () => downloadUpdate(),
   startUpdateDownload: () => startUpdateDownload(),
   updateStatus: () => updateStatus(),
+  diagSetDetailed: (p) => {
+    diag.setDetailed(p?.on === true);
+    return { detailed: diag.isDetailed() };
+  },
+  diagReport: (p) => diagnosticsReport(Array.isArray(p?.header) ? p.header : []),
+  diagSave: (p) => saveDiagnostics(String(p?.path ?? ""), Array.isArray(p?.header) ? p.header : []),
 };
+
+/** The error a call that needs Proton answers while only the photos kept offline are open. */
+const OFFLINE_ERROR = "OFFLINE";
 
 async function handle(req: Request): Promise<unknown> {
   // The table's own entries only: a name like `constructor` or `toString` must not reach
@@ -243,11 +375,17 @@ async function handle(req: Request): Promise<unknown> {
   if (!handler) {
     return { id: req.id, ok: false, error: `unknown method: ${req.method}` };
   }
+  const started = Date.now();
   try {
     const result = await handler(req.params ?? {});
+    diag.record("rpc", req.method, Date.now() - started);
     return { id: req.id, ok: true, result };
   } catch (e) {
-    return { id: req.id, ok: false, error: (e as Error).message ?? String(e) };
+    diag.record("rpc", req.method, Date.now() - started, false, { error: (e as Error)?.name ?? "error" });
+    const message = (e as Error).message ?? String(e);
+    // Open on the photos kept offline: what needs Proton says so, in the window's language.
+    const offline = message === "Not signed in" && session.isOfflineOnly();
+    return { id: req.id, ok: false, error: offline ? OFFLINE_ERROR : message };
   }
 }
 
@@ -256,6 +394,8 @@ const write: RpcWriter = (line) => {
 };
 
 process.stderr.write("[sidecar] ready\n");
+watchJobs(() => session.sharedBackupStatus());
+setHostWriter(write);
 let buf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -272,6 +412,8 @@ process.stdin.on("data", (chunk) => {
       respond(write, null, { id: null, ok: false, error: "invalid JSON request" });
       continue;
     }
+    // The host answering a call of ours, not asking anything.
+    if (takeHostLine(req)) continue;
     const id = req?.id ?? null;
     void handle(req)
       .then((res) => respond(write, id, res))

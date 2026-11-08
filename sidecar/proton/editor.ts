@@ -40,7 +40,7 @@ import { WritableStream } from "node:stream/web";
 
 import sharp from "sharp";
 
-import { toMillis } from "./nodes.ts";
+import { activeRevisionOf, toMillis } from "./nodes.ts";
 import { mediaAttributes, thumbnailPair } from "./upload.ts";
 
 /** The longest edge the editor works at, matching the local-file editor's working cap. */
@@ -77,7 +77,7 @@ export type CloudEditMeta = {
 const CANNOT_DECODE = new Set(["image/heic", "image/heif", "image/x-adobe-dng"]);
 
 function activeRevision(node: any): any {
-  return node?.activeRevision?.ok ? node.activeRevision.value : null;
+  return activeRevisionOf(node);
 }
 
 /**
@@ -115,7 +115,7 @@ export function editedName(sourceName: string, when: Date): string {
 }
 
 /** Download one node's decrypted original into a Buffer. */
-async function downloadToBuffer(photos: any, uid: string): Promise<Buffer> {
+export async function downloadToBuffer(photos: any, uid: string): Promise<Buffer> {
   const downloader = await photos.getFileDownloader(uid);
   const chunks: Uint8Array[] = [];
   const stream = new WritableStream<Uint8Array>({

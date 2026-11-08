@@ -37,9 +37,14 @@ import { join } from "node:path";
 import { OFFLINE_LIST_FILE, initStore, metaGet, originalGet, setDataKey } from "./store.ts";
 import { getOriginal, getVideo, readOriginalBytes, releaseOriginal } from "./download.ts";
 import {
+  addToOfflineAlbum,
   isOfflineReady,
+  noteOfflineTimes,
+  offlineAlbums,
+  offlineLibrary,
   offlineStatus,
   pinOffline,
+  setAlbumOffline,
   resetOfflineState,
   unpinAllOffline,
   unpinOffline,
@@ -342,5 +347,129 @@ describe("pin for offline", () => {
     // The blob stays for the same account to come back to; only sign-out removes it.
     expect(existsSync(join(dir, "originals"))).toBe(true);
     expect(readdirSync(join(dir, "originals"))).toHaveLength(1);
+  });
+});
+
+describe("an album kept offline", () => {
+  const photo = () => Buffer.concat([JPEG_MAGIC, randomBytes(2000)]);
+
+  beforeEach(() => {
+    resetOfflineState();
+    setDataKey(randomBytes(32));
+    initStore(mkdtempSync(join(tmpdir(), "pfp-offline-album-")));
+  });
+
+  it("keeps its photos in the app, then gives back only what nothing else keeps", async () => {
+    const photos = pinPhotos({ a: photo(), b: photo(), c: photo() });
+    pinOffline(photos, ["b"]);
+    setAlbumOffline(photos, "album", ["a", "b"]);
+    await settle();
+    expect(offlineAlbums()).toEqual(["album"]);
+    expect(isOfflineReady("a") && isOfflineReady("b")).toBe(true);
+    setAlbumOffline(photos, "album", null);
+    expect(offlineAlbums()).toEqual([]);
+    expect(originalGet("a")).toBeNull();
+    // Kept one by one too, so it stays.
+    expect(isOfflineReady("b")).toBe(true);
+  });
+
+  it("takes in a photo added to it, and lets go of one taken out of it", async () => {
+    const photos = pinPhotos({ a: photo(), b: photo(), c: photo() });
+    setAlbumOffline(photos, "album", ["a", "b"]);
+    await settle();
+    addToOfflineAlbum(photos, "album", ["c"]);
+    await settle();
+    expect(isOfflineReady("c")).toBe(true);
+    setAlbumOffline(photos, "album", ["b", "c"]);
+    expect(originalGet("a")).toBeNull();
+    expect(isOfflineReady("b") && isOfflineReady("c")).toBe(true);
+    // Another album is not changed by it.
+    addToOfflineAlbum(photos, "other", ["a"]);
+    expect(offlineAlbums()).toEqual(["album"]);
+  });
+
+  it("is remembered across a restart, sealed with the rest", async () => {
+    const photos = pinPhotos({ a: photo() });
+    setAlbumOffline(photos, "album", ["a"]);
+    await settle();
+    resetOfflineState();
+    expect(offlineAlbums()).toEqual(["album"]);
+    expect(isOfflineReady("a")).toBe(true);
+  });
+});
+
+describe("the library with no network", () => {
+  const T1 = Date.UTC(2024, 5, 1, 10, 0, 0);
+  const T2 = Date.UTC(2025, 2, 3, 9, 30, 0);
+
+  /** The pin queue's stand-in, with the capture time each photo node carries. */
+  function takenPhotos(bytes: Record<string, Buffer>, taken: Record<string, number>, failUids?: Set<string>) {
+    const base = pinPhotos(bytes, { failUids });
+    return {
+      ...base,
+      getNode: async (uid: string) => ({
+        ...(await base.getNode(uid)),
+        photo: { captureTime: taken[uid] ? new Date(taken[uid]) : undefined },
+      }),
+    };
+  }
+
+  beforeEach(() => {
+    resetOfflineState();
+    setDataKey(randomBytes(32));
+    initStore(mkdtempSync(join(tmpdir(), "pfp-offline-lib-")));
+  });
+
+  it("lists the kept photos newest first, with the times they were taken, after a restart", async () => {
+    const a = Buffer.concat([JPEG_MAGIC, randomBytes(800)]);
+    const b = Buffer.concat([JPEG_MAGIC, randomBytes(900)]);
+    pinOffline(takenPhotos({ "uid-A": a, "uid-B": b }, { "uid-A": T1, "uid-B": T2 }), ["uid-A", "uid-B"]);
+    await settle();
+
+    // The next start reads the sealed list again, with no node lookup.
+    resetOfflineState();
+    expect(offlineLibrary()).toEqual([
+      { uid: "uid-B", captureTime: T2, tags: [] },
+      { uid: "uid-A", captureTime: T1, tags: [] },
+    ]);
+  });
+
+  it("leaves out a photo whose copy never arrived", async () => {
+    const a = Buffer.concat([JPEG_MAGIC, randomBytes(800)]);
+    pinOffline(
+      takenPhotos({ "uid-A": a, "uid-B": a }, { "uid-A": T1, "uid-B": T2 }, new Set(["uid-B"])),
+      ["uid-A", "uid-B"],
+    );
+    await settle();
+
+    expect(offlineLibrary().map((p) => p.uid)).toEqual(["uid-A"]);
+  });
+
+  it("takes the times of copies kept before they were recorded from a timeline read online", async () => {
+    const a = Buffer.concat([JPEG_MAGIC, randomBytes(800)]);
+    // A node with no capture time, as a copy kept by an older version has none recorded.
+    pinOffline(takenPhotos({ "uid-A": a }, {}), ["uid-A"]);
+    await settle();
+    const before = offlineLibrary()[0].captureTime;
+    expect(before).not.toBe(T1);
+
+    noteOfflineTimes([
+      { uid: "uid-A", captureTime: T1 },
+      { uid: "uid-not-kept", captureTime: T2 },
+    ]);
+    resetOfflineState();
+
+    expect(offlineLibrary()).toEqual([{ uid: "uid-A", captureTime: T1, tags: [] }]);
+  });
+
+  it("forgets a time once its photo is no longer kept", async () => {
+    const a = Buffer.concat([JPEG_MAGIC, randomBytes(800)]);
+    pinOffline(takenPhotos({ "uid-A": a }, { "uid-A": T1 }), ["uid-A"]);
+    await settle();
+
+    unpinOffline(["uid-A"]);
+    resetOfflineState();
+
+    expect(offlineLibrary()).toEqual([]);
   });
 });

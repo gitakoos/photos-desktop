@@ -1,0 +1,134 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* ---- Fix dates: the photos whose date cannot be right, one row each ---- */
+.fd-page {
+  padding: 4px 0 96px;
+}
+
+.fd-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.fd-hint {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+
+/* One line, always the same height, so the list never jumps as the names arrive. */
+.fd-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+.fd-bar {
+  flex: 0 0 160px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+.fd-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
+.fd-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.fd-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  transition: background 0.12s ease;
+}
+.fd-row:hover {
+  background: var(--line-06);
+}
+.fd-row.sel {
+  background: var(--accent-wash);
+}
+
+.fd-check {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.fd-thumb {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--line-soft);
+  cursor: pointer;
+}
+.fd-thumb img,
+.fd-thumb .g-skel {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.fd-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fd-name {
+  color: var(--fg-primary);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fd-why {
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+
+.fd-more {
+  align-self: center;
+  margin-top: 14px;
+}

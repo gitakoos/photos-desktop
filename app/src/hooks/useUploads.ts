@@ -25,6 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { rpc } from "../lib/rpc";
+import { sameStatus } from "../lib/sameStatus";
 
 export type ItemStatus = "pending" | "uploading" | "done" | "skipped" | "failed";
 export type UploadItem = {
@@ -35,10 +36,14 @@ export type UploadItem = {
   /** While it uploads: the file's size, and how much of it has gone up. */
   size?: number;
   sent?: number;
+  /** While a lighter copy of it is being made: how far along, 0 to 1. */
+  compressing?: number;
+  /** Bytes the lighter copy that went up saved. */
+  saved?: number;
 };
 /** An export being made ready before it is queued; see the sidecar's `ImportState`. */
 export type ImportState = {
-  phase: "unpacking" | "ready" | "planning" | "review";
+  phase: "downloading" | "unpacking" | "ready" | "planning" | "review";
   done: number;
   total: number;
   part: number;
@@ -74,8 +79,14 @@ export type UploadStatus = {
   items: UploadItem[];
   importing?: ImportState;
   importError?: string;
+  /** How a move from My files ended: originals sent to the Drive trash, and those kept. */
+  moveResult?: { moved: number; kept: number; failed: boolean };
   /** How many rows the whole record holds; `items` is a chosen part of it past 200. */
   itemsTotal?: number;
+  /** Bytes the lighter copies saved, over the files in the record. */
+  saved?: number;
+  /** How many drops held nothing to upload. */
+  emptyDrops?: number;
 };
 
 /**
@@ -92,6 +103,15 @@ const EMPTY: UploadStatus = { running: false, total: 0, done: 0, skipped: 0, fai
 
 /** How much of a status has come to rest: uploaded, skipped as a duplicate, or failed. */
 const settledIn = (s: UploadStatus): number => s.done + s.skipped + s.failed;
+
+/**
+ * Whether a finished drop changed what the library shows, so the views read it again. A photo
+ * already in the library is skipped, but the folder's album is still made and the photo put in it,
+ * so a drop of nothing but skipped photos counts too.
+ */
+export function libraryChanged(before: UploadStatus, after: UploadStatus): boolean {
+  return after.done > before.done || after.skipped > before.skipped;
+}
 
 const POLL_MS = 400;
 
@@ -116,6 +136,8 @@ export function useUploads(onFinished: () => void) {
   const [dragging, setDragging] = useState(false);
   const [polling, setPolling] = useState(false);
   const [error, setError] = useState("");
+  // The last drop held no photo or video, so nothing was uploaded.
+  const [nothingFound, setNothingFound] = useState(false);
   /** The last reading, so a new drop can tell what was already in the record. */
   const latest = useRef<UploadStatus>(EMPTY);
 
@@ -127,6 +149,7 @@ export function useUploads(onFinished: () => void) {
   const start = useCallback(async (paths: string[], album?: { uid: string; name: string }) => {
     if (paths.length === 0) return;
     setError("");
+    setNothingFound(false);
     try {
       // The record as it stands before this drop is added to it. Read rather than
       // assumed: reloading the window throws away this side's copy of it and not the
@@ -171,6 +194,25 @@ export function useUploads(onFinished: () => void) {
       setError(String(e));
     }
   }, []);
+
+  /**
+   * Starts bringing in the photos of folders in My files. They download first; then, like an
+   * export, the host makes their video frames and they come up for review.
+   */
+  const startMyFilesImport = useCallback(
+    async (folders: { uid: string; name: string }[], files: { uid: string; folder: string }[], move: boolean) => {
+    if (folders.length === 0 && files.length === 0) return;
+    setError("");
+    try {
+      latest.current = await rpc<UploadStatus>("uploadStatus").catch(() => latest.current);
+      await rpc("startMyFilesImport", { folders, files, move });
+      setPolling(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  },
+    [],
+  );
 
   /** An export the poll has already handed to the host for frames, so it is read once. */
   const queuingImport = useRef(false);
@@ -277,7 +319,8 @@ export function useUploads(onFinished: () => void) {
       try {
         const next = await rpc<UploadStatus>("uploadStatus");
         latest.current = next;
-        setStatus(next);
+        // The same answer again keeps the old object, so the views reading it do not draw again.
+        setStatus((before) => (sameStatus(before, next) ? before : next));
         // An export on disk: the host makes frames for its videos, then it is queued.
         // Its own frames call, because these are files the drop never named.
         if (next.importing?.phase === "ready" && next.importing.roots && !queuingImport.current) {
@@ -327,6 +370,11 @@ export function useUploads(onFinished: () => void) {
           sawRunning = true;
           return;
         }
+        if ((next.emptyDrops ?? 0) > (before.emptyDrops ?? 0) && next.total === before.total) {
+          setPolling(false);
+          setNothingFound(true);
+          return;
+        }
 
         // Three ways a drop is over, and it takes all three. The stopped edge is the
         // ordinary one, and the only one that can end a cancel, which strands the items
@@ -341,7 +389,7 @@ export function useUploads(onFinished: () => void) {
 
         if (stopped || moved || nothingCame) {
           setPolling(false);
-          if (next.done > before.done) onFinished(); // refresh the grid once, at the end
+          if (libraryChanged(before, next)) onFinished(); // refresh the views once, at the end
         }
       } catch {
         /* a single failed poll is not fatal */
@@ -370,8 +418,10 @@ export function useUploads(onFinished: () => void) {
     status,
     dragging,
     error,
+    nothingFound,
     start,
     startImport,
+    startMyFilesImport,
     review,
     checks,
     confirmImport,

@@ -22,6 +22,7 @@
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useT } from "../lib/i18n";
+import { coverApp } from "../lib/appCover";
 import logo from "../assets/applogo.png";
 
 const appWindow = getCurrentWindow();
@@ -39,7 +40,7 @@ export function WindowButtons() {
   const t = useT();
   return (
     <div className="titlebar-buttons">
-      <button className="win-btn" title={t("titlebar.minimize")} onClick={() => appWindow.minimize()}>
+      <button className="win-btn" title={t("titlebar.minimize")} onClick={() => void coverApp("minimize").finally(() => appWindow.minimize())}>
         <svg width="10" height="10" viewBox="0 0 10 10">
           <rect x="1" y="4.5" width="8" height="1" fill="currentColor" />
         </svg>

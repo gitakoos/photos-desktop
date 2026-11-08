@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Photos for Proton
+GenericName=Photo client
+Comment=Unofficial client for Proton Drive Photos
+Exec=photosforproton %U
+Icon=eu.akoos.photos
+Terminal=false
+Categories=Graphics;Photography;Network;
+Keywords=proton;drive;photos;gallery;
+StartupWMClass=photosforproton

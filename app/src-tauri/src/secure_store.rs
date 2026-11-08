@@ -190,6 +190,47 @@ fn safe_name(name: &str) -> Result<String, String> {
     Ok(format!("{name}.bin"))
 }
 
+/// The settings that act on an account's own photos or Drive: scanning its faces, indexing it
+/// for search, saving to its Drive, reading its My files. They are the account's choices, so
+/// the next account to sign in starts with them off and turns on what it wants itself.
+const ACCOUNT_SWITCHES: &[&str] = &["localFaces", "localSearch", "semanticSearch", "sharedBackup", "myFilesAccess"];
+
+/// Turns the account's own switches off in the window's settings. True when one was on.
+fn account_switches_off(settings: &mut serde_json::Value) -> bool {
+    let Some(map) = settings.as_object_mut() else { return false };
+    let mut changed = false;
+    for key in ACCOUNT_SWITCHES {
+        if map.get(*key).and_then(serde_json::Value::as_bool) == Some(true) {
+            map.insert((*key).to_string(), serde_json::Value::Bool(false));
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// On sign-out, and when another account takes a lapsed one's place.
+pub(crate) fn turn_off_account_switches(app: &AppHandle) {
+    let Ok(Some(raw)) = read_sealed(app, "settings.bin") else { return };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    if account_switches_off(&mut settings) {
+        let _ = write_sealed(app, "settings.bin", &settings.to_string());
+    }
+}
+
+#[cfg(test)]
+mod account_switch_tests {
+    use super::account_switches_off;
+    use serde_json::json;
+
+    #[test]
+    fn only_the_accounts_own_switches_go_off() {
+        let mut s = json!({ "localFaces": true, "sharedBackup": true, "localSearch": false, "theme": "dark", "compressPhotos": true });
+        assert!(account_switches_off(&mut s));
+        assert_eq!(s, json!({ "localFaces": false, "sharedBackup": false, "localSearch": false, "theme": "dark", "compressPhotos": true }));
+        assert!(!account_switches_off(&mut s), "nothing left on, nothing written");
+    }
+}
+
 /// What the WebView may read, write and delete through the `store_*` commands.
 const RENDERER_ENTRIES: &[&str] = &["settings"];
 

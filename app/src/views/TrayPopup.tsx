@@ -109,6 +109,11 @@ export function TrayPopup() {
       setView({ kind: "locked", email: status.email });
       return;
     }
+    // Open, but with no account in it: its session ended and the window asks for a sign-in.
+    if (!status.email) {
+      setView({ kind: "signedOut" });
+      return;
+    }
 
     // Unlocked: show the current identity at once so a previous account can never
     // linger, but keep a matching one intact so its storage bar does not flicker.

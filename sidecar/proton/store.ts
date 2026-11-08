@@ -77,6 +77,36 @@ export const ALBUM_MEMBERS_FILE = "album-members.enc";
  *  revision it was read at. The account's own data, so `wipeCache` takes it. */
 export const DRIVE_COPIES_DIR = "drive-copies";
 
+/** The faces found on this computer and the people made of them (faceStore.ts). The account's
+ *  own data, so `wipeCache` takes it. */
+export const FACES_DIR = "faces";
+
+/** The people file in it, which also holds the id the face copy on Drive was saved under. */
+export const PEOPLE_FILE = "people.enc";
+
+/** The search index made on this computer (searchIndex.ts). The account's own data, so `wipeCache`
+ *  takes it. */
+export const SEARCH_DIR = "search";
+
+/** What this install's copies on Drive held when last written (sharedBackup.ts). */
+export const BACKUP_STATE_FILE = "backup-state";
+
+/** This install's id among the account's devices (deviceId.ts). */
+export const DEVICE_ID_FILE = "device-id";
+
+/** What the shared backup keeps of its own between rounds: the newest delete of the face data
+ *  everywhere, whether the earlier install's copies were read back, and the devices' names. */
+export const BACKUP_FLAGS_FILE = "backup-flags";
+
+/** The labels kept on this computer (labelStore.ts). The account's own data, so `wipeCache` takes it. */
+export const LABELS_DIR = "labels";
+/** The duplicate finder's fingerprints and the groups left alone. */
+export const DUPLICATES_FILE = "duplicates.enc";
+/** The photos and albums hidden on this computer (hidden.ts). The account's own, so `wipeCache` takes it. */
+export const HIDDEN_FILE = "hidden.enc";
+/** Which original each lighter copy uploaded from here was made from (compressedUploads.ts). */
+export const COMPRESSED_UPLOADS_FILE = "compressed-uploads.enc";
+
 let dataDir: string | null = null;
 let dataKey: Buffer | null = null;
 
@@ -114,6 +144,11 @@ function discardDir(path: string): void {
     return;
   }
   void rm(aside, { recursive: true, force: true }).catch(() => {});
+}
+
+/** A copy of the data key while the store is open, for the vault to seal it a new way. */
+export function dataKeyCopy(): Buffer | null {
+  return dataKey ? Buffer.from(dataKey) : null;
 }
 
 /** The vault sets the data key once it is derived from the password. */
@@ -174,6 +209,15 @@ export function wipeCache(): void {
     rmSync(join(dataDir, SESSION_FILE), { force: true });
     rmSync(join(dataDir, ALBUM_MEMBERS_FILE), { force: true });
     discardDir(join(dataDir, DRIVE_COPIES_DIR));
+    discardDir(join(dataDir, FACES_DIR));
+    discardDir(join(dataDir, SEARCH_DIR));
+    discardDir(join(dataDir, LABELS_DIR));
+    rmSync(join(dataDir, DEVICE_ID_FILE), { force: true });
+    rmSync(join(dataDir, BACKUP_STATE_FILE), { force: true });
+    rmSync(join(dataDir, BACKUP_FLAGS_FILE), { force: true });
+    rmSync(join(dataDir, DUPLICATES_FILE), { force: true });
+    rmSync(join(dataDir, HIDDEN_FILE), { force: true });
+    rmSync(join(dataDir, COMPRESSED_UPLOADS_FILE), { force: true });
   } catch {
     /* best-effort */
   }
@@ -390,6 +434,16 @@ export function originalSize(uid: string): number | null {
     return size > SEAL_OVERHEAD ? size - SEAL_OVERHEAD : null;
   } catch {
     return null; // absent, or unreadable
+  }
+}
+
+/** When the stored original was written, in ms; null when nothing is stored for this uid. */
+export function originalStoredAt(uid: string): number | null {
+  if (!isReady()) return null;
+  try {
+    return statSync(originalPath(uid)).mtimeMs;
+  } catch {
+    return null;
   }
 }
 

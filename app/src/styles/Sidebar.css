@@ -53,7 +53,55 @@
 .g-sb-nav {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+
+/* A titled group; its rows sit 2px apart like the rest of the rail. */
+.g-sb-section {
+  display: flex;
+  flex-direction: column;
   gap: 2px;
+}
+
+.g-sb-nav .g-sb-item {
+  height: 38px;
+  flex: 0 0 auto;
+}
+
+/* The group's title folds its rows; the chevron shows only on hover, as the words do the work. */
+.g-sb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  margin-top: 8px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.g-sb-section:first-child .g-sb-head {
+  margin-top: 0;
+}
+.g-sb-head svg {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.g-sb-head:hover {
+  color: var(--fg-primary);
+}
+.g-sb-head:hover svg,
+.g-sb-head:focus-visible svg {
+  opacity: 1;
 }
 
 .g-sb-item {
@@ -234,20 +282,17 @@
   transform: rotate(90deg);
 }
 
-/* The room under the account grows from nothing, which lifts the account as it opens. */
+/* The rows under the account, laid out only while open (and while the block slides back
+   down); the foot's own slide is the motion, so nothing here animates. */
 .g-sb-acctbody {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+  display: none;
 }
 
-.g-sb-foot.open .g-sb-acctbody {
-  grid-template-rows: 1fr;
+.g-sb-foot.shown .g-sb-acctbody {
+  display: block;
 }
 
 .g-sb-acctinner {
-  min-height: 0;
-  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 2px;

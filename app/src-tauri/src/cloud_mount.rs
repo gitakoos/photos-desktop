@@ -63,6 +63,43 @@ pub fn show_in_explorer_enabled() -> bool {
     false
 }
 
+/// Where sign-out notes that it turned the folder off, with how many files it left there.
+#[cfg(windows)]
+const EXPLORER_OFF_NOTICE: &str = "explorer_off.txt";
+
+/// Once, for the account that signs in next: the folder was turned off when the previous one
+/// left, and this many files it had downloaded are still in it.
+#[tauri::command]
+pub fn take_explorer_notice(app: tauri::AppHandle) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        let left = crate::secure_store::read_sealed(&app, EXPLORER_OFF_NOTICE).ok().flatten()?;
+        if let Ok(dir) = crate::secure_store::app_dir(&app) {
+            let _ = std::fs::remove_file(dir.join(EXPLORER_OFF_NOTICE));
+        }
+        left.trim().parse().ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        None
+    }
+}
+
+/// Every file under `dir`, at any depth.
+#[cfg(windows)]
+fn files_under(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => files_under(&e.path()),
+            Ok(t) if t.is_file() => 1,
+            _ => 0,
+        })
+        .sum()
+}
+
 /// The current preference, for the Settings toggle.
 #[tauri::command]
 pub fn show_in_explorer() -> bool {
@@ -86,43 +123,160 @@ pub fn set_show_in_explorer(enabled: bool) {
 #[cfg(windows)]
 const AUTO_DL_VALUE: &str = "AutoDownload";
 
-/// Whether photos newly added to the library are automatically kept on this
-/// device. Default OFF. Read during populate to hydrate the fresh arrivals.
+/// The "Automatically download new photos" switch of the builds before, one value for the
+/// whole Windows account. Read once and removed: it becomes the choice of the account signed
+/// in at the time, and an account signing in later starts with nothing kept.
 #[cfg(windows)]
-pub fn auto_download_enabled() -> bool {
-    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-        .open_subkey(PREF_KEY)
-        .and_then(|k| k.get_value::<u32, _>(AUTO_DL_VALUE))
-        .map(|v| v != 0)
-        .unwrap_or(false)
+pub(crate) fn take_legacy_auto_download() -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+    let Ok(key) = winreg::RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(PREF_KEY, KEY_READ | KEY_WRITE) else {
+        return false;
+    };
+    let on = key.get_value::<u32, _>(AUTO_DL_VALUE).map(|v| v != 0).unwrap_or(false);
+    let _ = key.delete_value(AUTO_DL_VALUE);
+    on
 }
 
-/// The current preference, for the Settings toggle.
+/// What the folder keeps on this PC by itself: "off", "new" or "all".
 #[tauri::command]
-pub fn auto_download() -> bool {
+pub fn download_mode(app: tauri::AppHandle) -> String {
     #[cfg(windows)]
     {
-        auto_download_enabled()
+        crate::keep_all::mode(&app).as_str().to_string()
     }
     #[cfg(not(windows))]
-    false
+    {
+        let _ = app;
+        "off".to_string()
+    }
 }
 
-/// Set the preference. Takes effect on the next populate pass (as new photos sync).
 #[tauri::command]
-pub fn set_auto_download(enabled: bool) {
+pub fn set_download_mode(app: tauri::AppHandle, mode: String) {
     #[cfg(windows)]
-    if let Ok((key, _)) =
-        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).create_subkey(PREF_KEY)
-    {
-        let _ = key.set_value(AUTO_DL_VALUE, &u32::from(enabled));
+    if let Some(next) = crate::keep_all::Mode::parse(&mode) {
+        // Keeping photos runs through the folder: with the folder turned off only "off" is taken.
+        if next != crate::keep_all::Mode::Off && !show_in_explorer_enabled() {
+            return;
+        }
+        crate::keep_all::set_mode(&app, next);
     }
     #[cfg(not(windows))]
-    let _ = enabled;
+    let _ = (app, mode);
+}
+
+/// How the pass that keeps photos on this PC stands, for the Settings page.
+#[tauri::command]
+pub fn keep_status(app: tauri::AppHandle) -> crate::keep_all::KeepStatus {
+    #[cfg(windows)]
+    {
+        crate::keep_all::status(&app)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        crate::keep_all::KeepStatus::default()
+    }
+}
+
+#[tauri::command]
+pub fn keep_pause(app: tauri::AppHandle, paused: bool) {
+    #[cfg(windows)]
+    crate::keep_all::set_paused(&app, paused);
+    #[cfg(not(windows))]
+    let _ = (app, paused);
+}
+
+/// What keeping every photo would still download, and the room the drive has for it.
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepEstimate {
+    photos: u64,
+    bytes: u64,
+    free: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn keep_estimate() -> KeepEstimate {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(|| {
+            let mut out = KeepEstimate { free: free_space(), ..Default::default() };
+            for uid in timeline_uids() {
+                if is_cloud_only(&uid) {
+                    out.photos += 1;
+                    out.bytes += cloud_size(&uid).unwrap_or(0);
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    KeepEstimate::default()
+}
+
+/// The answer about copies held back because too many photos went to the trash at once:
+/// let go of them now, or keep them as the user's own. Returns how many were let go of.
+#[tauri::command]
+pub async fn keep_held_answer(app: tauri::AppHandle, remove: bool) -> u32 {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let held = crate::keep_all::held(&app);
+            let mut gone = 0u32;
+            if remove {
+                for (_, path, rel) in downloaded_copies_of(&held) {
+                    if let_go_of_copy(&path, &rel) {
+                        gone += 1;
+                    }
+                }
+                rescan_hydrated();
+            }
+            crate::keep_all::clear_held(&app, &held);
+            crate::note(&app, &format!("[keep] held copies answered: {gone} let go of"));
+            gone
+        })
+        .await
+        .unwrap_or(0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, remove);
+        0
+    }
 }
 
 #[cfg(windows)]
 const EDITS_VALUE: &str = "ExplorerEdits";
+
+/// Written by the uninstaller (same key and name in `setup`) before it clears the
+/// folder's cloud-only files while the app still runs.
+#[cfg(windows)]
+const DETACHING_VALUE: &str = "Detaching";
+
+/// Whether the uninstaller is clearing the folder: what disappears from it then is the
+/// uninstall's doing, never the user's, so nothing goes to the trash and every delete
+/// is let through.
+#[cfg(windows)]
+pub fn detaching() -> bool {
+    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey(PREF_KEY)
+        .and_then(|k| k.get_value::<u32, _>(DETACHING_VALUE))
+        .is_ok_and(|v| v != 0)
+}
+
+#[cfg(windows)]
+pub fn clear_detaching() {
+    if let Ok(key) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey_with_flags(PREF_KEY, winreg::enums::KEY_SET_VALUE)
+    {
+        let _ = key.delete_value(DETACHING_VALUE);
+    }
+}
+#[cfg(not(windows))]
+pub fn clear_detaching() {}
 
 /// Whether deleting and renaming in File Explorer reach the library. Default ON, as on
 /// Linux. With it off, Explorer refuses what would take a photo or an album away.
@@ -189,6 +343,7 @@ pub fn mount(app: tauri::AppHandle) {
                 crate::note(&log, "[cloud] sync engine connected");
                 std::mem::forget(connection);
                 start_hydrated_scanner();
+                crate::keep_all::start(app_for_sync.clone());
                 crate::explorer_sync::start(app_for_sync, folder.clone());
             }
             Err(e) => crate::note(&log, &format!("[cloud] connect failed: {e:?}")),
@@ -826,6 +981,8 @@ pub struct MountActivity {
     by: Option<String>,
     done: u64,
     total: u64,
+    /// Which part of a fill runs: the photos (none named), then "albums", then "tidy".
+    phase: Option<&'static str>,
 }
 
 static ACTIVITY: std::sync::Mutex<Option<MountActivity>> = std::sync::Mutex::new(None);
@@ -848,7 +1005,7 @@ impl Doing {
     pub(crate) fn new(app: &tauri::AppHandle, what: &'static str, name: Option<String>, by: Option<String>) -> Self {
         let owns = ACTIVITY.lock().unwrap().is_none();
         if owns {
-            show_activity(app, Some(MountActivity { what, name, by, done: 0, total: 0 }));
+            show_activity(app, Some(MountActivity { what, name, by, done: 0, total: 0, phase: None }));
         }
         Doing { app: app.clone(), owns }
     }
@@ -864,8 +1021,14 @@ impl Drop for Doing {
 
 /// The fill's count of photos placed, shown only while a fill is what the folder is doing.
 pub(crate) fn fill_progress(app: &tauri::AppHandle, done: u64, total: u64) {
+    fill_phase(app, None, done, total);
+}
+
+/// The part of the fill that runs now and how far it has got, so the window never shows
+/// the photos' last count standing while the albums and the tidying still run.
+pub(crate) fn fill_phase(app: &tauri::AppHandle, phase: Option<&'static str>, done: u64, total: u64) {
     let next = match ACTIVITY.lock().unwrap().clone() {
-        Some(a) if a.what == "fill" => Some(MountActivity { done, total, ..a }),
+        Some(a) if a.what == "fill" => Some(MountActivity { done, total, phase, ..a }),
         _ => return,
     };
     show_activity(app, next);
@@ -883,6 +1046,25 @@ const REFILL_AFTER: std::time::Duration = std::time::Duration::from_secs(15 * 60
 #[cfg(windows)]
 fn filled() {
     *LAST_FILL.lock().unwrap() = Some(std::time::Instant::now());
+}
+
+/// Whether a page load fills the folder now, and whether it is this run's first fill
+/// (the one worth showing). After the first, a finished fill stands for REFILL_AFTER.
+#[cfg(windows)]
+fn claim_page_fill() -> Option<bool> {
+    let first = !FILL_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst);
+    if !first && !LAST_FILL.lock().unwrap().is_some_and(|at| at.elapsed() >= REFILL_AFTER) {
+        return None;
+    }
+    Some(first)
+}
+
+/// Forgets the fills of the account that signed out, so the next sign-in fills the
+/// emptied folder on its first page load instead of up to REFILL_AFTER later.
+#[cfg(windows)]
+fn forget_fills() {
+    FILL_STARTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    *LAST_FILL.lock().unwrap() = None;
 }
 
 /// What the folder is busy with right now, for a window that opens while it already is.
@@ -1114,24 +1296,6 @@ fn rel_to_uid() -> std::collections::HashMap<String, String> {
     m
 }
 
-/// Hydrate every not-yet-local photo of one album (its `Albums\<name>\` copies, so
-/// that Explorer folder ends up filled).
-#[cfg(windows)]
-fn hydrate_album(app: &tauri::AppHandle, album_uid: &str) {
-    let base = sync_root_path();
-    let rels = album_copies(album_uid);
-    let rev = rel_to_uid();
-    let mut n = 0usize;
-    for rel in &rels {
-        if !is_hydrated(&base, rel) && keep_offline_one(app, &base, rel, rev.get(rel).map(String::as_str)) {
-            n += 1;
-        }
-    }
-    if n > 0 {
-        crate::note(app, &format!("[album-sync] kept {n} offline"));
-    }
-}
-
 /// The album uids currently kept offline, for the Albums view toggles.
 #[tauri::command]
 pub fn synced_albums(app: tauri::AppHandle) -> Vec<String> {
@@ -1205,28 +1369,20 @@ pub async fn free_up_album(app: tauri::AppHandle, uid: String) -> u32 {
     }
 }
 
-/// Toggle "keep this album on this device". Enabling hydrates its photos now and
-/// (via populate) keeps future additions to the album downloaded too. Disabling
-/// stops the auto-sync; what it already downloaded is the caller's to ask about,
-/// through `album_local_count` and `free_up_album`.
+/// Forgets an album an earlier build downloaded into the Explorer folder by itself. Albums are
+/// kept offline inside the app now; this is what moving one over leaves behind, together with
+/// `free_up_album` for what it had downloaded.
 #[tauri::command]
 pub fn set_album_synced(app: tauri::AppHandle, uid: String, enabled: bool) {
     #[cfg(windows)]
     {
         let mut set = load_synced_albums(&app);
         if enabled {
-            set.insert(uid.clone());
+            set.insert(uid);
         } else {
             set.remove(&uid);
         }
         save_synced_albums(&app, &set);
-        if enabled {
-            std::thread::spawn(move || {
-                let _busy = BusyGuard::new(&app);
-                let _doing = Doing::new(&app, "offline", None, None);
-                hydrate_album(&app, &uid);
-            });
-        }
     }
     #[cfg(not(windows))]
     let _ = (app, uid, enabled);
@@ -1299,9 +1455,12 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         // transfer error, success). It nests: when this hydration was triggered by
         // `pin_selected` or a populate pass, that outer guard keeps the busy state set
         // across the gap, so nothing is cleared early.
-        let _busy = BusyGuard::new(&self.app);
-
         let uid = String::from_utf8_lossy(request.file_blob()).into_owned();
+        // A download of the pass that keeps every photo runs for days on end on the
+        // background lane, so it neither pauses the warmer nor names itself as a file
+        // something opened.
+        let in_pass = crate::keep_all::in_pass(&uid);
+        let _busy = (!in_pass).then(|| BusyGuard::new(&self.app));
         let want = request.file_size();
         // Diagnostic: name the process that triggered this hydration (exe basename only,
         // no path or PII) and whether it was an explicit pin ("keep offline") or an
@@ -1319,13 +1478,21 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
             &format!("[cloud] hydrate start (size={want} by={by} explicit={})", info.explicit_hydration()),
         );
         let opened = request.path().file_name().map(|n| n.to_string_lossy().into_owned());
-        let _doing = Doing::new(&self.app, "open", opened, Some(by.clone()));
-        // The sidecar streams the download to a temp file; we transfer that into the
-        // placeholder a chunk at a time so a large video never sits in memory.
-        let (temp, got) = crate::hydrate_to_temp(&self.app, &uid).map_err(|e| {
-            crate::note(&self.app, &format!("[cloud] hydrate download failed: {e}"));
-            CloudErrorKind::NetworkUnavailable
-        })?;
+        let _doing = (!in_pass).then(|| Doing::new(&self.app, "open", opened, Some(by.clone())));
+        // An album or favourites copy of a photo whose timeline copy is on this PC already
+        // is filled from that copy, so it opens without a connection and is not fetched a
+        // second time. Otherwise the sidecar streams the download to a temp file; either
+        // way it is transferred into the placeholder a chunk at a time, so a large video
+        // never sits in memory.
+        let local = local_timeline_copy(&uid, &request.path(), want);
+        let (temp, got) = match &local {
+            Some(path) => (path.clone(), want),
+            None => crate::hydrate_to_temp(&self.app, &uid).map_err(|e| {
+                crate::note(&self.app, &format!("[cloud] hydrate download failed: {e}"));
+                CloudErrorKind::NetworkUnavailable
+            })?,
+        };
+        let staged = local.is_none();
         // Refuse a wrong-sized transfer instead of writing a broken partial. A short
         // read would leave the placeholder half-hydrated and stranded — undeletable,
         // with the shell reporting "the cloud provider is not running"; a long read
@@ -1333,7 +1500,9 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         // stays a clean cloud-only placeholder that can be reopened or deleted.
         if got == 0 || got != want {
             crate::note(&self.app, &format!("[cloud] hydrate aborted (got {got} want {want})"));
-            let _ = std::fs::remove_file(&temp);
+            if staged {
+                let _ = std::fs::remove_file(&temp);
+            }
             return Err(CloudErrorKind::ValidationFailed);
         }
 
@@ -1365,9 +1534,13 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
             }
             Ok(())
         })();
-        let _ = std::fs::remove_file(&temp);
+        if staged {
+            let _ = std::fs::remove_file(&temp);
+        }
         transfer?;
-        crate::note(&self.app, &format!("[cloud] hydrate done ({got} bytes)"));
+        if !in_pass {
+            crate::note(&self.app, &format!("[cloud] hydrate done ({got} bytes)"));
+        }
         mark_hydrated(&uid, true);
         // Re-mark in-sync once the hydration handle is released, so the file can be
         // freed up later instead of being stranded on "waiting to sync".
@@ -1390,7 +1563,10 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         let Some(rel) = crate::explorer_sync::relative(&root, &request.path()) else {
             return ticket.pass().map_err(|_| cloud_filter::error::CloudErrorKind::InvalidRequest);
         };
-        if !crate::explorer_sync::is_own(&rel) && (read_only_place(&rel) || !explorer_edits_enabled()) {
+        if !crate::explorer_sync::is_own(&rel)
+            && !detaching()
+            && (read_only_place(&rel) || !explorer_edits_enabled())
+        {
             // The trash is never emptied from here, and what others shared is theirs.
             return Err(cloud_filter::error::CloudErrorKind::AccessDenied);
         }
@@ -1437,10 +1613,16 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
 
     fn dehydrate(
         &self,
-        _request: cloud_filter::filter::Request,
+        request: cloud_filter::filter::Request,
         ticket: cloud_filter::filter::ticket::Dehydrate,
         _info: cloud_filter::filter::info::Dehydrate,
     ) -> cloud_filter::error::CResult<()> {
+        // While every photo is kept, only the app frees a copy (Free up), never Windows by
+        // itself, which would free it and have the pass download it again.
+        if crate::keep_all::keeps_all(&self.app) && !dehydrating_ourselves(&request.path()) {
+            crate::note(&self.app, "[cloud] dehydrate refused: every photo is kept on this PC");
+            return Err(cloud_filter::error::CloudErrorKind::AccessDenied);
+        }
         // Approve "free up space": the local data is dropped and the file goes back
         // to a dehydrated cloud placeholder (green cloud, still in sync). Logged so
         // a "stuck on waiting to sync" report shows whether Windows even reaches the
@@ -1479,14 +1661,10 @@ pub fn populate_mount(app: tauri::AppHandle) {
         // The page asks again each time it loads, which a window brought back from the
         // tray does. The first fill of a run is the one worth showing; after it, the
         // folder is only checked again quietly, and not more often than REFILL_AFTER.
-        let first = !FILL_STARTED.swap(true, std::sync::atomic::Ordering::SeqCst);
-        if !first && !LAST_FILL.lock().unwrap().is_some_and(|at| at.elapsed() >= REFILL_AFTER) {
-            return;
-        }
+        let Some(first) = claim_page_fill() else { return };
         let _busy = BusyGuard::new(&app);
         let _doing = first.then(|| Doing::new(&app, "fill", None, None));
-        // Startup pass: honours the "auto-download new photos" setting.
-        match try_populate(&app, true) {
+        match try_populate(&app) {
             Ok(()) => filled(),
             Err(e) => eprintln!("[cloud_mount] populate failed: {e}"),
         }
@@ -1495,11 +1673,10 @@ pub fn populate_mount(app: tauri::AppHandle) {
     let _ = app;
 }
 
-/// The tray "Sync now" action. Deliberately lighter than a startup populate: it
-/// refreshes the placeholders and pulls only what the user has opted into (the albums
-/// kept offline), then asks the open window to reload its view. It NEVER runs the
-/// whole-library auto-download, so the button can never start downloading the entire
-/// library. Safe to press at any time.
+/// The tray "Sync now" action: fills the folder again and asks the open window to reload
+/// its view. What it downloads is only what the chosen mode already asks for, and the
+/// worker does that outside the fill, so the button itself never starts a download of
+/// the library. Safe to press at any time.
 #[tauri::command]
 pub fn sync_now(app: tauri::AppHandle) {
     #[cfg(windows)]
@@ -1512,8 +1689,7 @@ pub fn sync_now(app: tauri::AppHandle) {
             // below.
             let _busy = BusyGuard::new(&app);
             let _doing = Doing::new(&app, "fill", None, None);
-            // `false` = never auto-download the whole library; only synced albums sync.
-            match try_populate(&app, false) {
+            match try_populate(&app) {
                 Ok(()) => filled(),
                 Err(e) => eprintln!("[cloud_mount] sync_now failed: {e}"),
             }
@@ -1526,14 +1702,15 @@ pub fn sync_now(app: tauri::AppHandle) {
     let _ = app;
 }
 
-/// Build (or refresh) the cloud placeholders. `auto_download` gates the "keep every
-/// new photo on this device" pass: on by the setting during a startup populate, always
-/// off for the tray "Sync now" so that button can never bulk-download the library.
 /// Clears out what the library no longer has: a cloud-only placeholder this fill did not
 /// make or find again stands for a photo deleted elsewhere, trashed, or taken out of
-/// that album, and only the app ever makes placeholders. A downloaded copy is the
-/// user's and stays. An album folder that held nothing else is removed with them,
-/// unless it is still an album.
+/// that album, and only the app ever makes placeholders. An album folder that held
+/// nothing else is removed with them, unless it is still an album.
+///
+/// A downloaded copy in `Photos\` whose photo left the library stays, unless Drive itself
+/// says what became of it (`keep_all::release_decision`): a hidden photo's copy goes, so it
+/// is not left in the plain folder, and while every photo is kept, the copy of a photo that
+/// went to the Proton trash goes too. Leaving the listing alone is never reason enough.
 ///
 /// A downloaded copy under a name the photo no longer has (renamed in the app or on
 /// another device) takes the new name instead, in place of the empty placeholder this
@@ -1578,6 +1755,11 @@ fn prune_stale(
         }
     }
     let mut removed = 0usize;
+    // Downloaded copies in `Photos\` whose photo is not in the library, for Drive to say why.
+    let mut orphans: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+    // The photos this mode downloaded and the ones hidden in the app, asked for only when a
+    // downloaded copy turns up whose photo this fill did not list.
+    let mut known_tails: Option<(std::collections::HashSet<String>, Vec<String>)> = None;
     for folder in &folders {
         let Ok(entries) = std::fs::read_dir(root.join(folder)) else { continue };
         for entry in entries.flatten() {
@@ -1615,6 +1797,35 @@ fn prune_stale(
                         _ => None,
                     }
                 });
+                let uid = match uid {
+                    Some(uid) => Some(uid),
+                    None if here == "photos" => {
+                        // Not a photo of this listing at all: one of the copies this mode kept,
+                        // or a photo hidden in the app, matched by the end of the uid it carries.
+                        let Some(tail) = downloaded_uid(&entry.path()) else { continue };
+                        let (kept, hidden) = known_tails.get_or_insert_with(|| {
+                            let hidden = crate::sidecar_rpc(app, "mountHidden", serde_json::json!({}))
+                                .ok()
+                                .and_then(|r| serde_json::from_value::<Vec<String>>(r).ok())
+                                .unwrap_or_default();
+                            (crate::keep_all::kept(app), hidden)
+                        });
+                        if hidden.iter().any(|h| !h.is_empty() && (h.ends_with(&tail) || tail.ends_with(h.as_str()))) {
+                            // Hidden: out of the plain folder whatever the mode, and whoever
+                            // downloaded it. Its photo is still in Drive, behind the lock.
+                            if let_go_of_copy(&entry.path(), &rel) {
+                                removed += 1;
+                            }
+                            continue;
+                        }
+                        let mut matches = kept.iter().filter(|u| u.ends_with(&tail) && u.len() - tail.len() <= 16);
+                        match (matches.next(), matches.next()) {
+                            (Some(u), None) => Some(u.clone()),
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
                 let Some(uid) = uid else { continue };
                 let Some(new_rel) = now_at.get(&(here.clone(), uid.clone())) else {
                     // A downloaded copy in a favourites or album folder the photo has left,
@@ -1625,6 +1836,9 @@ fn prune_stale(
                     let view = here == "photos\\favorites" || here.starts_with("albums\\");
                     if view && now_at.contains_key(&("photos".to_string(), uid.clone())) && let_go_of_copy(&entry.path(), &rel) {
                         removed += 1;
+                    }
+                    if here == "photos" && !now_at.contains_key(&("photos".to_string(), uid.clone())) {
+                        orphans.push((uid, entry.path(), rel));
                     }
                     continue;
                 };
@@ -1664,6 +1878,7 @@ fn prune_stale(
             }
         }
     }
+    removed += release_orphans(app, orphans);
     if removed > 0 {
         crate::note(app, &format!("[cloud] populate: removed {removed} placeholders the library no longer has"));
     }
@@ -1680,12 +1895,213 @@ fn let_go_of_copy(path: &std::path::Path, rel: &str) -> bool {
     let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
         return false;
     };
-    if file.dehydrate(..).is_err() {
+    let dehydrated = {
+        let _own = OwnDehydrate::new(path);
+        file.dehydrate(..).is_ok()
+    };
+    if !dehydrated {
         return false;
     }
     drop(file);
     crate::explorer_sync::expect_own(rel);
     std::fs::remove_file(path).is_ok()
+}
+
+/// The paths the app itself is turning back to cloud-only right now. While every photo is
+/// kept, a dehydration Windows starts by itself (Storage Sense) is refused, so a kept copy
+/// is not freed behind the user's back and then downloaded again; these are let through.
+#[cfg(windows)]
+fn own_dehydrations() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static OWN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(windows)]
+struct OwnDehydrate(String);
+
+#[cfg(windows)]
+impl OwnDehydrate {
+    fn new(path: &std::path::Path) -> Self {
+        let key = path.to_string_lossy().to_lowercase();
+        own_dehydrations().lock().unwrap().insert(key.clone());
+        OwnDehydrate(key)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for OwnDehydrate {
+    fn drop(&mut self) {
+        own_dehydrations().lock().unwrap().remove(&self.0);
+    }
+}
+
+#[cfg(windows)]
+fn dehydrating_ourselves(path: &std::path::Path) -> bool {
+    own_dehydrations().lock().unwrap().contains(&path.to_string_lossy().to_lowercase())
+}
+
+/// Lets go of the downloaded copies whose photos left the library, by Drive's own answer
+/// for each (see `keep_all::release_decision`), and returns how many went.
+#[cfg(windows)]
+fn release_orphans(app: &tauri::AppHandle, orphans: Vec<(String, std::path::PathBuf, String)>) -> usize {
+    if orphans.is_empty() {
+        return 0;
+    }
+    let uids: Vec<String> = orphans.iter().map(|(uid, _, _)| uid.clone()).collect();
+    let mut fates: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for chunk in uids.chunks(100) {
+        if let Ok(answer) = crate::sidecar_rpc(app, "mountFates", serde_json::json!({ "uids": chunk })) {
+            if let Ok(map) = serde_json::from_value::<std::collections::HashMap<String, String>>(answer) {
+                fates.extend(map);
+            }
+        }
+    }
+    let kept = crate::keep_all::kept(app);
+    let decision = crate::keep_all::release_decision(&uids, &fates, &kept, crate::keep_all::mode(app));
+    let go: std::collections::HashSet<&String> = decision.let_go.iter().collect();
+    let mut released = Vec::new();
+    for (uid, path, rel) in &orphans {
+        if go.contains(uid) && let_go_of_copy(path, rel) {
+            released.push(uid.clone());
+        }
+    }
+    crate::keep_all::settle(app, &released, &decision.held, &decision.forget);
+    crate::note(
+        app,
+        &format!(
+            "[keep] {} copies whose photos left the library: {} let go of, {} held, {} kept as the user's",
+            orphans.len(),
+            released.len(),
+            decision.held.len(),
+            decision.forget.len()
+        ),
+    );
+    if !decision.held.is_empty() {
+        use tauri::Emitter;
+        let _ = app.emit("keep-progress", crate::keep_all::status(app));
+    }
+    released.len()
+}
+
+/// The downloaded copies in `Photos\` of the given photos, found by the uid each carries.
+#[cfg(windows)]
+fn downloaded_copies_of(uids: &[String]) -> Vec<(String, std::path::PathBuf, String)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(sync_root_path().join("Photos")) else { return out };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let Some(tail) = downloaded_uid(&entry.path()) else { continue };
+        let mut matches = uids.iter().filter(|u| u.ends_with(&tail) && u.len() - tail.len() <= 16);
+        if let (Some(uid), None) = (matches.next(), matches.next()) {
+            let rel = format!("Photos\\{}", entry.file_name().to_string_lossy());
+            out.push((uid.clone(), entry.path(), rel));
+        }
+    }
+    out
+}
+
+/// The timeline's photos as the last fill listed them, newest first.
+#[cfg(windows)]
+fn timeline_order() -> &'static std::sync::Mutex<Vec<String>> {
+    static ORDER: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    ORDER.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The copy of a photo in `Photos\` itself, the one a download keeps. None for a photo
+/// whose timeline copy this fill could not make, which only has an album copy.
+#[cfg(windows)]
+fn timeline_rel(uid: &str) -> Option<String> {
+    mount_index()
+        .lock()
+        .unwrap()
+        .get(uid)
+        .and_then(|rels| rels.first())
+        .filter(|rel| rel.starts_with("Photos\\") && !rel.starts_with("Photos\\Favorites\\"))
+        .cloned()
+}
+
+/// The timeline copy of a photo, when it is on this PC already with the size the cloud
+/// file has and is not the very file being filled, so another copy of the same photo (in
+/// an album or the favourites) can be filled from it.
+#[cfg(windows)]
+fn local_timeline_copy(uid: &str, asking: &std::path::Path, size: u64) -> Option<std::path::PathBuf> {
+    let base = sync_root_path();
+    let rel = timeline_rel(uid)?;
+    let path = base.join(&rel);
+    if path.to_string_lossy().eq_ignore_ascii_case(&asking.to_string_lossy()) {
+        return None;
+    }
+    (hydrated_size(&base, &rel)? == size).then_some(path)
+}
+
+/// The photos the last fill placed in `Photos\`, newest first.
+#[cfg(windows)]
+pub(crate) fn timeline_uids() -> Vec<String> {
+    let order = timeline_order().lock().unwrap().clone();
+    order.into_iter().filter(|uid| timeline_rel(uid).is_some()).collect()
+}
+
+/// Whether a photo's timeline copy holds no data on this PC right now.
+#[cfg(windows)]
+pub(crate) fn is_cloud_only(uid: &str) -> bool {
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    timeline_rel(uid)
+        .and_then(|rel| file_attributes(&sync_root_path().join(rel)))
+        .is_some_and(|a| a & RECALL_ON_DATA_ACCESS != 0)
+}
+
+#[cfg(windows)]
+pub(crate) fn cloud_size_of(uid: &str) -> Option<u64> {
+    cloud_size(uid)
+}
+
+/// Downloads a photo's timeline copy in place, but only while it is cloud-only: a file that
+/// is local already, or is no placeholder at all, is left exactly as it is. Unlike
+/// `keep_offline_one`, it never adopts a plain file, which by now could be the user's own.
+#[cfg(windows)]
+pub(crate) fn hydrate_cloud_only(uid: &str) -> bool {
+    use cloud_filter::placeholder::OpenOptions;
+    if !is_cloud_only(uid) {
+        return false;
+    }
+    let Some(rel) = timeline_rel(uid) else { return false };
+    let Ok(mut ph) = OpenOptions::new().write_access().open(sync_root_path().join(rel)) else { return false };
+    if ph.info().ok().flatten().is_none() || ph.hydrate(..).is_err() {
+        return false;
+    }
+    let _ = ph.mark_in_sync(true, None);
+    true
+}
+
+/// Free space on the drive the folder is on, as this user may use it.
+#[cfg(windows)]
+pub(crate) fn free_space() -> Option<u64> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let root = HSTRING::from(sync_root_path().to_string_lossy().as_ref());
+    let mut free = 0u64;
+    unsafe { GetDiskFreeSpaceExW(&root, Some(&mut free), None, None) }.ok()?;
+    Some(free)
+}
+
+/// The quarter-hourly fill while the app sits in the tray, so new photos arrive and the
+/// folder follows the library without the window. Only after a fill of this run has
+/// happened, which means the account is signed in, and never sooner than a page load's.
+#[cfg(windows)]
+pub(crate) fn timed_fill(app: &tauri::AppHandle) {
+    if !show_in_explorer_enabled() || !FILL_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if !LAST_FILL.lock().unwrap().is_some_and(|at| at.elapsed() >= REFILL_AFTER) {
+        return;
+    }
+    let _busy = BusyGuard::new(app);
+    match try_populate(app) {
+        Ok(()) => filled(),
+        Err(e) => crate::note(app, &format!("[cloud] timed fill failed: {e}")),
+    }
 }
 
 /// The uid a downloaded placeholder carries, as far as it can be read back. The
@@ -1798,6 +2214,7 @@ fn populate_extras(app: &tauri::AppHandle, root: &std::path::Path, favorites: &[
 #[cfg(windows)]
 pub(crate) fn clear_after_sign_out(app: &tauri::AppHandle) {
     const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    crate::keep_all::forget();
     // What the folder held is this account's business; the next one takes its own look.
     if let Ok(dir) = crate::secure_store::app_dir(app) {
         let _ = std::fs::remove_file(dir.join(crate::explorer_sync::SEEN_FILE));
@@ -1845,11 +2262,19 @@ pub(crate) fn clear_after_sign_out(app: &tauri::AppHandle) {
     mount_index().lock().unwrap().clear();
     album_index().lock().unwrap().clear();
     album_dirs().lock().unwrap().clear();
+    forget_fills();
     {
         let (state, _) = hydrated_state();
         let mut st = state.lock().unwrap();
         st.uids.clear();
         st.version += 1;
+    }
+    // Whether the next account's photos show in File Explorer is that account's choice: the
+    // folder stops filling now, and the window says so once the next account is in.
+    if show_in_explorer_enabled() {
+        set_show_in_explorer(false);
+        let left = files_under(&root);
+        let _ = crate::secure_store::write_sealed(app, EXPLORER_OFF_NOTICE, &left.to_string());
     }
     crate::note(app, &format!("[cloud] signed out: removed {removed} placeholders, kept downloaded copies"));
 }
@@ -1879,7 +2304,7 @@ pub(crate) fn refresh_mount(app: &tauri::AppHandle) {
     }
     {
         let _busy = BusyGuard::new(app);
-        match try_populate(app, false) {
+        match try_populate(app) {
             Ok(()) => filled(),
             Err(e) => crate::note(app, &format!("[cloud] refresh failed: {e}")),
         }
@@ -1911,7 +2336,7 @@ pub(crate) fn album_for_folder(name: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), String> {
+fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
     let _fill = populate_lock();
     use cloud_filter::metadata::{Metadata, MetadataExt};
     use cloud_filter::placeholder_file::PlaceholderFile;
@@ -2054,6 +2479,7 @@ fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), Strin
     // One subfolder per album, holding placeholders for its photos (the same cloud
     // files, backed by the same uid, hydrated on demand).
     populate_albums(app, &folder.join("Albums"), &meta);
+    fill_phase(app, Some("tidy"), 0, 0);
     populate_extras(app, &folder, &favorites);
     prune_stale(app, &folder, &previous);
     // The index now names copies an earlier run downloaded, which the badge has to show.
@@ -2066,44 +2492,24 @@ fn try_populate(app: &tauri::AppHandle, auto_download: bool) -> Result<(), Strin
         std::thread::spawn(move || crate::explorer_sync::upload_waiting(&app));
     });
 
-    // Auto-download: keep photos that appeared since the previous populate on this
-    // device. The snapshot from the last run is the baseline; a first run (no snapshot)
-    // only seeds it, so enabling the option never bulk-downloads the whole existing
-    // library — only genuine new arrivals from then on. Guarded three ways so it can
-    // never run away: the caller opts in (`auto_download`), the setting is on, and the
-    // baseline is a real, non-empty snapshot (an empty/missing one means "seed", not
-    // "everything is new"). And the snapshot is only saved when this listing actually
-    // returned photos, so a transient empty listing cannot poison the next run.
-    if auto_download && auto_download_enabled() {
+    // Photos that arrived since the previous fill, for "New photos only". The snapshot of
+    // the fill before is the baseline, and a first fill (no snapshot) only seeds it, so
+    // choosing the mode never downloads the library as it already was. Every fill records
+    // its arrivals, Sync now and the refresh after an Explorer change included, so none is
+    // marked as seen without being kept. The worker downloads them outside this lock, and
+    // the snapshot is saved only when this listing returned photos, so an empty one cannot
+    // make every photo look new to the next fill.
+    if !all_uids.is_empty() {
         if let Some(prev) = load_seen(app) {
             if !prev.is_empty() {
-                let index = mount_index().lock().unwrap();
-                let mut grabbed = 0usize;
-                for uid in &all_uids {
-                    if prev.contains(uid) {
-                        continue;
-                    }
-                    if let Some(rel) = index.get(uid).and_then(|v| v.first()) {
-                        if keep_offline_one(app, &folder, rel, Some(uid.as_str())) {
-                            grabbed += 1;
-                        }
-                    }
-                }
-                if grabbed > 0 {
-                    crate::note(app, &format!("[autodl] downloaded {grabbed} new photo(s)"));
-                }
+                let arrivals: Vec<String> = all_uids.iter().filter(|uid| !prev.contains(*uid)).cloned().collect();
+                crate::keep_all::add_arrivals(app, &arrivals);
             }
         }
-    }
-    if !all_uids.is_empty() {
         save_seen(app, &all_uids);
+        *timeline_order().lock().unwrap() = all_uids.clone();
     }
-
-    // Selective per-album sync: keep every photo of a "synced" album on the device,
-    // catching photos newly added to those albums since the last populate.
-    for album_uid in load_synced_albums(app) {
-        hydrate_album(app, &album_uid);
-    }
+    crate::keep_all::nudge();
 
     // Settle the folders' Explorer status (a fresh sync-root folder reads as pending
     // until it is an in-sync placeholder). Done last, after all hydration.
@@ -2125,81 +2531,109 @@ fn populate_albums(
     use cloud_filter::placeholder_file::PlaceholderFile;
     use std::collections::HashSet;
 
-    let albums = match crate::sidecar_rpc(app, "listAlbumsForMount", serde_json::json!({})) {
-        Ok(v) => v.as_array().cloned().unwrap_or_default(),
-        Err(e) => {
-            crate::note(app, &format!("[cloud] albums skipped: {e}"));
-            return;
-        }
-    };
-    album_index().lock().unwrap().clear();
-    album_dirs().lock().unwrap().clear();
-    if albums.is_empty() {
-        return;
-    }
-    if !albums_dir.exists() {
-        crate::explorer_sync::expect_own("Albums");
-    }
-    let _ = std::fs::create_dir_all(albums_dir);
-    mark_not_indexed(albums_dir);
-
+    // Built aside and put in place only once every page has been read: until then the
+    // folder keeps the albums it knew, so a file dropped into an album's folder while the
+    // fill runs, or after a page failed, still finds its album instead of making another.
+    let mut next_index: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut next_dirs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut album_dir_seen: HashSet<String> = HashSet::new();
     let mut made = 0usize;
-    for album in &albums {
-        let album_uid = album.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
-        let name = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
-        let uids = album.get("uids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        if uids.is_empty() {
-            continue;
+    let mut offset = 0u64;
+    // A page of albums at a time, each page a short call, with the count shown as it goes.
+    loop {
+        let page = match crate::sidecar_rpc(
+            app,
+            "listAlbumsForMount",
+            serde_json::json!({ "offset": offset, "limit": ALBUM_PAGE }),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::note(app, &format!("[cloud] albums skipped: {e}"));
+                return;
+            }
+        };
+        let total = page.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+        let albums = page.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        if total == 0 {
+            album_index().lock().unwrap().clear();
+            album_dirs().lock().unwrap().clear();
+            return;
         }
-        let dir_name = unique_name(&sanitize_name(name), &mut album_dir_seen);
-        let album_folder = albums_dir.join(&dir_name);
-        if !album_uid.is_empty() {
-            album_dirs().lock().unwrap().insert(dir_name.to_lowercase(), album_uid.to_string());
+        if offset == 0 {
+            fill_phase(app, Some("albums"), 0, total);
+            if !albums_dir.exists() {
+                crate::explorer_sync::expect_own("Albums");
+            }
+            let _ = std::fs::create_dir_all(albums_dir);
+            mark_not_indexed(albums_dir);
         }
-        if !album_folder.exists() {
-            crate::explorer_sync::expect_own(&format!("Albums\\{dir_name}"));
-        }
-        if std::fs::create_dir_all(&album_folder).is_err() {
-            continue;
-        }
-        mark_not_indexed(&album_folder);
-        let mut file_seen: HashSet<String> = HashSet::new();
-        let mut members: Vec<String> = Vec::new();
-        for u in &uids {
-            let Some(uid) = u.as_str() else { continue };
-            let Some((base, size, ft)) = meta.get(uid) else { continue };
-            let unique = unique_name(base, &mut file_seen);
-            let rel = format!("Albums\\{dir_name}\\{unique}");
-            let placeholder = PlaceholderFile::new(&unique)
-                .mark_in_sync()
-                .metadata(Metadata::file().size(*size).creation_time(*ft).last_write_time(*ft))
-                .blob(uid.as_bytes().to_vec());
-            let owned = if placeholder.create::<&std::path::Path>(&album_folder).is_ok() {
-                made += 1;
-                true
-            } else {
-                // A copy already sits here: reconcile it so Explorer shows the green
-                // check instead of "waiting to sync". A cloud-only one needs nothing
-                // doing and is ours all the same, so only a foreign file is excluded.
-                reconcile_existing(app, &album_folder.join(&unique), uid, *size) != Existing::Foreign
-            };
-            mark_not_indexed(&album_folder.join(&unique));
-            // Indexed only once it belongs to the mount, on the same grounds as the
-            // `Photos\` pass: an album copy that was neither created nor adopted is
-            // someone else's file with a name that happens to match, and both indexes
-            // lead straight to hydrating and dehydrating whatever they list.
-            if owned {
-                index_push(uid, &rel);
-                members.push(rel);
+        for album in &albums {
+            let album_uid = album.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
+            let name = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
+            let uids = album.get("uids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            if uids.is_empty() {
+                continue;
+            }
+            let dir_name = unique_name(&sanitize_name(name), &mut album_dir_seen);
+            let album_folder = albums_dir.join(&dir_name);
+            if !album_uid.is_empty() {
+                next_dirs.insert(dir_name.to_lowercase(), album_uid.to_string());
+            }
+            if !album_folder.exists() {
+                crate::explorer_sync::expect_own(&format!("Albums\\{dir_name}"));
+            }
+            if std::fs::create_dir_all(&album_folder).is_err() {
+                continue;
+            }
+            mark_not_indexed(&album_folder);
+            let mut file_seen: HashSet<String> = HashSet::new();
+            let mut members: Vec<String> = Vec::new();
+            for u in &uids {
+                let Some(uid) = u.as_str() else { continue };
+                let Some((base, size, ft)) = meta.get(uid) else { continue };
+                let unique = unique_name(base, &mut file_seen);
+                let rel = format!("Albums\\{dir_name}\\{unique}");
+                let placeholder = PlaceholderFile::new(&unique)
+                    .mark_in_sync()
+                    .metadata(Metadata::file().size(*size).creation_time(*ft).last_write_time(*ft))
+                    .blob(uid.as_bytes().to_vec());
+                let owned = if placeholder.create::<&std::path::Path>(&album_folder).is_ok() {
+                    made += 1;
+                    true
+                } else {
+                    // A copy already sits here: reconcile it so Explorer shows the green
+                    // check instead of "waiting to sync". A cloud-only one needs nothing
+                    // doing and is ours all the same, so only a foreign file is excluded.
+                    reconcile_existing(app, &album_folder.join(&unique), uid, *size) != Existing::Foreign
+                };
+                mark_not_indexed(&album_folder.join(&unique));
+                // Indexed only once it belongs to the mount, on the same grounds as the
+                // `Photos\` pass: an album copy that was neither created nor adopted is
+                // someone else's file with a name that happens to match, and both indexes
+                // lead straight to hydrating and dehydrating whatever they list.
+                if owned {
+                    index_push(uid, &rel);
+                    members.push(rel);
+                }
+            }
+            if !album_uid.is_empty() {
+                next_index.insert(album_uid.to_string(), members);
             }
         }
-        if !album_uid.is_empty() {
-            album_index().lock().unwrap().insert(album_uid.to_string(), members);
+        offset += ALBUM_PAGE;
+        fill_phase(app, Some("albums"), offset.min(total), total);
+        if offset >= total {
+            break;
         }
     }
+    *album_index().lock().unwrap() = next_index;
+    *album_dirs().lock().unwrap() = next_dirs;
     crate::note(app, &format!("[cloud] populate: created {made} album placeholders"));
 }
+
+/// Albums asked for in one call while the folder is filled.
+#[cfg(windows)]
+const ALBUM_PAGE: u64 = 12;
 
 /// Make a file name unique within this populate run (append " (2)", " (3)", ...),
 /// so two photos with the same name both land instead of one colliding out.
@@ -2269,6 +2703,7 @@ pub async fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) -> PinResult
                 &app,
                 &format!("[download] make offline: {} of {} selected found in the mount", pairs.len(), uids.len()),
             );
+            crate::keep_all::note_unfreed(&app, &uids);
             let ok = pairs
                 .iter()
                 .filter(|(uid, rel)| keep_offline_one(&app, &base, rel, Some(uid.as_str())))
@@ -2312,6 +2747,7 @@ fn free_up_one(app: &tauri::AppHandle, base: &std::path::Path, uid: &str, rel: &
     if entry.dwFileAttributes & RECALL_ON_DATA_ACCESS != 0 {
         return false;
     }
+    let _own = OwnDehydrate::new(&path);
     // Normal path: dehydrate the placeholder in place.
     if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
         if file.dehydrate(..).is_ok() {
@@ -2394,6 +2830,7 @@ pub async fn free_up_selected(app: tauri::AppHandle, uids: Vec<String>) -> u32 {
                 }
             }
             crate::note(&app, &format!("[freeup] freed {ok}"));
+            crate::keep_all::note_freed(&app, &uids);
             rescan_hydrated();
             ok
         })
@@ -2444,6 +2881,7 @@ pub async fn free_up_all(app: tauri::AppHandle) -> u32 {
                 }
             }
             crate::note(&app, &format!("[freeup] freed {freed} of {total} copies"));
+            crate::keep_all::freed_everything(&app);
             rescan_hydrated();
             freed
         })
@@ -2526,9 +2964,19 @@ fn mark_hydrated(uid: &str, local: bool) {
     let (state, _) = hydrated_state();
     let mut st = state.lock().unwrap();
     let changed = if local { st.uids.insert(uid.to_string()) } else { st.uids.remove(uid) };
-    if changed {
+    // The grid fetches the whole set again whenever the version moves, so a download of the
+    // pass that keeps every photo moves it every few dozen photos (`bump_hydrated_version`),
+    // not with each one. A photo the user opened meanwhile still shows at once.
+    if changed && !crate::keep_all::in_pass(uid) {
         st.version += 1;
     }
+}
+
+/// Tells the grid that more photos are on this PC, after a batch the pass downloaded.
+#[cfg(windows)]
+pub(crate) fn bump_hydrated_version() {
+    let (state, _) = hydrated_state();
+    state.lock().unwrap().version += 1;
 }
 
 /// Ask for a full scan soon: after a pass that may have changed many copies at once.
@@ -2671,6 +3119,23 @@ mod populate_page_tests {
             page = next_populate_page(page, Duration::from_millis(20)).0;
         }
         assert!(pages < 1_010, "{pages} pages");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod fill_gate_tests {
+    use super::{claim_page_fill, filled, forget_fills};
+
+    /// After a sign-out the next account's first page load fills the emptied folder at
+    /// once; without it the folder stayed empty until the previous fill was 15 minutes old.
+    #[test]
+    fn a_sign_out_lets_the_next_page_load_fill_at_once() {
+        forget_fills();
+        assert_eq!(claim_page_fill(), Some(true), "the run's first fill goes ahead and shows");
+        filled();
+        assert_eq!(claim_page_fill(), None, "a fresh fill stands");
+        forget_fills();
+        assert_eq!(claim_page_fill(), Some(true), "after a sign-out it is a first fill again");
     }
 }
 

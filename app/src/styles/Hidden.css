@@ -1,0 +1,100 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* ---- Hidden: behind Windows Hello, then the hidden albums and photos ---- */
+.hd-lock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 60vh;
+  text-align: center;
+}
+.hd-lockmark {
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 16px;
+  border-radius: 36px;
+  background: var(--pill-bg);
+  border: 0.5px solid var(--border);
+  color: var(--accent);
+}
+.hd-locktitle {
+  margin: 0;
+  color: var(--fg-primary);
+  font-size: 22px;
+  font-weight: 600;
+}
+.hd-locktext {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 14px;
+}
+.hd-unlock {
+  margin-top: 24px;
+  padding: 0 28px;
+  height: 44px;
+  border-radius: 14px;
+  border: 0.5px solid rgba(var(--accent-rgb), 0.3);
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.hd-unlock:hover:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.2);
+}
+.hd-unlock:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.hd-page {
+  padding: 4px 0 96px;
+}
+.hd-note {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--pill-bg);
+  border: 0.5px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+.hd-section + .hd-section {
+  margin-top: 28px;
+}
+.hd-head {
+  margin: 0 0 12px;
+  color: var(--fg-primary);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* The app lock: a click anywhere on it asks Windows Hello. */
+.app-lock {
+  cursor: pointer;
+}

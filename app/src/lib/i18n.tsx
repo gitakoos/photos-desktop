@@ -98,8 +98,17 @@ async function persistLang(l: Lang): Promise<void> {
   }
 }
 
+// The language shown now, for text made outside a component (an RPC error).
+let shownLang: Lang = BROWSER_LANG;
+
+/** `key` in the language shown now, then English, then the key itself. */
+export function translateNow(key: string): string {
+  return DICTS[shownLang][key] ?? en[key] ?? key;
+}
+
 export function LangProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<Lang>(BROWSER_LANG);
+  shownLang = lang;
 
   // Restore the saved choice, if any. Until it lands, the browser default shows.
   useEffect(() => {

@@ -41,6 +41,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { readFile as readFileAsync } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { WritableStream } from "node:stream/web";
@@ -48,7 +49,7 @@ import { WritableStream } from "node:stream/web";
 import { PhotoTag } from "@protontech/drive-sdk";
 
 import { isOfflineReady } from "./offline.ts";
-import { nodeDurationMs, nodeName, toMillis } from "./nodes.ts";
+import { activeRevisionOf, nodeDurationMs, nodeName, toMillis } from "./nodes.ts";
 import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { decryptOriginalTo, metaGet, metaPut, originalGet, originalSize } from "./store.ts";
 import { guarded, writeChunk } from "./fileWrites.ts";
@@ -405,7 +406,7 @@ export async function resolveMountMetaBatch(
     for await (const node of withStallGuard(photos.iterateNodes(missing), SDK_STALL_MS, "iterateNodes")) {
       const n: any = node;
       if (n.missingUid) continue; // vanished server-side
-      const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+      const revision = activeRevisionOf(n);
       const size = Number(revision?.claimedSize ?? 0);
       if (size <= 0) continue; // no positive-size revision: never cache a zero
       const name = nodeName(n) || n.uid;
@@ -461,7 +462,7 @@ export async function resolveDurationsBatch(
     for await (const node of withStallGuard(photos.iterateNodes(missing), SDK_STALL_MS, "iterateNodes")) {
       const n: any = node;
       if (n.missingUid) continue; // vanished server-side
-      const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+      const revision = activeRevisionOf(n);
       const size = Number(revision?.claimedSize ?? 0);
       const durationMs = nodeDurationMs(n) ?? 0;
       const name = nodeName(n) || n.uid;
@@ -518,7 +519,7 @@ export async function resolveMediaTypesBatch(
     for await (const node of withStallGuard(photos.iterateNodes(missing), SDK_STALL_MS, "iterateNodes")) {
       const n: any = node;
       if (n.missingUid) continue; // vanished server-side
-      const revision = n.activeRevision?.ok ? n.activeRevision.value : null;
+      const revision = activeRevisionOf(n);
       const size = Number(revision?.claimedSize ?? 0);
       const mediaType = n.mediaType ?? null;
       // This decrypt already holds the revision, so the length and the claimed size go in
@@ -547,7 +548,12 @@ export async function resolveMediaTypesBatch(
  * new photos does zero node decrypts and returns in milliseconds. Paging still lets the
  * Rust host release the RPC lock between pages so thumbnails keep loading on a cold run.
  */
-export async function listForMount(photos: any, offset: number, limit: number): Promise<MountPage> {
+export async function listForMount(
+  photos: any,
+  offset: number,
+  limit: number,
+  hidden: (uid: string) => boolean = () => false,
+): Promise<MountPage> {
   if (offset === 0 || !mountUids) {
     const picks: { uid: string; captureTime: number; favorite: boolean }[] = [];
     for await (const item of withStallGuard(
@@ -556,7 +562,8 @@ export async function listForMount(photos: any, offset: number, limit: number): 
       "iterateTimeline(listForMount)",
     )) {
       const uid = (item as any).nodeUid ?? (item as any).uid;
-      if (!uid) continue;
+      // A photo hidden in the app stays out of the folder too.
+      if (!uid || hidden(uid)) continue;
       const ct = (item as any).captureTime;
       const tags: number[] = (item as any).tags ?? [];
       picks.push({
@@ -586,6 +593,42 @@ export async function listForMount(photos: any, offset: number, limit: number): 
     }
   }
   return { items, total: mountUids.length };
+}
+
+/** What became of a photo the Explorer folder kept a copy of, once it left the listing. */
+export type MountFate = "trashed" | "gone" | "hidden" | "present" | "unknown";
+
+/**
+ * Asks Drive itself what became of each photo, so the host lets go of a kept copy only on
+ * a positive answer. Leaving the listing is not one: a page that failed, a node that could
+ * not be read for a moment, or a sidecar that restarted mid-fill drops photos from it just
+ * the same. A photo the lookup never answered for stays "unknown", and the host does nothing.
+ */
+export async function mountFates(
+  photos: any,
+  uids: string[],
+  hidden: (uid: string) => boolean = () => false,
+): Promise<Record<string, MountFate>> {
+  const out: Record<string, MountFate> = {};
+  const ask: string[] = [];
+  for (const uid of uids) {
+    if (hidden(uid)) out[uid] = "hidden";
+    else {
+      out[uid] = "unknown";
+      ask.push(uid);
+    }
+  }
+  if (ask.length === 0) return out;
+  try {
+    for await (const node of withStallGuard(photos.iterateNodes(ask), SDK_STALL_MS, "iterateNodes(fates)")) {
+      const n: any = node;
+      if (n?.missingUid && n.missingUid in out) out[n.missingUid] = "gone";
+      else if (n?.uid && n.uid in out) out[n.uid] = n.trashTime ? "trashed" : "present";
+    }
+  } catch {
+    // What was answered before the failure stands; the rest stays unknown.
+  }
+  return out;
 }
 
 /**
@@ -834,6 +877,30 @@ type ViewEntry = {
 // The one original that exists at a time. Replacing it is what cancels the previous
 // transfer: every step of a transfer checks that it is still the current entry.
 let viewing: ViewEntry | null = null;
+
+/**
+ * The original the viewer holds for `uid`, once it has it: the bytes in memory, or the staged file
+ * read back. Waits while it is still arriving; null when the viewer is on another photo, so the
+ * caller fetches its own.
+ */
+export async function viewedOriginal(uid: string, waitMs = VIEWED_WAIT_MS): Promise<Buffer | null> {
+  const until = Date.now() + waitMs;
+  while (viewing?.uid === uid && viewing.status.state === "loading" && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const entry = viewing;
+  if (!entry || entry.uid !== uid || entry.status.state !== "ready") return null;
+  if (entry.bytes) return entry.bytes;
+  if (!entry.path) return null;
+  try {
+    return await readFileAsync(entry.path);
+  } catch {
+    return null;
+  }
+}
+
+/** How long a read waits for the original the viewer is still fetching. */
+const VIEWED_WAIT_MS = 20_000;
 
 /**
  * Delete a staged original, retrying briefly. On Windows a file cannot be deleted while

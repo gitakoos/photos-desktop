@@ -21,6 +21,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { translateNow } from "./i18n";
 
 type RpcEnvelope = { ok: boolean; result?: unknown; error?: string };
 
@@ -79,12 +80,12 @@ const TIMEOUT_MS: Record<string, number> = {
   removePhotosFromAlbum: 15 * MINUTE,
   deleteAlbum: 15 * MINUTE,
 
-  // Signing in: an SRP handshake, then the account keys. Giving up early here costs
-  // the user their password a second time, so it is the most generous of the lot.
-  login: 5 * MINUTE,
+  // Opening the account: the saved session, then the account keys. Giving up early here
+  // costs the user their password a second time, so it is the most generous of the lot.
   unlock: 5 * MINUTE,
-  submitCaptcha: 5 * MINUTE,
-  submit2fa: 5 * MINUTE,
+
+  // Reads every chosen photo's node for the date editor; a big selection takes a while.
+  dateEditInfo: 10 * MINUTE,
 };
 
 /** Rejects if `work` has not settled within `ms`, and never leaves a timer behind. */
@@ -155,6 +156,8 @@ export async function rpc<T = unknown>(
         method,
       )) as RpcEnvelope;
       if (!resp || typeof resp !== "object") throw new Error("Empty sidecar response");
+      // A call that needs Proton while only the photos kept offline are open.
+      if (!resp.ok && resp.error === "OFFLINE") throw new Error(translateNow("offlineMode.unavailable"));
       if (!resp.ok) throw new Error(resp.error || "Sidecar error");
       return resp.result as T;
     } catch (e) {

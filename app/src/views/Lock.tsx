@@ -28,16 +28,14 @@ import "../styles/App.css";
 
 type UnlockResult =
   | { status: "ok"; email: string }
-  | { status: "2fa" }
-  | { status: "hv"; url: string }
   | { status: "relogin" }
   | { status: "offline" }
   | { status: "error"; error: string };
 
 /**
- * The cold-start lock screen. The saved session is encrypted with a key derived
- * from the Proton password, so a returning user re-enters just the password to
- * unlock it — no full re-login or captcha, since the tokens are still on disk.
+ * The cold-start lock screen of a vault opened by a password: the user's own one, or for an
+ * account signed in before the browser sign-in, the Proton password it was signed in with.
+ * The tokens are still on disk, so the password alone opens the app again.
  */
 export function Lock({
   email,
@@ -65,10 +63,8 @@ export function Lock({
         setBusy(false);
         return;
       }
-      // "ok", or (when the saved tokens expired and the sidecar fell back to a
-      // fresh login) "hv" / "2fa", or "relogin" for a browser sign-in, which only
-      // Proton's page can redo. Hand it to the app, which leaves the lock screen
-      // and shows the step it asks for.
+      // "ok", or "relogin" when the saved session lapsed, which only Proton's page can
+      // redo. Hand it to the app, which leaves the lock screen and shows that step.
       setPassword("");
       onResult(r);
     } catch (err) {

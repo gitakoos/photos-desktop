@@ -275,17 +275,7 @@ export async function unpackZip(
   await eachEntry(zipPath, async (entry) => {
     if (keep(entry.fileName, entry.uncompressedSize)) total += entry.uncompressedSize;
   });
-  await mkdir(importStagingDir(), { recursive: true });
-  const free = await statfs(importStagingDir()).then(
-    (s) => s.bavail * s.bsize,
-    () => Number.POSITIVE_INFINITY,
-  );
-  if (free < total + FREE_SPACE_MARGIN) {
-    throw new Error(
-      `Not enough free disk space to unpack this export: it needs ${gigabytes(total + FREE_SPACE_MARGIN)}, ` +
-        `${gigabytes(free)} is free.`,
-    );
-  }
+  await ensureFreeSpace(total, "to unpack this export");
 
   const root = join(importStagingDir(), randomBytes(8).toString("hex"));
   await mkdir(root, { recursive: true });
@@ -309,6 +299,23 @@ export async function unpackZip(
     throw e;
   }
   return root;
+}
+
+/**
+ * Refuses before anything is written when the staging folder's disk cannot hold `bytes` with
+ * room to spare. `what` says what the room was for.
+ */
+export async function ensureFreeSpace(bytes: number, what = "to bring these files in"): Promise<void> {
+  await mkdir(importStagingDir(), { recursive: true });
+  const free = await statfs(importStagingDir()).then(
+    (s) => s.bavail * s.bsize,
+    () => Number.POSITIVE_INFINITY,
+  );
+  if (free < bytes + FREE_SPACE_MARGIN) {
+    throw new Error(
+      `Not enough free disk space ${what}: it needs ${gigabytes(bytes + FREE_SPACE_MARGIN)}, ${gigabytes(free)} is free.`,
+    );
+  }
 }
 
 /** Whether a picked path is a zip, by its name. */

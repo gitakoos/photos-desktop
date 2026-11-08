@@ -20,10 +20,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { barColor, formatBytes, type Account } from "./ProfileMenu";
-import type { Tile } from "./Library";
-import { ChevronRightIcon, GearIcon, MenuIcon, NavAlbumsIcon, NavPhotosIcon, NavTrashIcon, SignOutIcon } from "./icons";
+import { ChevronDownIcon, ChevronRightIcon, GearIcon, MenuIcon, SignOutIcon } from "./icons";
 import { useT } from "../lib/i18n";
 import "../styles/Sidebar.css";
 
@@ -40,47 +39,57 @@ export type Activity =
   | { kind: "index" }
   | { kind: "sync"; label?: string; why?: string };
 
-/** The two main destinations; the library's shortcuts and the bin follow, each group set
- *  apart by a hairline. */
-const NAV: { key: View; labelKey: string; Icon: (props: { size?: number }) => ReactElement }[] = [
-  { key: "photos", labelKey: "nav.photos", Icon: NavPhotosIcon },
-  { key: "albums", labelKey: "nav.albums", Icon: NavAlbumsIcon },
-];
+/** One row of the sidebar: a page, its icon, and whether it is the one shown. */
+export type SidebarEntry = {
+  key: string;
+  label: string;
+  icon: ReactNode;
+  selected: boolean;
+  onClick: () => void;
+  /** A dot over the icon, as over Shared while an invitation waits. */
+  badge?: boolean;
+};
+
+/** A titled group of rows: Photos, Collections, Utilities. */
+export type SidebarSection = { key: string; title: string; entries: SidebarEntry[] };
+
+const CLOSED_KEY = "pfp.sidebar.closedSections";
+
+function readClosed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(CLOSED_KEY);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
 
 /**
  * The left navigation of the sidebar layout, standing in for the bottom dock, the Albums
- * tab's shortcut tiles and the top-bar avatar: the menu button that folds it, Photos and
- * Albums, the library's shortcuts (Collection, Shared, Map, People, Labels, Offline), the
- * bin, and the account at the foot. The upload lives on the top strip beside it. It folds
- * to an icon-only rail; every icon keeps its place while it does, and the words fade, so
- * the fold is one smooth move. The caller persists that choice.
+ * tab's shortcut tiles and the top-bar avatar: the menu button that folds it, the pages in
+ * titled groups (Photos, Collections, Utilities), and the account at the foot. A group's
+ * title folds its rows away, and that stays on this computer. The upload lives on the top
+ * strip beside it. The sidebar folds to an icon-only rail; every icon keeps its place while
+ * it does, and the words fade, so the fold is one smooth move. The caller persists that choice.
  *
- * The account opens in place: it rises, and the storage, the settings and the sign-out
- * come in under it.
+ * The account opens in place: the storage, the settings and the sign-out come up under it,
+ * the account and its rows rising together from the foot as one block. A click elsewhere or
+ * Escape closes it.
  */
 export function Sidebar({
-  view,
-  onView,
+  sections,
   collapsed,
   onToggleCollapsed,
   account,
   email,
-  library,
-  librarySelected,
   onSettings,
   onSignOut,
 }: {
-  /** The destination shown, or null while a library shortcut's page is. */
-  view: View | null;
-  onView: (v: View) => void;
+  sections: SidebarSection[];
   collapsed: boolean;
   onToggleCollapsed: () => void;
   account: Account | null;
   email: string;
-  /** The library's shortcuts, the Albums tab's tiles in the dock layout. */
-  library: Tile[];
-  /** The shortcut whose page is shown, or null. */
-  librarySelected: string | null;
   onSettings: () => void;
   /** Asks first; the caller's confirmation says what signing out takes away. */
   onSignOut: () => void;
@@ -93,9 +102,69 @@ export function Sidebar({
   // The account opened in place at the foot. A folded rail has no room for it, so it opens
   // the rail first; folding it again closes the account.
   const [accountOpen, setAccountOpen] = useState(false);
+  const [closed, setClosed] = useState<Set<string>>(readClosed);
+  const toggleSection = (key: string) =>
+    setClosed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      try {
+        localStorage.setItem(CLOSED_KEY, JSON.stringify([...next]));
+      } catch {
+        /* folded for this session only */
+      }
+      return next;
+    });
   useEffect(() => {
     if (collapsed) setAccountOpen(false);
   }, [collapsed]);
+  const footRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // Whether the rows are laid out. Closing keeps them until the block has slid back down.
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    if (accountOpen) setShown(true);
+  }, [accountOpen]);
+  // One move each way: the foot, account and rows together, slides up by the rows' height
+  // as they appear, and back down before they go. The sidebar clips what is below it.
+  useLayoutEffect(() => {
+    const foot = footRef.current;
+    const body = bodyRef.current;
+    if (!foot || !body || !shown) return;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const lift = `translateY(${body.offsetHeight}px)`;
+    if (accountOpen) {
+      if (!still) foot.animate([{ transform: lift }, { transform: "none" }], { duration: 220, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+      return;
+    }
+    if (still) {
+      setShown(false);
+      return;
+    }
+    // Held at the bottom when it ends, until the rows are gone in the same frame as it lets go.
+    const move = foot.animate([{ transform: "none" }, { transform: lift }], {
+      duration: 170,
+      easing: "cubic-bezier(0.4, 0, 1, 1)",
+      fill: "forwards",
+    });
+    move.onfinish = () => setShown(false);
+    return () => move.cancel();
+  }, [accountOpen, shown]);
+  useEffect(() => {
+    if (!accountOpen) return;
+    const away = (e: PointerEvent) => {
+      if (!footRef.current?.contains(e.target as Node)) setAccountOpen(false);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAccountOpen(false);
+    };
+    document.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", key);
+    };
+  }, [accountOpen]);
 
   /** One destination row: its icon in a fixed place, the word beside it fading with the fold. */
   const item = (
@@ -132,31 +201,40 @@ export function Sidebar({
       </button>
 
       <nav className="g-sb-nav">
-        {NAV.map(({ key, labelKey, Icon }) =>
-          item(key, <Icon size={19} />, t(labelKey), view === key, () => onView(key)),
-        )}
-
-        <div className="g-sb-split" />
-        {library.map((tile) =>
-          item(
-            tile.key,
-            <span className="g-sb-libico">
-              {tile.icon}
-              {tile.badge && <span className="g-sb-dot" />}
-            </span>,
-            tile.label,
-            librarySelected === tile.key,
-            tile.onClick,
-          ),
-        )}
-
-        <div className="g-sb-split" />
-        {item("trash", <NavTrashIcon size={19} />, t("nav.trash"), view === "trash", () => onView("trash"))}
+        {sections.map((section, i) => {
+          // A folded rail has no room for titles: a hairline parts the groups, and every row shows.
+          const open = collapsed || !closed.has(section.key);
+          return (
+            <div key={section.key} className="g-sb-section">
+              {collapsed ? (
+                i > 0 && <div className="g-sb-split" />
+              ) : (
+                <button className="g-sb-head" onClick={() => toggleSection(section.key)} aria-expanded={open}>
+                  <span>{section.title}</span>
+                  {open ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
+                </button>
+              )}
+              {open &&
+                section.entries.map((entry) =>
+                  item(
+                    entry.key,
+                    <span className="g-sb-libico">
+                      {entry.icon}
+                      {entry.badge && <span className="g-sb-dot" />}
+                    </span>,
+                    entry.label,
+                    entry.selected,
+                    entry.onClick,
+                  ),
+                )}
+            </div>
+          );
+        })}
       </nav>
 
       <div className="g-sb-grow" />
 
-      <div className={`g-sb-foot${accountOpen ? " open" : ""}`}>
+      <div ref={footRef} className={`g-sb-foot${accountOpen ? " open" : ""}${shown ? " shown" : ""}`}>
         <button
           className="g-sb-account"
           onClick={() => {
@@ -178,9 +256,8 @@ export function Sidebar({
           </span>
         </button>
 
-        {/* Under the account, opened in place: the room grows from nothing, so the account
-            rises as it opens instead of a panel dropping over the page. */}
-        <div className="g-sb-acctbody" aria-hidden={!accountOpen}>
+        {/* Under the account, opened in place. */}
+        <div ref={bodyRef} className="g-sb-acctbody" aria-hidden={!accountOpen}>
           <div className="g-sb-acctinner">
             {account && account.maxSpace > 0 && (
               <div className="g-sb-storage">

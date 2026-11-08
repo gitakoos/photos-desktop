@@ -38,6 +38,8 @@ export type PinnedModelStatus =
   | { state: "failed"; error: string };
 
 export type PinnedModel = {
+  /** The file's pinned size in bytes. */
+  size: number;
   path: () => string;
   status: () => PinnedModelStatus;
   /** Fetches the model in the background; `status` follows it. */
@@ -146,5 +148,5 @@ export function pinnedModel(spec: PinnedModelSpec, tag: string): PinnedModel {
     return verified;
   }
 
-  return { path, status, startDownload, remove, intact };
+  return { size: spec.size, path, status, startDownload, remove, intact };
 }

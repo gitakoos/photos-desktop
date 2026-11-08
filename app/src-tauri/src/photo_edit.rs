@@ -20,6 +20,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+// The Windows decoders' helpers; elsewhere only part of this file is used.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 // The local photo editor's two ends: hand a file to an in-browser canvas so it can be
 // edited, and take the canvas back as a new file on disk.
 //

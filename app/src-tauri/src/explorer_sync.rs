@@ -265,6 +265,10 @@ impl Library for Index {
 }
 
 fn apply(app: &tauri::AppHandle, batch: &[RawEvent]) {
+    if crate::cloud_mount::detaching() {
+        crate::note(app, "[explorer] uninstall is clearing the folder, nothing taken from the library");
+        return;
+    }
     let changes = rules::read_batch(batch);
     if changes.is_empty() {
         return;
@@ -385,6 +389,11 @@ fn run(app: &tauri::AppHandle, action: &Action, album: &str) -> bool {
     };
     if !ok {
         crate::note(app, &format!("[explorer] could not {}", describe(action)));
+        // A photo deleted here that did not reach the trash is not downloaded again while
+        // every photo is kept; the trash is asked once more on the next round.
+        if let Action::Trash { photo } = action {
+            crate::keep_all::note_untrashed(app, photo);
+        }
     } else if let Some(notice) = notice_for(action, album) {
         crate::notices::tell(app, notice);
     }
@@ -476,6 +485,58 @@ fn stage(path: &Path) -> Option<PathBuf> {
     Some(staged)
 }
 
+/// A file in the folder that is being uploaded, as it was when its copy was staged.
+struct StagedFrom {
+    rel: String,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// The staged copies being uploaded, by their path, back to the file in the folder.
+static STAGED: OnceLock<Mutex<HashMap<String, StagedFrom>>> = OnceLock::new();
+
+fn staged_from() -> &'static Mutex<HashMap<String, StagedFrom>> {
+    STAGED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The files in the folder whose photo went up as a lighter copy, sent to the Recycle Bin so
+/// the photo's own copy can take their place at the refill that follows. A file is touched only
+/// while it is still exactly as it was staged: an ordinary file, the same size and time.
+/// Changed since, or already gone, it is left alone. The Recycle Bin, not a delete: a file
+/// moved into the folder has no other copy on this PC.
+fn recycle_replaced(app: &tauri::AppHandle) {
+    const REPARSE_POINT: u32 = 0x400;
+    let taken: Vec<String> = crate::sidecar_rpc(app, "dropReplaced", serde_json::json!({}))
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let root = crate::cloud_mount::sync_root_path();
+    let mut map = staged_from().lock().unwrap();
+    for staged in taken {
+        let Some(from) = map.remove(&staged) else { continue };
+        let path = root.join(&from.rel);
+        use std::os::windows::fs::MetadataExt;
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        let unchanged = meta.is_file()
+            && meta.file_attributes() & REPARSE_POINT == 0
+            && meta.len() == from.size
+            && meta.modified().ok() == from.modified;
+        if !unchanged {
+            continue;
+        }
+        expect_own(&from.rel);
+        match crate::local_file::recycle(&path) {
+            Ok(()) => crate::note(app, "[explorer] a file uploaded as a lighter copy went to the Recycle Bin"),
+            Err(e) => crate::note(app, &format!("[explorer] could not recycle a file uploaded lighter: {e}")),
+        }
+    }
+    // A staged copy is deleted once its upload is done; only the ones still waiting stay.
+    map.retain(|staged, _| Path::new(staged).exists());
+}
+
 /// Random bytes for a staging folder's name: it only has to differ between uploads.
 fn getrandom_fill(out: &mut [u8]) {
     use std::hash::{BuildHasher, Hasher};
@@ -508,11 +569,19 @@ fn start_upload(app: &tauri::AppHandle, rel: String, album: Option<String>, new_
             },
             (None, None) => None,
         };
+        let before = std::fs::metadata(&path).ok();
         let Some(staged) = stage(&path) else {
             crate::note(&app, "[explorer] could not stage a file to upload");
             return;
         };
-        let paths = vec![staged.to_string_lossy().into_owned()];
+        let staged_key = staged.to_string_lossy().into_owned();
+        if let Some(meta) = before {
+            staged_from().lock().unwrap().insert(
+                staged_key.clone(),
+                StagedFrom { rel: rel.clone(), size: meta.len(), modified: meta.modified().ok() },
+            );
+        }
+        let paths = vec![staged_key.clone()];
         let prep = crate::upload_frame::prepare(&app, &paths);
         let mut params = serde_json::to_value(&prep).unwrap_or_else(|_| serde_json::json!({}));
         params["paths"] = serde_json::json!(paths);
@@ -527,6 +596,7 @@ fn start_upload(app: &tauri::AppHandle, rel: String, album: Option<String>, new_
                 watch_uploads(&app);
             }
             Err(e) => {
+                staged_from().lock().unwrap().remove(&staged_key);
                 // The original is still in the folder; the copy made for this upload goes.
                 if let Some(folder) = staged.parent() {
                     let _ = std::fs::remove_dir_all(folder);
@@ -539,7 +609,8 @@ fn start_upload(app: &tauri::AppHandle, rel: String, album: Option<String>, new_
 
 /// Fills the folder again once the uploads have finished, which is what turns each
 /// uploaded file into the photo's own copy (`reconcile_existing` adopts a local file that
-/// matches the library's byte for byte). One watcher at a time.
+/// matches the library's byte for byte). A file that went up lighter matches nothing, so it
+/// goes to the Recycle Bin first and the photo takes its place. One watcher at a time.
 fn watch_uploads(app: &tauri::AppHandle) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WATCHING: AtomicBool = AtomicBool::new(false);
@@ -560,6 +631,7 @@ fn watch_uploads(app: &tauri::AppHandle) {
                 std::thread::sleep(Duration::from_secs(3));
             }
             WATCHING.store(false, Ordering::SeqCst);
+            recycle_replaced(&app);
             request_refresh(&app);
             // An upload that started after the last look found the flag still up.
             if !running(&app) || WATCHING.swap(true, Ordering::SeqCst) {

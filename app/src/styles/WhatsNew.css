@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* What a new version brought: a plain card over the app, the changes as a list. */
+/* What a new version brought: a wide card over the app, New and Fixed in two columns each. */
 .wn-backdrop {
   position: fixed;
   inset: 0;
@@ -31,10 +31,10 @@
   background: var(--scrim);
 }
 .wn-card {
-  width: min(560px, 100%);
+  width: min(920px, 100%);
   max-height: calc(100vh - 48px);
   overflow-y: auto;
-  padding: 28px 28px 24px;
+  padding: 28px 32px 24px;
   border-radius: 16px;
   border: 1px solid var(--border);
   background: var(--surface);
@@ -42,19 +42,37 @@
   scrollbar-width: thin;
 }
 .wn-title {
-  margin: 0 0 20px;
+  margin: 0 0 6px;
   font-size: 24px;
   font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--fg-primary);
 }
+.wn-section + .wn-section {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.wn-heading {
+  margin: 16px 0 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
 .wn-list {
   margin: 0;
   padding: 0;
   list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 28px;
+}
+@media (max-width: 720px) {
+  .wn-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .wn-item {
   display: flex;

@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
 import { downloadPhotos, explorerMode } from "../lib/download";
@@ -36,6 +36,7 @@ import { AlbumPicker } from "./AlbumDialogs";
 import { ContextMenu, type MenuAction } from "./ContextMenu";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
 import {
+  CalendarIcon,
   CloudIcon,
   DownloadIcon,
   FolderOpenIcon,
@@ -45,8 +46,11 @@ import {
   PencilIcon,
   ShareIcon,
   TrashIcon,
+  VisibilityIcon,
+  VisibilityOffIcon,
 } from "./icons";
 import { PhotoEditor } from "./PhotoEditor";
+import { DateEditPanel } from "./DateEditPanel";
 import { cloudEditorSource, isEditableImage, saveCloudEdit } from "../lib/cloudEditor";
 import { TAG, withFavorite } from "../lib/tags";
 import { useT } from "../lib/i18n";
@@ -113,6 +117,18 @@ type Props = {
   items?: CloudItem[];
   index?: number;
   onJump?: (i: number) => void;
+  /** Shown under the details, such as the people found on the photo. */
+  detailsExtra?: ReactNode;
+  /** Moving the photo into Hidden or out of it; absent where neither applies. */
+  hiding?: { hidden: boolean; toggle: () => void };
+  /** Opens with this side panel already out, as an album's "Contents" asks. */
+  openWith?: "contents";
+  /**
+   * Where photos can be re-dated: the date editor opens beside the photo, and this is told once
+   * a run has started, so the caller follows it; the viewer then closes, since the photo it shows
+   * is being replaced by its corrected copy.
+   */
+  onDateEditStarted?: () => void;
 };
 
 /**
@@ -166,6 +182,10 @@ export function Lightbox({
   items,
   index = -1,
   onJump,
+  detailsExtra,
+  hiding,
+  openWith,
+  onDateEditStarted,
 }: Props) {
   const t = useT();
   const neighbours = useCloudMedia(items, index, onJump);
@@ -191,6 +211,11 @@ export function Lightbox({
   // The right-click menu, and the "add to album" picker it can open.
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [pickingAlbum, setPickingAlbum] = useState(false);
+  // The photo the date editor is open for, beside the picture; closed on paging to another.
+  const [dateFor, setDateFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (dateFor && dateFor !== uid) setDateFor(null);
+  }, [uid, dateFor]);
   // A menu dismissed by a click-away must not also close the viewer: the menu closes on
   // the mousedown, so this brief window swallows the click that lands right after it.
   const suppressCloseUntil = useRef(0);
@@ -555,6 +580,16 @@ export function Lightbox({
       icon: <ShareIcon size={14} />,
       onSelect: () => setSharing(true),
     },
+    ...(hiding
+      ? [
+          {
+            key: "hide",
+            label: t(hiding.hidden ? "selection.unhide" : "selection.hide"),
+            icon: hiding.hidden ? <VisibilityIcon size={14} /> : <VisibilityOffIcon size={14} />,
+            onSelect: hiding.toggle,
+          },
+        ]
+      : []),
     {
       key: "trash",
       label: t("selection.trash"),
@@ -574,6 +609,23 @@ export function Lightbox({
   return (
     <ViewerShell
       itemKey={uid}
+      textSource={{ uid }}
+      initialSide={openWith}
+      aside={
+        dateFor === uid && onDateEditStarted ? (
+          <DateEditPanel
+            embedded
+            uids={[uid]}
+            status={null}
+            onStarted={() => {
+              setDateFor(null);
+              onDateEditStarted();
+              onClose();
+            }}
+            onClose={() => setDateFor(null)}
+          />
+        ) : undefined
+      }
       name={details?.name ?? ""}
       stage={stage}
       error={error}
@@ -658,6 +710,17 @@ export function Lightbox({
         </>
       }
       menuItems={[
+        ...(onDateEditStarted
+          ? [
+              {
+                key: "editDate",
+                label: t("selection.editDate"),
+                icon: <CalendarIcon size={14} />,
+                disabled: busy,
+                onSelect: () => setDateFor(uid),
+              },
+            ]
+          : []),
         {
           key: "offline",
           label: isOffline ? t("selection.offlineRemove") : t("selection.offlineAdd"),
@@ -710,6 +773,7 @@ export function Lightbox({
           </dl>
         )
       }
+      detailsExtra={detailsExtra}
     >
       {menuAt && (
         <ContextMenu

@@ -25,8 +25,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes, scryptSync } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initStore, isReady, storeDir } from "./store";
+import { dataKeyCopy, initStore, isReady, storeDir } from "./store";
 import {
+  convertToDeviceVault,
   createDeviceVault,
   createVault,
   unlockDeviceVault,
@@ -35,6 +36,11 @@ import {
   vaultMode,
   lockVault,
   setVaultMetaKey,
+  checkLocalLock,
+  checkVaultPassword,
+  clearLocalLock,
+  localLockKind,
+  setLocalLock,
 } from "./vault";
 
 // Point the store (and therefore vault.json) at a throwaway temp directory, and
@@ -147,5 +153,72 @@ describe("a vault that needs no password", () => {
     lockVault();
     expect(unlockDeviceVault()).toBe(false);
     expect(unlockVault("a password of mine")).toBe(true);
+  });
+});
+
+describe("a password vault turned into one this account opens", () => {
+  it("keeps its key, so everything sealed under it stays readable", () => {
+    createVault("the old proton password");
+    const before = dataKeyCopy();
+    expect(convertToDeviceVault()).toBe(true);
+    expect(vaultMode()).toBe("device");
+    lockVault();
+    expect(unlockVault("the old proton password")).toBe(false);
+    expect(unlockDeviceVault()).toBe(true);
+    expect(dataKeyCopy()?.equals(before!)).toBe(true);
+  });
+
+  it("does nothing to a vault that already needs no password, or with none open", () => {
+    createDeviceVault();
+    expect(convertToDeviceVault()).toBe(false);
+    createVault("a password");
+    lockVault();
+    expect(convertToDeviceVault()).toBe(false);
+    expect(vaultMode()).toBe("password");
+  });
+});
+
+describe("local lock (Hidden and the app lock without Windows Hello)", () => {
+  it("asks for the vault's password while the app has one, and takes no password of its own then", () => {
+    createVault("vault password 1");
+    expect(localLockKind()).toBe("vault");
+    expect(checkVaultPassword("vault password 1")).toBe(true);
+    expect(checkLocalLock("vault password 1")).toBe(true);
+    expect(checkLocalLock("wrong one!")).toBe(false);
+    expect(setLocalLock("another password")).toBe(false);
+  });
+
+  it("checks the vault password without opening or closing anything", () => {
+    createVault("vault password 2");
+    lockVault();
+    expect(checkVaultPassword("vault password 2")).toBe(true);
+    expect(isReady()).toBe(false);
+  });
+
+  it("has a password of its own beside a vault that needs none: set once, changed and taken away only with it", () => {
+    createDeviceVault();
+    expect(localLockKind()).toBe("none");
+    expect(checkLocalLock("")).toBe(false);
+    expect(setLocalLock("short")).toBe(false);
+    expect(setLocalLock("hidden pass 1")).toBe(true);
+    expect(localLockKind()).toBe("own");
+    expect(checkLocalLock("hidden pass 1")).toBe(true);
+    expect(checkLocalLock("hidden pass 2")).toBe(false);
+    expect(setLocalLock("hidden pass 2")).toBe(false);
+    expect(setLocalLock("hidden pass 2", "wrong pass")).toBe(false);
+    expect(setLocalLock("hidden pass 2", "hidden pass 1")).toBe(true);
+    expect(checkLocalLock("hidden pass 2")).toBe(true);
+    expect(clearLocalLock("hidden pass 1")).toBe(false);
+    expect(clearLocalLock("hidden pass 2")).toBe(true);
+    expect(localLockKind()).toBe("none");
+  });
+
+  it("keeps the password unreadable on disk", () => {
+    createDeviceVault();
+    setLocalLock("plain to see?");
+    const raw = readFileSync(join(storeDir(), "local-lock.json"));
+    expect(raw.toString("utf8")).not.toContain("salt");
+    expect(raw.toString("utf8")).not.toContain("plain to see?");
+    clearLocalLock("plain to see?");
   });
 });

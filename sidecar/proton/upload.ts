@@ -51,8 +51,12 @@ import exifr from "exifr";
 import sharp from "sharp";
 
 import { createAlbum, deleteAlbum, findAlbumByName, listAlbumPhotos } from "./albums.ts";
+import { compressForUpload, videoLaneBusy, wouldCompress, type PreparedCopy } from "./compression.ts";
+import { compressedUploadOf, rememberCompressedUpload } from "./compressedUploads.ts";
 import {
   discardStagedImport,
+  ensureFreeSpace,
+  importStagingDir,
   isStagedImport,
   isZip,
   planExport,
@@ -60,6 +64,9 @@ import {
   type ExportItem,
 } from "./importer.ts";
 import type { SidecarMeta } from "./takeout.ts";
+import { albumOfRel, downloadMyFiles, planMyFiles, sourcesToTrash } from "./myFilesImport.ts";
+import { dateFromName } from "./nameDate.ts";
+import { diag } from "./diag.ts";
 import { readMp4CreationTime } from "./mp4Date.ts";
 import { withRetry } from "./transient.ts";
 import { watchSlowUploads } from "./api.ts";
@@ -149,6 +156,10 @@ export type UploadItem = {
   /** While it uploads: the file's size, and how much of it has gone up. */
   size?: number;
   sent?: number;
+  /** While a lighter copy of it is being made: how far along, 0 to 1. */
+  compressing?: number;
+  /** Bytes the lighter copy that went up saved against the original. */
+  saved?: number;
 };
 
 /**
@@ -156,7 +167,7 @@ export type UploadItem = {
  * files waiting for the host's video frames, then being read into albums.
  */
 export type ImportState = {
-  phase: "unpacking" | "ready" | "planning" | "review";
+  phase: "downloading" | "unpacking" | "ready" | "planning" | "review";
   /** Bytes unpacked of the zip being unpacked, and its total. */
   done: number;
   total: number;
@@ -182,6 +193,12 @@ export type UploadStatus = {
   importing?: ImportState;
   /** Why the last import could not start, until the record is cleared. */
   importError?: string;
+  /** How a move from My files ended: originals sent to the Drive trash, and those kept. */
+  moveResult?: { moved: number; kept: number; failed: boolean };
+  /** Bytes the lighter copies saved, over the files in the record. */
+  saved?: number;
+  /** How many drops held nothing to upload, so the window can say so rather than wait. */
+  emptyDrops?: number;
 };
 
 type Group = {
@@ -222,14 +239,24 @@ type Group = {
   albumOnly?: boolean;
   /** Files the import's review already found new: no second duplicate check. */
   fresh?: Set<string>;
+  /**
+   * Lighter copies go up in place of the originals, as the compression settings ask. Not for a
+   * move from My files, where the original itself goes to the trash.
+   */
+  compress?: boolean;
 };
 
-/** Unpacked exports shared by the groups read from them. */
-type Staging = { roots: string[]; groupsLeft: number };
+/** Unpacked exports shared by the groups read from them, and what runs once all are done. */
+type Staging = { roots: string[]; groupsLeft: number; onDone?: () => Promise<void> };
 
 /** Counts a group off its unpacked export, and deletes the export after the last one. */
 async function releaseStaging(staging: Staging): Promise<void> {
   if (--staging.groupsLeft > 0) return;
+  try {
+    await staging.onDone?.();
+  } catch (e) {
+    process.stderr.write(`[import] after the import: ${(e as Error).name ?? "error"}\n`);
+  }
   for (const root of staging.roots) await discardStagedImport(root);
 }
 
@@ -270,6 +297,24 @@ const DROP_DIR = "pfp-drop";
  */
 export function isStagedDrop(path: string): boolean {
   return isAbsolute(path) && basename(dirname(dirname(path))) === DROP_DIR;
+}
+
+/** The staged copies of drive drops that went up lighter, until the host takes them. */
+const dropReplaced: string[] = [];
+
+function noteDropReplaced(path: string): void {
+  // Bounded: a host that never asks (an older one, or none) does not grow this for good.
+  if (dropReplaced.length >= 5000) dropReplaced.shift();
+  dropReplaced.push(path);
+}
+
+/**
+ * The staged paths of the File Explorer drops that went up as lighter copies since the host
+ * last asked, so it can put the file in the folder to the Recycle Bin and let the photo's own
+ * copy take its place. Each is handed over once.
+ */
+export function takeDropReplaced(): string[] {
+  return dropReplaced.splice(0, dropReplaced.length);
 }
 
 /** Delete one staged copy and the folder it was staged in. Never throws. */
@@ -414,11 +459,18 @@ export function cancelUpload(): void {
 export function clearFinishedUploads(): void {
   if (status.running || status.importing) return;
   status.importError = undefined;
+  status.moveResult = undefined;
   status.items = [];
   status.total = 0;
   status.done = 0;
   status.skipped = 0;
   status.failed = 0;
+  status.saved = undefined;
+}
+
+/** Whether a file of this name is a photo or video the upload takes. */
+export function isMediaName(name: string): boolean {
+  return !!mediaTypeOf(name);
 }
 
 function mediaTypeOf(path: string): string | null {
@@ -712,9 +764,12 @@ export async function thumbnailPair(source: ReturnType<typeof sharp>): Promise<a
  * heavy the picture shrinks by a quarter and the steps start again.
  */
 async function jpegWithinBudget(source: ReturnType<typeof sharp>, maxPx: number, maxBytes: number): Promise<Buffer> {
+  // A JPEG has no transparency: a see-through picture (a screenshot, a signature) is laid on
+  // white, as a viewer shows it, rather than on the black its empty pixels hold.
   let { data, info } = await source
     .clone()
     .resize(maxPx, maxPx, { fit: "inside", withoutEnlargement: true })
+    .flatten({ background: "#ffffff" })
     .raw()
     .toBuffer({ resolveWithObject: true });
   for (;;) {
@@ -753,8 +808,13 @@ async function uploadOne(
     known?: string;
     fresh?: boolean;
     onProgress?: (sent: number, size: number) => void;
+    /**
+     * Make a lighter copy to upload in its place. The copy made on a first try is kept here and
+     * used again by the next, so a retry does not compress twice.
+     */
+    compress?: { copy?: PreparedCopy | null; onProgress?: (value: number) => void };
   } = {},
-): Promise<{ uid: string | null; duplicates: string[] }> {
+): Promise<{ uid: string | null; duplicates: string[]; saved?: number; lighter?: boolean }> {
   const name = basename(path);
   const mediaType = mediaTypeOf(path);
   if (!mediaType) throw new Error("unsupported file type");
@@ -765,11 +825,19 @@ async function uploadOne(
   options.onProgress?.(0, info.size);
   const sha1 = await sha1Of(path);
 
-  // A file the import's review has just found new is not asked about a second time.
+  // A file the import's review has just found new is not asked about a second time. The
+  // original is asked about before any copy is made: one another device uploaded as it is is
+  // in the library already, and goes up a second time in no form.
   const duplicates: string[] = options.fresh
     ? []
     : await photos.findPhotoDuplicates(name, async () => sha1, signal);
   if (duplicates.length > 0) return { uid: null, duplicates };
+  // A lighter copy of this very file went up from here before. A video's copy need not come out
+  // the same bytes twice, so the library's check by content could miss it: asked here instead.
+  if (options.compress && !options.fresh) {
+    const earlier = compressedUploadOf(sha1);
+    if (earlier && (await stillInLibrary(photos, earlier))) return { uid: null, duplicates: [earlier] };
+  }
 
   const exif = await exifFactsOf(path);
   // Capture time, in order of trust: the file's own EXIF date; for a video with no EXIF
@@ -784,28 +852,57 @@ async function uploadOne(
   }
   if (!captureTime) captureTime = info.mtime;
 
+  // The lighter copy, made once; the same file at the same settings makes the same copy, so one
+  // uploaded from here before is found in the library like the original would be.
+  let copy: PreparedCopy | null = null;
+  if (options.compress) {
+    if (options.compress.copy === undefined) {
+      options.compress.copy = await compressForUpload(path, mediaType, captureTime, signal, options.compress.onProgress);
+    }
+    copy = options.compress.copy;
+  }
+  let sendSha1 = sha1;
+  if (copy) {
+    sendSha1 = await sha1Of(copy.path);
+    const already: string[] = await photos.findPhotoDuplicates(copy.name, async () => sendSha1, signal);
+    if (already.length > 0) return { uid: null, duplicates: already, lighter: true };
+  }
+  const sendPath = copy?.path ?? path;
+  const sendSize = copy?.size ?? info.size;
+  options.onProgress?.(0, sendSize);
+
   // Dimensions come from whichever side actually opened the file. The shell answered for
   // a video and for the stills sharp has no decoder for; everything else sharp reads
   // itself, off the same file it is about to thumbnail. The two never cover the same
   // file, so neither can contradict the other.
-  const dims =
+  const shellDims =
     shellMedia?.width && shellMedia?.height
       ? { width: shellMedia.width, height: shellMedia.height }
-      : sharpCanDecode(path, mediaType)
-        ? await stillDimensions(path)
-        : null;
+      : null;
+  const dims =
+    copy && copy.mediaType.startsWith("image/")
+      ? await stillDimensions(copy.path)
+      : shellDims
+        ? copy
+          ? { width: Math.round(shellDims.width * copy.scale), height: Math.round(shellDims.height * copy.scale) }
+          : shellDims
+        : sharpCanDecode(path, mediaType)
+          ? await stillDimensions(path)
+          : null;
 
-  const thumbnails = await makeThumbnails(path, mediaType, framePath);
+  const thumbnails = copy?.mediaType.startsWith("image/")
+    ? await makeThumbnails(copy.path, copy.mediaType, framePath)
+    : await makeThumbnails(path, mediaType, framePath);
 
   // Blocks here until the SDK's upload queue has capacity. The tags ride along with the
   // rest of the metadata and the SDK commits them with the revision, which is the one
   // moment they can be set without a second round trip.
   const uploader = await photos.getFileUploader(
-    name,
+    copy?.name ?? name,
     {
-      mediaType,
-      expectedSize: info.size,
-      expectedSha1: sha1,
+      mediaType: copy?.mediaType ?? mediaType,
+      expectedSize: sendSize,
+      expectedSha1: sendSha1,
       modificationTime: info.mtime,
       captureTime,
       tags: [
@@ -832,13 +929,25 @@ async function uploadOne(
 
   // The SDK wants a web ReadableStream; Node gives us one straight off the disk
   // stream, so a large photo is never buffered in memory.
-  const stream = Readable.toWeb(createReadStream(path)) as any;
+  const stream = Readable.toWeb(createReadStream(sendPath)) as any;
   // The SDK counts what has gone up, a block at a time, thumbnails included.
   const controller = await uploader.uploadFromStream(stream, thumbnails, (sent: number) =>
-    options.onProgress?.(Math.min(sent, info.size), info.size),
+    options.onProgress?.(Math.min(sent, sendSize), sendSize),
   );
   const { nodeUid } = await controller.completion();
-  return { uid: nodeUid, duplicates: [] };
+  if (copy) rememberCompressedUpload(sha1, nodeUid);
+  return { uid: nodeUid, duplicates: [], saved: copy ? copy.sourceSize - copy.size : undefined, lighter: !!copy };
+}
+
+/** Whether the photo `uid` is still in the library: there, and not in the trash. */
+async function stillInLibrary(photos: any, uid: string): Promise<boolean> {
+  try {
+    const got = await photos.getNode(uid);
+    const node = got?.ok === false ? null : (got?.value ?? got);
+    return !!node && !node.trashTime;
+  } catch {
+    return false;
+  }
 }
 
 /** Turns dropped paths into groups. A folder is one group, loose files another. */
@@ -973,6 +1082,7 @@ async function drain(photos: any): Promise<void> {
           }
           const item = status.items[group.itemOf?.get(file) ?? group.startIndex + i];
           if (abort.signal.aborted) return;
+          const fileStarted = Date.now();
           item.status = "uploading";
           const progress = (sent: number, size: number) => {
             item.sent = sent;
@@ -980,10 +1090,21 @@ async function drain(photos: any): Promise<void> {
           };
           const video = group.related?.get(file);
           let mainUid: string | null = null;
+          // In the library as a lighter copy, uploaded now or found there.
+          let wentLighter = false;
+          // Not a Live Photo's still: its video is matched to it as it was taken.
+          const compress: { copy?: PreparedCopy | null; onProgress: (value: number) => void } | undefined =
+            group.compress && !video
+            ? {
+                onProgress: (value: number) => {
+                  item.compressing = value;
+                },
+              }
+            : undefined;
           try {
             const key = frameKey(file);
             let attempt = 0;
-            const { uid, duplicates } = await withRetry(
+            const { uid, duplicates, saved, lighter } = await withRetry(
               () =>
                 uploadOne(
                   photos,
@@ -1000,18 +1121,24 @@ async function drain(photos: any): Promise<void> {
                     fresh: attempt++ === 0 && group.fresh?.has(file),
                     extraTags: video ? [PhotoTag.LivePhotos] : [],
                     onProgress: progress,
+                    compress,
                   },
                 ),
               UPLOAD_RETRY_MS,
               abort.signal,
             );
             mainUid = uid ?? duplicates[0] ?? null;
+            wentLighter = !!lighter && mainUid !== null;
             if (mainUid) group.uidOf?.set(file, mainUid);
             if (uid) {
               uploaded.push(uid);
               intoAlbum(uid);
               item.status = "done";
               status.done++;
+              if (saved && saved > 0) {
+                item.saved = saved;
+                status.saved = (status.saved ?? 0) + saved;
+              }
             } else {
               // Bytes the library already has, from a folder uploaded again or a photo
               // copied into an album folder in the file manager: what was asked for is
@@ -1027,6 +1154,18 @@ async function drain(photos: any): Promise<void> {
             item.error = failureText(e);
             status.failed++;
           } finally {
+            item.compressing = undefined;
+            const made = compress?.copy;
+            if (made) await rm(made.path, { force: true }).catch(() => {});
+            diag.record("upload", "file", Date.now() - fileStarted, item.status !== "failed", {
+              outcome: item.status,
+              kb: Math.round((item.size ?? 0) / 1024),
+            });
+            // A file put in the File Explorer folder that went up as a lighter copy: the one
+            // in the folder is no longer the photo's, so the host takes it out for the photo.
+            if (group.fromDrive && wentLighter && process.platform === "win32") {
+              noteDropReplaced(file);
+            }
             // Gone only once the photo is in the library, uploaded now or already there.
             // A failed one stays staged, since a move into the drive has already deleted
             // the original, and the host uploads it again at the next unlock.
@@ -1088,12 +1227,26 @@ async function drain(photos: any): Promise<void> {
           }
         };
         let nextFile = 0;
+        // Videos put off while another one is being transcoded, so the photos behind them go on.
+        const putOff: number[] = [];
+        const waitsForLane = (file: string) =>
+          !!group.compress && !group.related?.has(file) && (mediaTypeOf(file)?.startsWith("video/") ?? false) && wouldCompress(mediaTypeOf(file)!);
         // On a slow line every worker but the first stops once its file is done.
         const worker = async (n: number) => {
           for (;;) {
             if (n > 0 && slowLink) return;
-            const i = nextFile++;
-            if (i >= group.files.length || abort.signal.aborted) return;
+            if (abort.signal.aborted) return;
+            let i: number | undefined;
+            if (nextFile < group.files.length) {
+              i = nextFile++;
+              if (waitsForLane(group.files[i]) && videoLaneBusy() && nextFile < group.files.length) {
+                putOff.push(i);
+                continue;
+              }
+            } else {
+              i = putOff.shift();
+            }
+            if (i === undefined) return;
             await processFile(group.files[i], i);
           }
         };
@@ -1197,6 +1350,7 @@ export function startUpload(
           ]
         : planned;
     if (groups.length === 0) {
+      status.emptyDrops = (status.emptyDrops ?? 0) + 1;
       // Nothing in this drop is uploadable, so nothing will ever spend these.
       for (const frame of Object.values(frames)) {
         await rm(frame, { force: true }).catch(() => {});
@@ -1208,6 +1362,7 @@ export function startUpload(
       group.startIndex = status.items.length;
       group.frames = framesForFiles(group.files, frames);
       group.media = framesForFiles(group.files, media);
+      group.compress = true;
       for (const file of group.files) {
         status.items.push({ name: basename(file), album: group.album, status: "pending" });
       }
@@ -1252,6 +1407,8 @@ export function startDropUpload(
     albumUid: albumUid || undefined,
     fromDrive: true,
     favorite,
+    // As every upload from the app: the compression settings decide.
+    compress: true,
   };
   const kept = new Set(group.frames.values());
   for (const frame of Object.values(frames)) {
@@ -1265,8 +1422,14 @@ export function startDropUpload(
   if (!draining) void drain(photos);
 }
 
+/**
+ * Folders brought in from My files: the Drive file each downloaded copy came from, the album
+ * each goes into, and whether the originals go to the Drive trash once they are in Photos.
+ */
+type MyFilesJob = { client: any; move: boolean; sourceOf: Map<string, string>; albumOf: Map<string, string | null> };
+
 /** The export made ready and waiting for the host's frames, if one is. */
-let pendingImport: { roots: string[]; staged: string[] } | null = null;
+let pendingImport: { roots: string[]; staged: string[]; myFiles?: MyFilesJob } | null = null;
 let importAbort: AbortController | null = null;
 
 /**
@@ -1318,6 +1481,106 @@ export function startImport(paths: string[]): void {
   })();
 }
 
+/**
+ * Starts bringing in the photos and videos of folders in My files: they download into the
+ * staging folder, keeping the folders, and the import then reads them as it reads an export,
+ * each chosen folder as an album, through the same review. With `move`, each original goes
+ * to the Drive trash once its photo is in the library. Returns at once.
+ */
+export function startMyFilesImport(
+  client: any,
+  folders: { uid: string; name: string }[],
+  files: { uid: string; folder: string }[],
+  move: boolean,
+): void {
+  if (status.importing) throw new Error("An import is already being prepared.");
+  if (folders.length === 0 && files.length === 0) return;
+  status.importError = undefined;
+  status.moveResult = undefined;
+  status.importing = { phase: "downloading", done: 0, total: 0, part: 0, parts: 0 };
+  const controller = new AbortController();
+  importAbort = controller;
+
+  void (async () => {
+    let root: string | null = null;
+    try {
+      const items = await planMyFiles(client, folders, (name) => !!mediaTypeOf(name), controller.signal, files);
+      if (items.length === 0) throw new Error("No photos or videos were found in the chosen folders.");
+      const total = items.reduce((sum, item) => sum + item.size, 0);
+      diag.log("myfiles", "plan", { folders: folders.length, files_chosen: files.length, items: items.length, mb: Math.round(total / 1048576), move });
+      await ensureFreeSpace(total);
+      root = join(importStagingDir(), `myfiles-${Date.now().toString(36)}`);
+      const sourceOf = new Map<string, string>();
+      const albumOf = new Map<string, string | null>();
+      let done = 0;
+      let fetched = 0;
+      status.importing = { phase: "downloading", done: 0, total, part: 0, parts: items.length };
+      await downloadMyFiles(
+        client,
+        items,
+        root,
+        (item, path) => {
+          sourceOf.set(path, item.nodeUid);
+          albumOf.set(path, albumOfRel(item.rel));
+          done += item.size;
+          fetched++;
+          status.importing = { phase: "downloading", done, total, part: fetched, parts: items.length };
+          process.stderr.write(`[import] my files: ${fetched}/${items.length} downloaded
+`);
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted) throw new Error("cancelled");
+      pendingImport = { roots: [root], staged: [root], myFiles: { client, move, sourceOf, albumOf } };
+      status.importing = { phase: "ready", done: 0, total: 0, part: 0, parts: 0, roots: [root] };
+    } catch (e) {
+      process.stderr.write(`[import] my files stopped: ${(e as Error).name}: ${(e as Error).message}
+`);
+      if (root) await discardStagedImport(root);
+      status.importing = undefined;
+      if (!controller.signal.aborted) status.importError = (e as Error).message;
+    } finally {
+      if (importAbort === controller) importAbort = null;
+    }
+  })();
+}
+
+/**
+ * When a photo brought in from My files was taken: its own EXIF date, a video's recorded time,
+ * the date its file name gives, or else when the file was last changed on Drive.
+ */
+async function capturedAt(path: string): Promise<number> {
+  const exif = await exifFactsOf(path);
+  if (exif.captureTime) return exif.captureTime.getTime();
+  if ((mediaTypeOf(path) ?? "").startsWith("video/")) {
+    const recorded = await readMp4CreationTime(path).catch(() => null);
+    if (recorded) return recorded.getTime();
+  }
+  return dateFromName(basename(path)) ?? (await stat(path)).mtimeMs;
+}
+
+/**
+ * Sends to the Drive trash the originals whose photos are in the library now: each file that
+ * uploaded or was found already there, once its photo has been looked up and seen.
+ */
+async function trashMovedOriginals(
+  photos: any,
+  job: MyFilesJob,
+  outcomes: { source: string; settled: boolean; photo: string | null }[],
+): Promise<void> {
+  const asked = [...new Set(outcomes.filter((o) => o.settled && o.photo).map((o) => o.photo!))];
+  const seen = new Set<string>();
+  for await (const node of photos.iterateNodes(asked)) {
+    if (node?.uid && !node.missingUid && !node.trashTime) seen.add(node.uid);
+  }
+  const toTrash = sourcesToTrash(outcomes, seen);
+  let moved = 0;
+  for await (const result of job.client.trashNodes(toTrash)) if (result?.ok) moved++;
+  const kept = new Set(outcomes.map((o) => o.source)).size - moved;
+  status.moveResult = { moved, kept, failed: moved < toTrash.length };
+  process.stderr.write(`[import] moved from My files: ${moved}, kept: ${kept}\n`);
+}
+
 /** One item of an export under review, as the review screen draws it. */
 export type ReviewItem = {
   id: number;
@@ -1352,6 +1615,7 @@ let review: {
   /** Files the check asked about and the library does not have: their upload skips asking. */
   verifiedNew: Set<string>;
   abort: AbortController;
+  myFiles?: MyFilesJob;
 } | null = null;
 
 /**
@@ -1381,6 +1645,12 @@ export function prepareImport(
   void (async () => {
     try {
       const plan = await planExport(job.roots, (name) => !!mediaTypeOf(name));
+      if (job.myFiles) {
+        for (const item of plan.items) {
+          item.album = job.myFiles.albumOf.get(item.file) ?? null;
+          item.sidecar = { favorited: false, ...item.sidecar, takenMs: item.sidecar?.takenMs ?? (await capturedAt(item.file)) };
+        }
+      }
       if (plan.items.length === 0) {
         for (const frame of Object.values(frames)) await rm(frame, { force: true }).catch(() => {});
         for (const root of job.staged) await discardStagedImport(root);
@@ -1413,6 +1683,7 @@ export function prepareImport(
         found: new Map<string, string>(),
         verifiedNew: new Set<string>(),
         abort: new AbortController(),
+        myFiles: job.myFiles,
       };
       review = current;
       status.importing = {
@@ -1525,8 +1796,27 @@ export function confirmImport(photos: any, exclude: number[] = [], albums = true
   // What the review checked and found new; anything unchecked, or whose check failed, is
   // checked at upload as before.
   const fresh = current.verifiedNew;
-  const staging =
+  const staging: Staging | undefined =
     current.staged.length > 0 ? { roots: current.staged, groupsLeft: byAlbum.size } : undefined;
+  // Each file's row in the status, for how it ended.
+  const rowOf = new Map<string, number>();
+  const job = current.myFiles;
+  if (staging && job?.move) {
+    staging.onDone = () => {
+      const outcomes: { source: string; settled: boolean; photo: string | null }[] = [];
+      const photoOf = (file: string) => uidOf.get(file) ?? current.found.get(file) ?? null;
+      for (const item of kept) {
+        for (const file of item.liveVideo ? [item.file, item.liveVideo] : [item.file]) {
+          const source = job.sourceOf.get(file);
+          const state = status.items[rowOf.get(file) ?? -1]?.status;
+          // A Live Photo's video joined to its photo is that photo; apart, it is its own.
+          const photo = file === item.liveVideo && live ? photoOf(item.file) : photoOf(file);
+          if (source) outcomes.push({ source, settled: state === "done" || state === "skipped", photo });
+        }
+      }
+      return trashMovedOriginals(photos, job, outcomes);
+    };
+  }
 
   for (const [key, list] of byAlbum) {
     const album = key ? list[0].album : null;
@@ -1536,11 +1826,13 @@ export function confirmImport(photos: any, exclude: number[] = [], albums = true
     for (const item of list) {
       files.push(item.file);
       itemOf.set(item.file, status.items.length);
+      rowOf.set(item.file, status.items.length);
       status.items.push({ name: basename(item.file), album, status: "pending" });
       if (item.liveVideo) {
         if (live) related.set(item.file, item.liveVideo);
         else files.push(item.liveVideo);
         itemOf.set(item.liveVideo, status.items.length);
+        rowOf.set(item.liveVideo, status.items.length);
         status.items.push({ name: basename(item.liveVideo), album, status: "pending" });
       }
     }
@@ -1558,6 +1850,8 @@ export function confirmImport(photos: any, exclude: number[] = [], albums = true
       itemOf,
       uidOf,
       fresh,
+      // A move from My files trashes each original once it is in: what is kept is what went up.
+      compress: !job?.move,
     });
   }
   // The other albums a photo was copied into, once every photo has gone up: by then each

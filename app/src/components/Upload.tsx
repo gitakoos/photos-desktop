@@ -21,9 +21,13 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { isWindows } from "../lib/platform";
 import type { UploadItem, UploadStatus } from "../hooks/useUploads";
 import { useT } from "../lib/i18n";
+import { formatBytes } from "../lib/format";
 import { ContextMenu, type MenuAt } from "./ContextMenu";
 import { CheckIcon, ChevronLeftIcon, SpinnerIcon, UploadArrowIcon } from "./icons";
 import type { SyncInfo } from "../lib/mountActivity";
@@ -44,6 +48,8 @@ type Props = {
   running: boolean;
   /** A refused upload, from here or from a drop anywhere else in the window. */
   error: string;
+  /** The last drop held no photo or video. */
+  nothingFound: boolean;
   start: (paths: string[]) => Promise<void>;
   /** Imports a Google Takeout or Ente export, from zips or a folder. */
   startImport: (paths: string[]) => Promise<void>;
@@ -66,8 +72,10 @@ function itemShown(it: UploadItem, show: Show): boolean {
   return it.status === show;
 }
 
-/** How far an uploading file is, 0..1, or null before its first block is out. */
+/** How far an uploading file is, 0..1, or null before its first block is out; while its lighter
+ *  copy is being made, how far that is. */
 function itemProgress(it: UploadItem): number | null {
+  if (it.status === "uploading" && it.compressing !== undefined) return it.compressing;
   return it.status === "uploading" && it.size && it.sent ? Math.min(1, it.sent / it.size) : null;
 }
 
@@ -114,13 +122,32 @@ function StateMark({ item }: { item: UploadItem }) {
  * belongs to the queue: where the whole of it stands, whose counts also pick which rows
  * show, and the files, each with its state at the front.
  */
-export function Upload({ status, running, error, start, startImport, cancel, clear, sync, onClose }: Props) {
+export function Upload({ status, running, error, nothingFound, start, startImport, cancel, clear, sync, onClose }: Props) {
   const t = useT();
   // Only the file picker's own failures. A refused upload belongs to `useUploads`,
   // which every way in shares, so both routes report through the one line below.
   const [pickError, setPickError] = useState("");
   const [show, setShow] = useState<Show>("all");
   const [importMenu, setImportMenu] = useState<MenuAt<null> | null>(null);
+  // Photos being copied off a camera or phone before they upload: how many of how many.
+  const [deviceCopy, setDeviceCopy] = useState<{ copied: number; total: number } | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listen<{ copied: number; total: number }>("device-copy", (e) => {
+      setDeviceCopy(e.payload.copied < e.payload.total ? e.payload : null);
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Escape goes back, as the crumb does, unless a dialog or a menu of its own is up.
   useEffect(() => {
@@ -135,17 +162,23 @@ export function Upload({ status, running, error, start, startImport, cancel, cle
   async function pick(directory: boolean) {
     setPickError("");
     try {
-      const selected = await open({
-        multiple: !directory,
-        directory,
-        filters: directory
-          ? undefined
-          : [{ name: t("upload.filterName"), extensions: MEDIA_EXTENSIONS }],
-      });
-      if (!selected) return;
+      // On Windows the app's own picker, which also reads a camera or phone over USB:
+      // what it picks there has no path, and the plugin's picker reported it as nothing.
+      const selected = isWindows
+        ? await invoke<string[]>("pick_for_upload", { directory, filterName: t("upload.filterName") })
+        : await open({
+            multiple: !directory,
+            directory,
+            filters: directory
+              ? undefined
+              : [{ name: t("upload.filterName"), extensions: MEDIA_EXTENSIONS }],
+          });
+      if (!selected || selected.length === 0) return;
       await start(Array.isArray(selected) ? selected : [selected as string]);
     } catch (e) {
       setPickError(String(e));
+    } finally {
+      setDeviceCopy(null);
     }
   }
 
@@ -167,7 +200,14 @@ export function Upload({ status, running, error, start, startImport, cancel, cle
   const importing = status.importing;
   const importLine = !importing
     ? ""
-    : importing.phase === "unpacking" && importing.total > 0
+    : importing.phase === "downloading" && importing.parts > 0
+      ? t("upload.myFilesDownloading", {
+          part: importing.part,
+          parts: importing.parts,
+          done: megabytes(importing.done),
+          total: megabytes(importing.total),
+        })
+      : importing.phase === "unpacking" && importing.total > 0
       ? t("upload.importUnpacking", {
           part: importing.part,
           parts: importing.parts,
@@ -178,9 +218,15 @@ export function Upload({ status, running, error, start, startImport, cancel, cle
 
   const settled = status.done + status.skipped + status.failed;
   const waiting = Math.max(0, status.total - settled);
-  const progress = status.total > 0 ? settled / status.total : 0;
+  const progress =
+    status.total > 0
+      ? settled / status.total
+      : importing?.phase === "downloading" && importing.total > 0
+        ? importing.done / importing.total
+        : 0;
+  const moved = status.moveResult;
   const busy = status.total > 0 || status.items.length > 0 || !!importing;
-  const message = error || pickError || status.importError;
+  const message = error || pickError || (nothingFound ? t("upload.nothingFound") : "") || status.importError;
 
   const counts: Record<Exclude<Show, "all">, number> = {
     done: status.done,
@@ -269,6 +315,11 @@ export function Upload({ status, running, error, start, startImport, cancel, cle
             <p className="up-droptitle">{t("upload.dropHint")}</p>
             <p className="up-dropsub">{t("upload.dropSub")}</p>
             <div className="up-actions">{pickers}</div>
+            {deviceCopy && (
+              <p className="up-dropsub">
+                {t("upload.deviceCopying", { copied: deviceCopy.copied, total: deviceCopy.total })}
+              </p>
+            )}
           </div>
 
           {message && <p className="up-error">{message}</p>}
@@ -302,6 +353,14 @@ export function Upload({ status, running, error, start, startImport, cancel, cle
                       })}
                 </span>
                 {importing && status.total > 0 && <span className="up-sumsub">{importLine}</span>}
+                {moved && !running && (
+                  <span className="up-sumsub">
+                    {t("upload.myFilesMoved", { moved: moved.moved, kept: moved.kept })}
+                  </span>
+                )}
+                {!!status.saved && status.saved > 0 && (
+                  <span className="up-sumsub">{t("upload.compressSaved", { size: formatBytes(status.saved) })}</span>
+                )}
               </span>
               <span className="up-spacer" />
               <button className="up-btn ghost small" onClick={running || importing ? cancel : clear}>
@@ -371,9 +430,11 @@ export function Upload({ status, running, error, start, startImport, cancel, cle
                       </span>
                       <span className="up-state">
                         {it.status === "uploading"
-                          ? p !== null
-                            ? `${Math.floor(p * 100)}%`
-                            : t("upload.statusUploading")
+                          ? it.compressing !== undefined
+                            ? t("upload.statusCompressing", { n: Math.floor(it.compressing * 100) })
+                            : p !== null
+                              ? `${Math.floor(p * 100)}%`
+                              : t("upload.statusUploading")
                           : it.status === "skipped"
                             ? t("upload.statusSkipped")
                             : it.status === "failed"

@@ -28,9 +28,10 @@
  *   Copyright (c) 2021 the YOLOv5-face contributors
  */
 
-// Finds where the faces are in a photo, for the editor's Hide faces tool: the phone's own
-// detector, run once per press of Detect. Only where faces are, never who they are.
+// Finds where the faces are in a photo: the phone's own detector, for the editor's Hide faces
+// tool and for the face scan, which hands what it finds on to the recognition model.
 
+import { markGpuFailed, openModel, type Accel } from "./inference.ts";
 import { pinnedModel } from "./pinnedModel.ts";
 
 /** The YOLOv5-face detector the phone uses, pinned to the release's bytes. */
@@ -54,10 +55,12 @@ export const FACE_NMS_IOU = 0.4;
 /** How long the loaded detector is kept after the last run. */
 const DETECTOR_IDLE_MS = 2 * 60 * 1000;
 
-/** One face, in the input square's pixels: its box, its two eyes, and how sure the network is. */
+/** One face, in the input square's pixels: its box, its two eyes, all five landmarks (left eye,
+ *  right eye, nose, left and right mouth corner, x then y), and how sure the network is. */
 export type FaceHit = {
   box: [number, number, number, number];
   eyes: [number, number, number, number];
+  points: number[];
   score: number;
 };
 
@@ -77,6 +80,7 @@ export function decodeFaces(output: Float32Array, threshold = FACE_SCORE_THRESHO
       box: [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
       // The landmarks come in the ArcFace order: left eye, right eye, nose, mouth corners.
       eyes: [output[b + 5], output[b + 6], output[b + 7], output[b + 8]],
+      points: Array.from(output.subarray(b + 5, b + 15)),
       score,
     });
   }
@@ -122,6 +126,9 @@ export function toPlanes(rgb: Uint8Array, side = FACE_INPUT): Float32Array {
 const model = pinnedModel(FACE_MODEL, "faces");
 
 export const faceModelStatus = () => model.status();
+export const faceModelSize = model.size;
+export const faceModelPath = () => model.path();
+export const faceModelIntact = () => model.intact();
 export const startFaceModelDownload = () => model.startDownload();
 export const removeFaceModel = () => {
   closeDetector();
@@ -129,6 +136,7 @@ export const removeFaceModel = () => {
 };
 
 let session: any = null;
+let sessionAccel: Accel = "cpu";
 let idle: ReturnType<typeof setTimeout> | null = null;
 
 function closeDetector(): void {
@@ -148,17 +156,21 @@ export async function detectFaces(rgbBase64: string): Promise<FaceHit[] | null> 
   if (rgb.length !== FACE_INPUT * FACE_INPUT * 3) throw new Error("the picture is not the detector's size");
   if (!(await model.intact())) return null;
   const ort = await import("onnxruntime-node");
-  if (!session) {
-    session = await ort.InferenceSession.create(model.path(), {
-      graphOptimizationLevel: "all",
-      executionProviders: ["cpu"],
-      logSeverityLevel: 3,
-    });
-  }
   if (idle) clearTimeout(idle);
   idle = setTimeout(closeDetector, DETECTOR_IDLE_MS);
   const input = new ort.Tensor("float32", toPlanes(new Uint8Array(rgb)), [1, 3, FACE_INPUT, FACE_INPUT]);
-  const result = await session.run({ [session.inputNames[0]]: input });
-  const output = result[session.outputNames[0]].data as Float32Array;
-  return suppressFaces(decodeFaces(output));
+  for (;;) {
+    if (!session) ({ session, accel: sessionAccel } = await openModel(model.path(), false));
+    try {
+      const result = await session.run({ [session.inputNames[0]]: input });
+      const output = result[session.outputNames[0]].data as Float32Array;
+      return suppressFaces(decodeFaces(output));
+    } catch (e) {
+      // A card that fails mid-run (a driver reset) hands the work to the processor once.
+      if (sessionAccel !== "gpu") throw e;
+      markGpuFailed((e as Error)?.name ?? "run failed");
+      closeDetector();
+      idle = setTimeout(closeDetector, DETECTOR_IDLE_MS);
+    }
+  }
 }

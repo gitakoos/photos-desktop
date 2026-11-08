@@ -21,9 +21,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { photoSpan } from "../lib/albumSpan";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
-import { downloadMessage, downloadPhotos, explorerMode, type SaveProgress } from "../lib/download";
+import { downloadMessage, downloadPhotos, type SaveProgress } from "../lib/download";
 import { pinOffline, unpinOffline } from "../lib/offline";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { useThumbnails } from "../hooks/useThumbnails";
@@ -34,13 +35,15 @@ import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
 import { Lightbox } from "../components/Lightbox";
 import { Confirm } from "../components/Confirm";
 import { ContextMenu, type MenuAction, type MenuAt } from "../components/ContextMenu";
-import { AlbumFreeUpDialog, AlbumPicker, NameDialog } from "../components/AlbumDialogs";
+import { AlbumPicker, NameDialog } from "../components/AlbumDialogs";
 import { ShareDialog } from "../components/ShareDialog";
 import {
+  CalendarIcon,
   CloudIcon,
   DownloadIcon,
   FolderOpenIcon,
   HeartIcon,
+  ImageIcon,
   LibraryAddIcon,
   LibraryRemoveIcon,
   OfflinePinIcon,
@@ -48,6 +51,7 @@ import {
   TrashIcon,
 } from "../components/icons";
 import { useT } from "../lib/i18n";
+import { isWindows } from "../lib/platform";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
 
 const PREFETCH_RADIUS = 2;
@@ -82,10 +86,15 @@ export function Albums({
   onAlbumContext,
   onData,
   onPhotoUids,
+  onSpan,
+  onEditDate,
+  onDateEditStarted,
+  contentsRequest = 0,
   query = "",
   sort = "activity",
   favoriteUids,
   onFavoriteChanged,
+  hidden,
 }: {
   cellSize: number;
   /** The album LIST card min-width in px, from the shell's album zoom (Ctrl+wheel). */
@@ -111,6 +120,14 @@ export function Albums({
   /** The open album's photo uids, lifted so the shell's top-bar Download can act on
    *  the whole album. Reported as the album loads, and cleared to [] on the list. */
   onPhotoUids?: (uids: string[]) => void;
+  /** The open album's first and last capture time, for its header; null while loading or empty. */
+  onSpan?: (span: [number, number] | null) => void;
+  /** Opens the date editor for these photos. */
+  onEditDate?: (uids: string[]) => void;
+  /** A date change its viewer started, for the caller to follow. */
+  onDateEditStarted?: () => void;
+  /** Raised by the album's More menu: opens the viewer on its first photo with the contents list. */
+  contentsRequest?: number;
   /** The album-list search query (filters by name) and the sort order, owned by the shell. */
   query?: string;
   sort?: AlbumSort;
@@ -122,74 +139,64 @@ export function Albums({
   favoriteUids?: Set<string>;
   /** A heart flipped here, so the shell's timeline keeps the same state. */
   onFavoriteChanged?: (uid: string, favorite: boolean) => void;
+  /**
+   * What is hidden: a hidden album stays off the list, and a hidden photo out of any album
+   * that is not itself hidden. A hidden album, opened from the Hidden page, shows them all.
+   */
+  hidden?: { isPhoto: (uid: string) => boolean; isAlbum: (uid: string) => boolean; version: number };
 }) {
   const t = useT();
   const [albums, setAlbums] = useState<Album[]>(initial ?? []);
-  const [photos, setPhotos] = useState<AlbumPhoto[]>([]);
+  const [allPhotos, setPhotos] = useState<AlbumPhoto[]>([]);
+  const openHidden = !!open && !!hidden?.isAlbum(open.uid);
+  const photos = useMemo(
+    () => (hidden && !openHidden ? allPhotos.filter((p) => !hidden.isPhoto(p.uid)) : allPhotos),
+    [allPhotos, hidden, openHidden],
+  );
   // The list and the open album share this flag. Arriving straight into an album
   // has nothing warmed for it, so that always starts out loading; a warmed list
   // does not, and paints instead of shimmering. The reads below run either way.
   const [loading, setLoading] = useState(!!open || !initial);
   const [error, setError] = useState("");
 
-  // Albums the user chose to download (their photos arrive automatically). Downloading
-  // a whole album can only work through the Explorer mount, so with the mount off the
-  // badge is not offered at all rather than sitting there inert.
+  // Albums kept available offline in the app, their photos and the ones added later. An earlier
+  // build downloaded such an album into the Explorer folder instead; one left from it is moved
+  // over once, and what it downloaded there goes back to the cloud.
   const [syncedAlbums, setSyncedAlbums] = useState<Set<string>>(new Set());
-  const [explorer, setExplorer] = useState(false);
   useEffect(() => {
-    void invoke<string[]>("synced_albums")
-      .then((a) => setSyncedAlbums(new Set(a)))
-      .catch(() => {});
-    void explorerMode().then(setExplorer);
+    void (async () => {
+      const moved = await invoke<string[]>("synced_albums").catch(() => [] as string[]);
+      for (const uid of moved) {
+        try {
+          await rpc("offlineAlbumSet", { uid, on: true });
+          await invoke("free_up_album", { uid }).catch(() => 0);
+          await invoke("set_album_synced", { uid, enabled: false });
+        } catch {
+          /* tried again the next time the albums open */
+        }
+      }
+      const kept = await rpc<string[]>("offlineAlbums").catch(() => [] as string[]);
+      setSyncedAlbums(new Set(kept));
+    })();
   }, []);
-
-  // Turning the badge off stops the album downloading itself, but what it already
-  // downloaded stays on the device until someone says otherwise. Nothing else in
-  // the app would ever mention those photos again, so this is the one moment the
-  // storage can be offered back — and it is only worth asking about when the album
-  // actually put something there.
-  const [freeUpAsk, setFreeUpAsk] = useState<{ uid: string; count: number } | null>(null);
-  const [freeUpBusy, setFreeUpBusy] = useState(false);
 
   async function toggleSync(uid: string) {
     const on = !syncedAlbums.has(uid);
-    setSyncedAlbums((prev) => {
-      const next = new Set(prev);
-      if (on) next.add(uid);
-      else next.delete(uid);
-      return next;
-    });
-    try {
-      await invoke("set_album_synced", { uid, enabled: on });
-    } catch (e) {
-      // The host refused, so the badge goes back to what it was: leaving it lit would
-      // have this album claiming to download itself until the view was rebuilt.
+    const flip = (keep: boolean) =>
       setSyncedAlbums((prev) => {
         const next = new Set(prev);
-        if (on) next.delete(uid);
-        else next.add(uid);
+        if (keep) next.add(uid);
+        else next.delete(uid);
         return next;
       });
-      setToast(String(e));
-      return; // the toggle did not take, so there is nothing to ask about
-    }
-    if (on) return;
-    const count = await invoke<number>("album_local_count", { uid }).catch(() => 0);
-    if (count > 0) setFreeUpAsk({ uid, count });
-  }
-
-  /** Frees the copies that album downloaded, and reports what actually went. */
-  async function freeUpAlbum(uid: string) {
-    setFreeUpBusy(true);
+    flip(on);
     try {
-      const freed = await invoke<number>("free_up_album", { uid });
-      setToast(freed === 0 ? t("download.freedUpNone") : t("download.freedUp", { count: freed }));
+      await rpc("offlineAlbumSet", { uid, on });
+      setToast(t(on ? "albums.offlineOn" : "albums.offlineOff"));
     } catch (e) {
+      // Refused, so the badge goes back to what it was.
+      flip(!on);
       setToast(String(e));
-    } finally {
-      setFreeUpBusy(false);
-      setFreeUpAsk(null);
     }
   }
 
@@ -239,8 +246,12 @@ export function Albums({
 
   // Always re-reads, warmed or not: what the shell handed over is a first paint,
   // never the answer. The counts and covers here only hold because they come off
-  // the albums endpoint every time (see the sidecar's albums module).
+  // the albums endpoint every time (see the sidecar's albums module). Not while an album
+  // is open: arriving straight into one, its photos come first, and the list is read when
+  // it closes.
+  const listShown = !open;
   useEffect(() => {
+    if (!listShown) return;
     let cancelled = false;
     setError("");
     (async () => {
@@ -258,7 +269,7 @@ export function Albums({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey]);
+  }, [reloadKey, listShown]);
 
   // Keyed on the album's uid, not the object: renaming it from the header hands
   // down a fresh one, and that is no reason to refetch its photos.
@@ -289,6 +300,22 @@ export function Albums({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openUid, reloadKey]);
 
+  // The dates its photos have, for the header, in place of when the album last changed.
+  useEffect(() => {
+    onSpan?.(!openUid || loading ? null : photoSpan(photos));
+  }, [openUid, loading, photos, onSpan]);
+
+  // The contents list asked for from the album's menu: the viewer opens on the first photo with
+  // the list beside it, once the photos are read. Each request is answered once.
+  const [openWithContents, setOpenWithContents] = useState(false);
+  const answeredContents = useRef(contentsRequest);
+  useEffect(() => {
+    if (contentsRequest === answeredContents.current || loading || photos.length === 0) return;
+    answeredContents.current = contentsRequest;
+    setOpenWithContents(true);
+    setLightboxIdx(0);
+  }, [contentsRequest, loading, photos.length]);
+
   // Report the open album's count up to the top bar, which owns the header.
   useEffect(() => {
     onCount?.(!openUid || loading ? null : photos.length);
@@ -305,7 +332,13 @@ export function Albums({
   // The album list after the shell's search and sort: filter by name, then order by the
   // chosen mode ("activity" keeps the server's own most-recent-first order).
   const shown = useMemo(() => {
-    const base = filterAlbums(albums, query);
+    // A hidden photo is no album's cover here: the card shows no picture instead.
+    const visible = hidden
+      ? albums
+          .filter((a) => !hidden.isAlbum(a.uid))
+          .map((a) => (a.coverUid && hidden.isPhoto(a.coverUid) ? { ...a, coverUid: null } : a))
+      : albums;
+    const base = filterAlbums(visible, query);
     if (sort === "name") {
       return [...base].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     }
@@ -313,7 +346,7 @@ export function Albums({
       return [...base].sort((a, b) => b.photoCount - a.photoCount);
     }
     return base;
-  }, [albums, query, sort]);
+  }, [albums, query, sort, hidden]);
 
   const coverUids = useMemo(
     () => (open ? [] : shown.map((a) => a.coverUid).filter((u): u is string => !!u)),
@@ -639,6 +672,16 @@ export function Albums({
           icon: <LibraryAddIcon size={14} />,
           onSelect: () => setPickAlbum(true),
         },
+        ...(onEditDate
+          ? [
+              {
+                key: "editDate",
+                label: t("selection.editDate"),
+                icon: <CalendarIcon size={14} />,
+                onSelect: () => onEditDate([...sel.selected]),
+              },
+            ]
+          : []),
         {
           key: "favorite",
           label: photoFavorite ? t("selection.unfavorite") : t("selection.favorite"),
@@ -650,6 +693,7 @@ export function Albums({
               {
                 key: "cover",
                 label: t("selection.setCover"),
+                icon: <ImageIcon size={14} />,
                 onSelect: () => void runSelection(setCoverFromSelection),
               },
               {
@@ -761,7 +805,7 @@ export function Albums({
             sel.selected.size === 1 ? () => void runSelection(setCoverFromSelection) : undefined
           }
           onDownload={() => void runSelection(downloadSelected)}
-          onFreeUp={() => void runSelection(freeUpSelected)}
+          onFreeUp={isWindows ? () => void runSelection(freeUpSelected) : undefined}
           onOfflineAdd={
             allSelectedOffline ? undefined : () => void runSelection(offlineAddSelected)
           }
@@ -769,6 +813,7 @@ export function Albums({
             allSelectedOffline ? () => void runSelection(offlineRemoveSelected) : undefined
           }
           onAddToAlbum={() => setPickAlbum(true)}
+          onEditDate={onEditDate ? () => onEditDate([...sel.selected]) : undefined}
           onRemoveFromAlbum={() => setConfirmRemove(true)}
           onTrash={() => setConfirmTrash(true)}
         />
@@ -831,7 +876,12 @@ export function Albums({
             items={viewerItems}
             index={lightboxIdx!}
             onJump={setLightboxIdx}
-            onClose={() => setLightboxIdx(null)}
+            onClose={() => {
+              setLightboxIdx(null);
+              setOpenWithContents(false);
+            }}
+            openWith={openWithContents ? "contents" : undefined}
+            onDateEditStarted={onEditDate ? onDateEditStarted : undefined}
             onTrashed={handleTrashed}
             onRenamed={() => {}}
             onEdited={onChanged}
@@ -954,22 +1004,20 @@ export function Albums({
             ) : (
               <div className="g-cell-ph" />
             )}
-            {explorer && (
-              <span
-                className={`g-album-sync${syncedAlbums.has(a.uid) ? " on" : ""}`}
-                role="button"
-                tabIndex={0}
-                title={
-                  syncedAlbums.has(a.uid) ? t("albums.keptDownloaded") : t("albums.keepDownloaded")
-                }
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void toggleSync(a.uid);
-                }}
-              >
-                <CloudIcon size={14} />
-              </span>
-            )}
+            <span
+              className={`g-album-sync${syncedAlbums.has(a.uid) ? " on" : ""}`}
+              role="button"
+              tabIndex={0}
+              title={
+                syncedAlbums.has(a.uid) ? t("albums.keptDownloaded") : t("albums.keepDownloaded")
+              }
+              onClick={(e) => {
+                e.stopPropagation();
+                void toggleSync(a.uid);
+              }}
+            >
+              <CloudIcon size={14} />
+            </span>
           </div>
           <div className="g-album-name">{a.name || t("albums.untitled")}</div>
           <div className="g-album-count">
@@ -981,15 +1029,6 @@ export function Albums({
       ))}
 
       {nameDialog}
-
-      {freeUpAsk && (
-        <AlbumFreeUpDialog
-          count={freeUpAsk.count}
-          busy={freeUpBusy}
-          onKeep={() => setFreeUpAsk(null)}
-          onFreeUp={() => void freeUpAlbum(freeUpAsk.uid)}
-        />
-      )}
 
       {toast && <div className="g-toast">{toast}</div>}
     </div>

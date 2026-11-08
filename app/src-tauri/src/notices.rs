@@ -63,7 +63,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
     };
     let table: [(&str, &str); 7] = match lang {
         "hu" => [
-            ("A Proton kukájába került ({n})", "Ha tévedés volt, 30 napon belül visszaállíthatod a Trash mappából."),
+            ("A Proton kukájába került ({n})", "Ha tévedés volt, visszaállíthatod a Trash mappából."),
             ("Kikerült a(z) „{album}” albumból ({n})", "Csak az albumból: a fotók a Photos mappában megvannak."),
             ("Kikerült a kedvencek közül ({n})", "A fotók a Photos mappában megvannak."),
             ("A(z) „{album}” album törölve", "A fotói a Photos mappában megvannak."),
@@ -72,7 +72,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Ide nem lehet feltölteni ({n})", "A Shared és a Trash mappa csak olvasható. A fotókat a Photos mappába vagy egy albummappába húzd."),
         ],
         "de" => [
-            ("In den Proton-Papierkorb verschoben ({n})", "Falls das ein Versehen war: innerhalb von 30 Tagen aus Trash wiederherstellen."),
+            ("In den Proton-Papierkorb verschoben ({n})", "Falls das ein Versehen war: aus Trash wiederherstellen."),
             ("Aus „{album}“ entfernt ({n})", "Nur aus dem Album: die Fotos sind weiterhin in Photos."),
             ("Aus den Favoriten entfernt ({n})", "Die Fotos sind weiterhin in Photos."),
             ("Album „{album}“ gelöscht", "Seine Fotos sind weiterhin in Photos."),
@@ -81,7 +81,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Hier kann nichts hinzugefügt werden ({n})", "Shared und Trash sind schreibgeschützt. Fotos nach Photos oder in einen Albumordner ziehen."),
         ],
         "es" => [
-            ("Movido a la papelera de Proton ({n})", "Si fue un error, restáuralo desde Trash en 30 días."),
+            ("Movido a la papelera de Proton ({n})", "Si fue un error, restáuralo desde Trash."),
             ("Quitado de «{album}» ({n})", "Solo del álbum: las fotos siguen en Photos."),
             ("Quitado de Favoritos ({n})", "Las fotos siguen en Photos."),
             ("Álbum «{album}» eliminado", "Sus fotos siguen en Photos."),
@@ -90,7 +90,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Aquí no se puede añadir nada ({n})", "Shared y Trash son de solo lectura. Suelta las fotos en Photos o en la carpeta de un álbum."),
         ],
         "fr" => [
-            ("Placé dans la corbeille Proton ({n})", "En cas d'erreur, restaurez depuis Trash sous 30 jours."),
+            ("Placé dans la corbeille Proton ({n})", "En cas d'erreur, restaurez depuis Trash."),
             ("Retiré de « {album} » ({n})", "Seulement de l'album : les photos restent dans Photos."),
             ("Retiré des favoris ({n})", "Les photos restent dans Photos."),
             ("Album « {album} » supprimé", "Ses photos restent dans Photos."),
@@ -99,7 +99,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Rien ne peut être ajouté ici ({n})", "Shared et Trash sont en lecture seule. Déposez les photos dans Photos ou dans le dossier d'un album."),
         ],
         "it" => [
-            ("Spostato nel cestino di Proton ({n})", "Se è stato un errore, ripristina da Trash entro 30 giorni."),
+            ("Spostato nel cestino di Proton ({n})", "Se è stato un errore, ripristina da Trash."),
             ("Rimosso da «{album}» ({n})", "Solo dall'album: le foto sono ancora in Photos."),
             ("Rimosso dai preferiti ({n})", "Le foto sono ancora in Photos."),
             ("Album «{album}» eliminato", "Le sue foto sono ancora in Photos."),
@@ -108,7 +108,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Qui non si può aggiungere nulla ({n})", "Shared e Trash sono di sola lettura. Trascina le foto in Photos o nella cartella di un album."),
         ],
         "nl" => [
-            ("Naar de Proton-prullenbak verplaatst ({n})", "Was dat een vergissing? Herstel binnen 30 dagen vanuit Trash."),
+            ("Naar de Proton-prullenbak verplaatst ({n})", "Was dat een vergissing? Herstel vanuit Trash."),
             ("Uit ‘{album}’ gehaald ({n})", "Alleen uit het album: de foto's staan nog in Photos."),
             ("Uit favorieten gehaald ({n})", "De foto's staan nog in Photos."),
             ("Album ‘{album}’ verwijderd", "De foto's staan nog in Photos."),
@@ -117,7 +117,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Hier kan niets worden toegevoegd ({n})", "Shared en Trash zijn alleen-lezen. Zet foto's in Photos of in een albummap."),
         ],
         "pl" => [
-            ("Przeniesiono do kosza Proton ({n})", "Jeśli to pomyłka, przywróć z Trash w ciągu 30 dni."),
+            ("Przeniesiono do kosza Proton ({n})", "Jeśli to pomyłka, przywróć z Trash."),
             ("Usunięto z albumu „{album}” ({n})", "Tylko z albumu: zdjęcia nadal są w Photos."),
             ("Usunięto z ulubionych ({n})", "Zdjęcia nadal są w Photos."),
             ("Usunięto album „{album}”", "Jego zdjęcia nadal są w Photos."),
@@ -126,7 +126,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Tu nie można nic dodać ({n})", "Shared i Trash są tylko do odczytu. Upuść zdjęcia w Photos lub w folderze albumu."),
         ],
         "cs" => [
-            ("Přesunuto do koše Proton ({n})", "Pokud to byla chyba, obnovte je z Trash do 30 dní."),
+            ("Přesunuto do koše Proton ({n})", "Pokud to byla chyba, obnovte je z Trash."),
             ("Odebráno z alba „{album}“ ({n})", "Jen z alba: fotky jsou dál v Photos."),
             ("Odebráno z oblíbených ({n})", "Fotky jsou dál v Photos."),
             ("Album „{album}“ smazáno", "Jeho fotky jsou dál v Photos."),
@@ -135,7 +135,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Sem nelze nic přidat ({n})", "Shared a Trash jsou jen pro čtení. Fotky přetáhněte do Photos nebo do složky alba."),
         ],
         "sk" => [
-            ("Presunuté do koša Proton ({n})", "Ak to bola chyba, obnovte ich z Trash do 30 dní."),
+            ("Presunuté do koša Proton ({n})", "Ak to bola chyba, obnovte ich z Trash."),
             ("Odobraté z albumu „{album}“ ({n})", "Len z albumu: fotky sú ďalej v Photos."),
             ("Odobraté z obľúbených ({n})", "Fotky sú ďalej v Photos."),
             ("Album „{album}“ vymazaný", "Jeho fotky sú ďalej v Photos."),
@@ -144,7 +144,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Sem nemožno nič pridať ({n})", "Shared a Trash sú len na čítanie. Fotky potiahnite do Photos alebo do priečinka albumu."),
         ],
         "sl" => [
-            ("Premaknjeno v Protonov koš ({n})", "Če je bila pomota, jih v 30 dneh obnovite iz Trash."),
+            ("Premaknjeno v Protonov koš ({n})", "Če je bila pomota, jih obnovite iz Trash."),
             ("Odstranjeno iz albuma »{album}« ({n})", "Samo iz albuma: fotografije so še vedno v Photos."),
             ("Odstranjeno iz priljubljenih ({n})", "Fotografije so še vedno v Photos."),
             ("Album »{album}« izbrisan", "Njegove fotografije so še vedno v Photos."),
@@ -153,7 +153,7 @@ pub(crate) fn notice_text(lang: &str, notice: &Notice) -> (&'static str, &'stati
             ("Sem ni mogoče ničesar dodati ({n})", "Shared in Trash sta samo za branje. Fotografije spustite v Photos ali v mapo albuma."),
         ],
         _ => [
-            ("Moved to the Proton trash ({n})", "If that was a mistake, restore from Trash within 30 days."),
+            ("Moved to the Proton trash ({n})", "If that was a mistake, restore from Trash."),
             ("Removed from “{album}” ({n})", "Only from the album: the photos are still in Photos."),
             ("Removed from Favorites ({n})", "The photos are still in Photos."),
             ("Album “{album}” deleted", "Its photos are still in Photos."),
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     #[ignore]
     fn shows_a_notification() {
-        toast("Moved to the Proton trash (2)", "If that was a mistake, restore from Trash within 30 days.").unwrap();
+        toast("Moved to the Proton trash (2)", "If that was a mistake, restore from Trash.").unwrap();
     }
 
     #[test]

@@ -41,6 +41,7 @@ import {
   getOriginal,
   getSaveStatus,
   isViewableOriginal,
+  mountFates,
   readOriginalBytes,
   releaseOriginal,
   resetDownloadState,
@@ -881,4 +882,42 @@ describe("a pinned original past the in-memory cap", () => {
     },
     IO_HEAVY_MS,
   );
+});
+
+describe("mountFates", () => {
+  // Stands in for the SDK's iterateNodes: an answer per uid it knows, the missing ones as such.
+  const photosWith = (answers: any[], failAfter?: number) => ({
+    async *iterateNodes(_uids: string[]) {
+      let n = 0;
+      for (const a of answers) {
+        if (failAfter !== undefined && n++ >= failAfter) throw new Error("network");
+        yield a;
+      }
+    },
+  });
+
+  it("names each photo by what Drive answers for it", async () => {
+    const photos = photosWith([
+      { uid: "a", trashTime: new Date() },
+      { missingUid: "b" },
+      { uid: "c" },
+    ]);
+    expect(await mountFates(photos, ["a", "b", "c"])).toEqual({ a: "trashed", b: "gone", c: "present" });
+  });
+
+  it("answers hidden photos without asking Drive", async () => {
+    const photos = photosWith([{ uid: "a" }]);
+    expect(await mountFates(photos, ["a", "h"], (uid) => uid === "h")).toEqual({ a: "present", h: "hidden" });
+  });
+
+  it("leaves a photo it never got an answer for unknown, so nothing acts on it", async () => {
+    // Leaving the listing is no answer: a failed lookup must not read as a deletion.
+    const photos = photosWith([{ uid: "a", trashTime: new Date() }, { missingUid: "b" }], 1);
+    expect(await mountFates(photos, ["a", "b", "c"])).toEqual({ a: "trashed", b: "unknown", c: "unknown" });
+  });
+
+  it("ignores an answer for a photo it did not ask about", async () => {
+    const photos = photosWith([{ missingUid: "x" }, { uid: "a" }]);
+    expect(await mountFates(photos, ["a"])).toEqual({ a: "present" });
+  });
 });

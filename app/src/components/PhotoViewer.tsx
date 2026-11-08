@@ -22,6 +22,8 @@
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import { useT } from "../lib/i18n";
+import { fittedRect, type TextRead } from "../lib/textLayout";
+import { TextLayer } from "./ViewerText";
 import "../styles/PhotoViewer.css";
 
 export const MIN_SCALE = 1; // scale 1 is "fit the whole photo on screen"
@@ -73,6 +75,8 @@ export function PhotoViewer({
   photoKey,
   apiRef,
   onZoom,
+  textRead,
+  textQuiet = false,
 }: {
   src?: string;
   loading?: boolean;
@@ -87,12 +91,17 @@ export function PhotoViewer({
   apiRef?: MutableRefObject<ZoomApi | null>;
   /** Told whenever the zoom, the photo's size or the fit changes. */
   onZoom?: (z: ZoomState) => void;
+  /** The text read off this photo, laid over it to select and copy. */
+  textRead?: TextRead | null;
+  /** The text was read ahead: selectable, never shown. */
+  textQuiet?: boolean;
 }) {
   const t = useT();
   const [view, setView] = useState<View>(FIT);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [panning, setPanning] = useState(false);
   const [fitRatio, setFitRatio] = useState(1);
+  const [imgBox, setImgBox] = useState<{ w: number; h: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const panRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
@@ -116,6 +125,7 @@ export function PhotoViewer({
       if (!natural || !img.clientWidth || !img.clientHeight) return;
       const drawnW = Math.min(img.clientWidth, img.clientHeight * (natural.w / natural.h));
       setFitRatio(drawnW / natural.w);
+      setImgBox({ w: img.clientWidth, h: img.clientHeight });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -248,6 +258,13 @@ export function PhotoViewer({
         }
         style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}
       />
+
+      {textRead && natural && imgBox && (
+        // The same box and the same zoom as the photo, so the text stays on the words it was read from.
+        <div className="pv-img vt-frame" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})` }}>
+          <TextLayer read={textRead} quiet={textQuiet} box={fittedRect(imgBox.w, imgBox.h, natural.w, natural.h)} />
+        </div>
+      )}
 
       {loading && (
         <div className="pv-loading" role="status" aria-live="polite">

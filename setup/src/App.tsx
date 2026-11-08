@@ -26,7 +26,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import logo from "./assets/logo.png";
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const APP_NAME = "Photos for Proton";
 
 // Each of these is allow-listed in src-tauri/capabilities/default.json; the opener
@@ -105,6 +105,8 @@ export default function App() {
       } else if (m === "install") {
         setDir(await invoke<string>("default_dir").catch(() => "C:\\Users\\...\\Photos for Proton"));
         setExisting(await invoke<string | null>("existing_install").catch(() => null));
+        // An install over the app starts from the File Explorer choice already made.
+        setNetworkDrive(await invoke<boolean>("show_in_explorer_default").catch(() => true));
       } else {
         // Launched as the installed uninstall.exe: there is nothing to choose here,
         // so open on the confirmation.

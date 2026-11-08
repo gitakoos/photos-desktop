@@ -1741,7 +1741,7 @@ export function PhotoEditor({
         <div className="ed-side-body">
           {markTool === "pen" && (
             <>
-              <SideSection title={t("editor.text.color")}>
+              <SideSection title={t("editor.draw.color")}>
                 <ColorPicker value={penColor} onChange={setPenColor} />
                 <Swatches value={penColor} onPick={setPenColor} />
               </SideSection>

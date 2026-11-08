@@ -62,7 +62,7 @@ use file_assoc::{APP_EXE, APP_NAME, LEGACY_APP_EXE, PACK_ID};
 #[path = "../../../app/src-tauri/src/autostart.rs"]
 pub mod autostart;
 
-const VERSION: &str = "1.2.0";
+const VERSION: &str = "1.3.0";
 const PUBLISHER: &str = "Akoos";
 const DATA_DIR_NAME: &str = "eu.akoos.photos.desktop"; // where the app keeps its vault/caches
 
@@ -84,6 +84,22 @@ fn patch_allows(patch_from: Option<&str>, installed: Option<&str>) -> Result<(),
         (Some(from), _) => Err(format!(
             "This file only updates version {from}. Download Photos-for-Proton-Setup.exe instead."
         )),
+    }
+}
+
+#[cfg(all(test, windows))]
+mod quit_tests {
+    use super::*;
+
+    #[test]
+    fn asks_the_app_in_the_install_folder_to_quit_and_waits() {
+        let script = quit_script(Path::new(r"C:\Users\O'Brien\AppData\Local\Photos for Proton"));
+        assert!(script.contains(
+            r"Start-Process -FilePath 'C:\Users\O''Brien\AppData\Local\Photos for Proton\photosforproton.exe' -ArgumentList '--quit'"
+        ));
+        assert!(script.contains("Name='photosforproton.exe'"));
+        assert!(script.contains(r"StartsWith('C:\Users\O''Brien\AppData\Local\Photos for Proton\'"));
+        assert!(!script.contains("__"));
     }
 }
 
@@ -150,7 +166,25 @@ fn is_uninstall() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_install_keeps_the_file_explorer_choice_already_made() {
+        assert!(super::explorer_default(None), "a first install offers it on");
+        assert!(super::explorer_default(Some(true)));
+        assert!(!super::explorer_default(Some(false)), "turned off in Settings or at sign-out, it stays off");
+    }
+
     use super::*;
+
+    #[test]
+    fn only_a_version_that_knows_quit_is_asked_to_quit() {
+        assert!(!answers_quit(None));
+        assert!(!answers_quit(Some("1.2.0")));
+        assert!(!answers_quit(Some("1.0.3")));
+        assert!(answers_quit(Some("1.3.0")));
+        assert!(answers_quit(Some("1.10.1")));
+        assert!(answers_quit(Some("2.0.0")));
+        assert!(!answers_quit(Some("garbage")));
+    }
 
     #[test]
     fn uninstall_when_flag_present() {
@@ -161,6 +195,33 @@ mod tests {
     fn uninstall_when_named_uninstall_exe_case_insensitive() {
         assert!(wants_uninstall(&[], Some("uninstall.exe")));
         assert!(wants_uninstall(&[], Some("UNINSTALL.EXE")));
+    }
+
+    #[test]
+    fn the_payload_lands_inside_the_folder_and_nowhere_else() {
+        use zip::write::SimpleFileOptions;
+        let mut bytes = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let opts = SimpleFileOptions::default();
+            w.add_directory("resources/", opts).unwrap();
+            w.start_file("resources/sidecar.mjs", opts).unwrap();
+            w.write_all(b"sidecar").unwrap();
+            w.start_file("photosforproton.exe", opts).unwrap();
+            w.write_all(b"app").unwrap();
+            w.start_file("../outside.txt", opts).unwrap();
+            w.write_all(b"escape").unwrap();
+            w.finish().unwrap();
+        }
+        let root = std::env::temp_dir().join(format!("pfp-setup-zip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dest = root.join("install");
+        fs::create_dir_all(&dest).unwrap();
+        extract_zip(&bytes, &dest).unwrap();
+        assert_eq!(fs::read(dest.join("resources/sidecar.mjs")).unwrap(), b"sidecar");
+        assert_eq!(fs::read(dest.join("photosforproton.exe")).unwrap(), b"app");
+        assert!(!root.join("outside.txt").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -194,6 +255,90 @@ mod tests {
     /// An install made by this build.
     fn fake_install(name: &str) -> PathBuf {
         fake_install_named(name, APP_EXE)
+    }
+
+    /// A small payload: the app, its runtime, and a file the install does not have yet.
+    fn tiny_payload() -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+        let mut bytes = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut bytes));
+            let opts = SimpleFileOptions::default();
+            w.add_directory("resources/", opts).unwrap();
+            w.start_file("resources/sidecar.exe", opts).unwrap();
+            w.write_all(b"new runtime").unwrap();
+            w.start_file(APP_EXE, opts).unwrap();
+            w.write_all(b"new app").unwrap();
+            w.start_file("resources/extra.bin", opts).unwrap();
+            w.write_all(b"new file").unwrap();
+            w.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn leftovers(dir: &Path) -> Vec<PathBuf> {
+        files_under(dir)
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.to_string_lossy().contains(OLD_SUFFIX) || p.starts_with(STAGE_DIR))
+            .collect()
+    }
+
+    #[test]
+    fn a_swap_replaces_the_app_whole_and_leaves_the_data_alone() {
+        let dir = fake_install("swap-ok");
+        swap_in(&tiny_payload(), &dir, &|a: &Path, b: &Path| fs::rename(a, b)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(APP_EXE)).unwrap(), "new app");
+        assert_eq!(fs::read_to_string(dir.join("resources").join("sidecar.exe")).unwrap(), "new runtime");
+        assert_eq!(fs::read_to_string(dir.join("resources").join("extra.bin")).unwrap(), "new file");
+        assert_eq!(fs::read_to_string(dir.join("data").join("session.enc")).unwrap(), "the sign-in");
+        assert!(leftovers(&dir).is_empty(), "nothing set aside or staged may be left: {:?}", leftovers(&dir));
+        assert!(!dir.join(STAGE_DIR).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_replaced_puts_every_swapped_file_back() {
+        let dir = fake_install("swap-held");
+        // The app's exe is held: setting it aside fails, after the runtime was already swapped (or before).
+        let held = dir.join(APP_EXE);
+        let result = swap_in(&tiny_payload(), &dir, &|a: &Path, b: &Path| {
+            if a == held.as_path() {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "in use"))
+            } else {
+                fs::rename(a, b)
+            }
+        });
+        assert!(result.is_err());
+        // Wholly the old version: no mix of new and old files.
+        assert_eq!(fs::read_to_string(dir.join(APP_EXE)).unwrap(), "old app");
+        assert_eq!(fs::read_to_string(dir.join("resources").join("sidecar.exe")).unwrap(), "old runtime");
+        assert!(!dir.join("resources").join("extra.bin").exists());
+        assert!(leftovers(&dir).is_empty(), "nothing set aside or staged may be left: {:?}", leftovers(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_set_aside_name_that_cannot_be_cleared_is_skipped_for_the_next() {
+        let dir = fake_install("swap-held-old");
+        // The old app still runs from the file an earlier update set aside, so that name cannot be reused:
+        // a directory stands in for the undeletable file here.
+        fs::create_dir_all(set_aside(&dir.join(APP_EXE)).join("held")).unwrap();
+        swap_in(&tiny_payload(), &dir, &|a: &Path, b: &Path| fs::rename(a, b)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(APP_EXE)).unwrap(), "new app");
+        assert!(set_aside(&dir.join(APP_EXE)).is_dir(), "the held one is left alone");
+        assert!(!set_aside_nth(&dir.join(APP_EXE), 1).exists(), "the one this run set aside is gone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_set_aside_by_an_earlier_run_does_not_stop_the_next() {
+        let dir = fake_install("swap-leftover");
+        fs::write(set_aside(&dir.join(APP_EXE)), "older app still held last time").unwrap();
+        swap_in(&tiny_payload(), &dir, &|a: &Path, b: &Path| fs::rename(a, b)).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(APP_EXE)).unwrap(), "new app");
+        assert!(leftovers(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The blocker this guard exists for. `--uninstall` is honoured on any executable
@@ -461,8 +606,132 @@ fn show_window(window: tauri::Window) {
 }
 
 fn extract_payload(dest: &Path) -> Result<(), String> {
+    swap_in(PAYLOAD, dest, &|from: &Path, to: &Path| fs::rename(from, to))
+}
+
+/// Where a payload is unpacked before any of it replaces what is installed.
+const STAGE_DIR: &str = ".pfp-update";
+/// What an installed file is renamed to while its replacement goes in; dropped once the swap held.
+const OLD_SUFFIX: &str = ".pfp-old";
+
+#[cfg(test)]
+fn set_aside(target: &Path) -> PathBuf {
+    set_aside_nth(target, 0)
+}
+
+/// The `n`th name a file can be set aside under: `<name>.pfp-old`, then `<name>.<n>.pfp-old`.
+fn set_aside_nth(target: &Path, n: u32) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    if n > 0 {
+        name.push(format!(".{n}"));
+    }
+    name.push(OLD_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// A free name to set `target` aside under. The first is cleared when it can be; one an earlier update set
+/// aside and a process still runs from (the old app, if it was never restarted) cannot be, so the next is
+/// tried.
+fn free_set_aside(target: &Path) -> PathBuf {
+    for n in 0..16 {
+        let candidate = set_aside_nth(target, n);
+        let _ = fs::remove_file(&candidate);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    set_aside_nth(target, 16)
+}
+
+/// The files under `dir`, relative to it.
+fn files_under(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut todo = vec![PathBuf::new()];
+    while let Some(rel) = todo.pop() {
+        for entry in fs::read_dir(dir.join(&rel)).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let child = rel.join(entry.file_name());
+            if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+                todo.push(child);
+            } else {
+                out.push(child);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Lays the archive `bytes` over `dest` all or nothing. Writing straight over the installed files left a
+/// mix when one of them was held (the app's own exe, still closing): the files before it were new, the
+/// rest old, and the installer gave up on the next. Now the payload is unpacked beside the install first,
+/// each installed file is renamed aside (Windows lets a running exe be renamed, not overwritten) and the new
+/// one moved into its place, and if any step fails every file already swapped is put back, so the install
+/// is either wholly the new version or untouched. `put` moves a file; it is a parameter so a test can make
+/// one move fail.
+fn swap_in(bytes: &[u8], dest: &Path, put: &dyn Fn(&Path, &Path) -> std::io::Result<()>) -> Result<(), String> {
+    let stage = dest.join(STAGE_DIR);
+    let _ = fs::remove_dir_all(&stage);
+    if let Err(e) = extract_zip(bytes, &stage) {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(e);
+    }
+    let files = match files_under(&stage) {
+        Ok(files) => files,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(format!("read the unpacked payload: {e}"));
+        }
+    };
+    // (the installed file, where the older one was set aside, if there was one)
+    let mut swapped: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    let mut failure: Option<String> = None;
+    for rel in &files {
+        let target = dest.join(rel);
+        if let Some(parent) = target.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                failure = Some(format!("create {}: {e}", rel.display()));
+                break;
+            }
+        }
+        let old = if target.exists() { Some(free_set_aside(&target)) } else { None };
+        if let Some(old) = &old {
+            if let Err(e) = put(&target, old) {
+                failure = Some(format!("set aside {}: {e}", rel.display()));
+                break;
+            }
+        }
+        if let Err(e) = put(&stage.join(rel), &target) {
+            if let Some(old) = &old {
+                let _ = fs::rename(old, &target);
+            }
+            failure = Some(format!("put in place {}: {e}", rel.display()));
+            break;
+        }
+        swapped.push((target, old));
+    }
+    if let Some(e) = failure {
+        for (target, old) in swapped.iter().rev() {
+            let _ = fs::remove_file(target);
+            if let Some(old) = old {
+                let _ = fs::rename(old, target);
+            }
+        }
+        let _ = fs::remove_dir_all(&stage);
+        return Err(e);
+    }
+    let _ = fs::remove_dir_all(&stage);
+    // A file still held (the old exe of an app not yet gone) cannot be deleted; it is left for the next run.
+    for (_, old) in &swapped {
+        if let Some(old) = old {
+            let _ = fs::remove_file(old);
+        }
+    }
+    Ok(())
+}
+
+fn extract_zip(bytes: &[u8], dest: &Path) -> Result<(), String> {
     let mut archive =
-        zip::ZipArchive::new(Cursor::new(PAYLOAD)).map_err(|e| format!("open payload: {e}"))?;
+        zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("open payload: {e}"))?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
         let Some(rel) = entry.enclosed_name() else {
@@ -669,7 +938,9 @@ fn drop_superseded_exe(install: &Path) {
 fn upgrade_impl(install: &Path, relaunch: bool) -> Result<bool, String> {
     patch_allows(PATCH_FROM, read_installed_version().as_deref())?;
     // Make sure nothing under the folder still holds a file, then overwrite the
-    // payload, retrying while the app finishes closing.
+    // payload, retrying while the app finishes closing. The app is asked to quit
+    // first, the way its own Quit does, so nothing it was writing is cut short.
+    quit_app_gracefully(install);
     kill_under_dir(install);
     std::thread::sleep(std::time::Duration::from_millis(1200));
     let mut extracted = extract_payload(install);
@@ -705,7 +976,23 @@ fn upgrade_impl(install: &Path, relaunch: bool) -> Result<bool, String> {
     let self_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let uninstaller = install.join("uninstall.exe");
     let _ = fs::copy(&self_exe, &uninstaller);
-    let _ = write_uninstall_entry(install, &uninstaller, &app_exe);
+    // The entry's version is what the next update installer checks itself against, so
+    // one left behind refuses every later update. Not a reason to fail this one, whose
+    // files are already in place, but tried again and written down if it still fails.
+    let mut entry = write_uninstall_entry(install, &uninstaller, &app_exe);
+    for _ in 0..2 {
+        if entry.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        entry = write_uninstall_entry(install, &uninstaller, &app_exe);
+    }
+    if let Err(e) = entry {
+        note(
+            &install_data_dir(install),
+            &format!("the uninstall entry was not refreshed to {VERSION}: {e}"),
+        );
+    }
     // Refresh the file associations of an install that already carries them, so a
     // version that opens a type the last one could not starts being offered for it.
     // Never more than a refresh: switching them on here would give the user something
@@ -917,6 +1204,35 @@ fn set_show_in_explorer_pref(enabled: bool) {
 #[cfg(not(windows))]
 fn set_show_in_explorer_pref(_: bool) {}
 
+/// The "show in File Explorer" choice already made on this Windows account, by an install
+/// or in the app's Settings; none on a first install.
+#[cfg(windows)]
+fn existing_show_in_explorer() -> Option<bool> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(app_prefs_key())
+        .and_then(|k| k.get_value::<u32, _>("ShowInExplorer"))
+        .ok()
+        .map(|v| v != 0)
+}
+#[cfg(not(windows))]
+fn existing_show_in_explorer() -> Option<bool> {
+    None
+}
+
+/// What the File Explorer option starts as: the choice already made, which an install over
+/// the app must not undo (it is turned off for a new account at sign-out), else on.
+fn explorer_default(existing: Option<bool>) -> bool {
+    existing.unwrap_or(true)
+}
+
+/// The File Explorer option's starting state, for the options screen.
+#[tauri::command]
+fn show_in_explorer_default() -> bool {
+    explorer_default(existing_show_in_explorer())
+}
+
 /// The app's own preferences, shared with its Settings screen. Named once, so the
 /// uninstall cannot end up clearing a different key from the one the install wrote.
 #[cfg(windows)]
@@ -932,6 +1248,19 @@ fn remove_app_prefs() {
 }
 #[cfg(not(windows))]
 fn remove_app_prefs() {}
+
+/// Tell the running app that the uninstall is about to clear the Explorer folder (the
+/// app's `cloud_mount::detaching`).
+#[cfg(windows)]
+fn mark_detaching() {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    if let Ok((key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(app_prefs_key()) {
+        let _ = key.set_value("Detaching", &1u32);
+    }
+}
+#[cfg(not(windows))]
+fn mark_detaching() {}
 
 // PowerShell run by the uninstaller. These are templates (not `format!`) so the
 // many literal `{ }` of PowerShell stay out of Rust's brace-escaping; `__DIR__`
@@ -990,6 +1319,53 @@ fn build_script(template: &str, install: &Path) -> String {
         .replace("__DIR__", &dir)
         .replace("__PID__", &std::process::id().to_string())
 }
+
+/// Asks a running app to quit by itself (`--quit`, which quits as its tray Quit
+/// does), and waits a few seconds for it to go. A stop by force can cut short what
+/// the app was writing, its session among it; `kill_under_dir` after this only
+/// takes what is still there. A version too old to know `--quit` just stays up and
+/// is stopped as before.
+#[cfg(windows)]
+const QUIT_TEMPLATE: &str = r#"
+$running = { @(Get-CimInstance Win32_Process -Filter "Name='__EXE__'" -ErrorAction SilentlyContinue |
+  Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith('__DIR__\', 'OrdinalIgnoreCase') }).Count }
+if ((& $running) -gt 0) {
+  Start-Process -FilePath '__DIR__\__EXE__' -ArgumentList '--quit' -ErrorAction SilentlyContinue
+  for ($i = 0; $i -lt 40 -and (& $running) -gt 0; $i++) { Start-Sleep -Milliseconds 250 }
+}
+"#;
+
+/// The script that asks the app under `install` to quit.
+#[cfg(windows)]
+fn quit_script(install: &Path) -> String {
+    build_script(QUIT_TEMPLATE, install).replace("__EXE__", &APP_EXE.replace('\'', "''"))
+}
+
+/// Whether the installed app answers `--quit` by quitting. Before 1.3.0 a second launch only
+/// brought the window forward, so asking such a version to quit showed it for the seconds
+/// until it was stopped; it is stopped straight away instead. Pure.
+fn answers_quit(installed: Option<&str>) -> bool {
+    let Some(v) = installed else { return false };
+    let mut parts = v.trim().split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (1, 3)
+}
+
+#[cfg(windows)]
+fn quit_app_gracefully(install: &Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if !answers_quit(read_installed_version().as_deref()) {
+        return;
+    }
+    let script = quit_script(install);
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+#[cfg(not(windows))]
+fn quit_app_gracefully(_: &Path) {}
 
 /// Close the running app right now (synchronously): its WebView2 children hold
 /// files in the folder, and the user should see it exit the instant they confirm.
@@ -1187,9 +1563,15 @@ fn uninstall_impl(install: &Path) -> Result<(), String> {
     // placeholders: resolve the sync root. After the kill below there is no provider
     // left, and a placeholder without one cannot even be deleted, which is what used
     // to strand undeletable files in the folder after an uninstall.
+    // The running app reads a file leaving the folder as the user deleting it, and
+    // would move the whole cloud library to the trash; told first, it lets the files
+    // go and takes nothing. The flag goes with the preferences below.
+    mark_detaching();
     detach_sync_root();
     // Close the running app (its WebView2 children hold files in the folder),
-    // then give the OS a moment to release those handles.
+    // asked first and stopped only if it does not go, then give the OS a moment to
+    // release those handles.
+    quit_app_gracefully(install);
     kill_under_dir(install);
     std::thread::sleep(std::time::Duration::from_millis(600));
     // Shortcuts.
@@ -1275,7 +1657,7 @@ pub fn run() {
             // File associations stay off, as they do on the options screen: they are
             // the one choice here that changes how the machine opens someone else's
             // files, and a scripted install has nobody to ask.
-            install_impl(default_dir_impl(), true, true, true, false)
+            install_impl(default_dir_impl(), true, true, explorer_default(existing_show_in_explorer()), false)
         };
         if let Err(e) = result {
             eprintln!("setup error: {e}");
@@ -1316,6 +1698,7 @@ pub fn run() {
             uninstall,
             uninstall_existing,
             existing_install,
+            show_in_explorer_default,
             show_window,
             update_state
         ])

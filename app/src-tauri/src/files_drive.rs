@@ -462,6 +462,20 @@ impl Index {
             self.albums.push(entry);
         }
     }
+
+    /// Puts a photo into an album's folder at once, ahead of the next listing, so a file just
+    /// dragged there is there when the file manager looks again.
+    fn add_member(&mut self, album_uid: &str, photo_uid: &str) {
+        let (Some(&a), Some(&at)) = (self.album_by_uid.get(album_uid), self.by_uid.get(photo_uid)) else { return };
+        let photo_name = self.photos[at].name.clone();
+        let entry = &mut self.albums[a];
+        if entry.files.iter().any(|(_, i)| *i == at) {
+            return;
+        }
+        let file = unique_name(&photo_name, |c| entry.names.contains_key(c));
+        entry.names.insert(file.to_lowercase(), entry.files.len());
+        entry.files.push((file, at));
+    }
 }
 
 /// A name the file manager can show and a path can carry: no separator, no control
@@ -933,13 +947,35 @@ fn build(d: &Drive) {
         std::thread::sleep(rest);
     }
 
-    let albums = match crate::sidecar_rpc(&d.app, "listAlbumsForMount", serde_json::json!({})) {
-        Ok(v) => v.as_array().cloned().unwrap_or_default(),
-        Err(e) => {
-            crate::note(&d.app, &format!("[drive] albums skipped: {e}"));
-            Vec::new()
+    // The albums a page at a time, as the File Explorer folder reads them: each page a short
+    // call, so a library with many albums never runs one call past the host's deadline.
+    const ALBUM_PAGE: u64 = 12;
+    let mut albums: Vec<serde_json::Value> = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = match crate::sidecar_rpc(
+            &d.app,
+            "listAlbumsForMount",
+            serde_json::json!({ "offset": offset, "limit": ALBUM_PAGE }),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::note(&d.app, &format!("[drive] albums skipped: {e}"));
+                albums.clear();
+                break;
+            }
+        };
+        let total = page.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+        let items = page.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        albums.extend(items);
+        offset += ALBUM_PAGE;
+        if offset >= total {
+            break;
         }
-    };
+        if d.session.load(Ordering::SeqCst) != session {
+            return;
+        }
+    }
     // The trash and what others shared: a failure leaves those two folders empty and
     // everything else as it is.
     let extras = crate::sidecar_rpc(&d.app, "listExtrasForMount", serde_json::json!({}))
@@ -1501,7 +1537,7 @@ fn origin_album<'a>(index: &'a Index, folder: &Folder) -> Option<&'a Album> {
 /// What a DELETE means, by what it names and where.
 #[derive(Debug, PartialEq)]
 enum Deletion {
-    /// A photo on the timeline: to Proton's trash, where it can be restored for 30 days.
+    /// A photo on the timeline: to Proton's trash, where it stays until it is deleted there.
     Trash(String),
     /// A photo in an album's folder: out of that album, still in the library.
     FromAlbum { album: String, photo: String },
@@ -2300,6 +2336,7 @@ fn add_to_album(d: &Drive, request: &Request, segs: &[String]) -> Option<Answer>
             serde_json::json!({ "albumUid": album, "uids": [uid] }),
         ) {
             Ok(_) => {
+                d.index.write().unwrap().add_member(&album, &uid);
                 library_changed();
                 text(201, "Added to the album")
             }

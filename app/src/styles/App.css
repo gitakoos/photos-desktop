@@ -182,40 +182,55 @@ body {
   border-color: var(--accent);
 }
 
+/* The tonal fill of the app's own Upload button: no gradient, glow or lift. */
 .login-form button[type="submit"] {
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
   margin-top: 0.25rem;
-  padding: 0.75rem 1rem;
+  padding: 0.72rem 1rem;
   border: none;
   border-radius: 10px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: white;
+  background: var(--accent-wash);
+  color: var(--fg-primary);
   font-weight: 600;
   font-size: 0.95rem;
   cursor: pointer;
-  transition:
-    filter 0.15s ease,
-    transform 0.15s ease,
-    box-shadow 0.2s ease;
+  transition: background-color 0.15s ease;
 }
 
 .login-form button[type="submit"]:hover:not(:disabled) {
-  filter: brightness(1.08);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(var(--accent-rgb), 0.32);
+  background: var(--accent-wash-strong);
 }
 
 .login-form button[type="submit"]:active:not(:disabled) {
-  transform: scale(0.98);
-  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.25);
-  transition-duration: 0.06s;
+  background: var(--accent-wash);
 }
 
+.login-form button[type="submit"] .login-spin {
+  color: var(--accent);
+}
+
+/* Busy (the browser is being opened): it keeps its colour and shows the spinner instead. */
 .login-form button[type="submit"]:disabled {
-  opacity: 0.6;
   cursor: default;
 }
 
+.login-spin {
+  display: inline-flex;
+  animation: login-spin 0.9s linear infinite;
+}
+@keyframes login-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
 .login-form button.link {
+  font-family: inherit;
   align-self: center;
   background: none;
   border: none;
@@ -244,7 +259,6 @@ body {
   word-break: break-word;
 }
 
-/* ---- Human verification (embedded Proton captcha) ---- */
 /* The way back from the email and password form to the choice of how to sign in. */
 .login-back {
   position: absolute;
@@ -272,42 +286,12 @@ body {
   transform: translateX(-2px) scale(0.92);
 }
 
-.login-card.wide {
-  max-width: 440px;
-}
-
-.captcha {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.85rem;
-}
-
-.captcha-hint {
-  margin: 0;
-  text-align: center;
-  color: var(--fg-dim);
-  font-size: 0.85rem;
-}
-
-.captcha-frame {
-  width: 100%;
-  height: 460px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--page-bg);
-}
-
-.captcha button.link {
-  background: none;
-  border: none;
-  color: var(--fg-dim);
-  font-size: 0.85rem;
-  cursor: pointer;
-  padding: 0;
-}
-
 /* This is an app, not a web page: no text selection, no image dragging. */
+/* Back from the tray with a lock that may be due: nothing shows until it is known. */
+.pfp-veil .app-shell {
+  visibility: hidden;
+}
+
 .app-shell {
   user-select: none;
   -webkit-user-select: none;
@@ -369,10 +353,11 @@ body {
 }
 
 .login-form button.login-secondary {
+  font-family: inherit;
   padding: 0.65rem 1rem;
   border-radius: 10px;
   border: 1px solid var(--border);
-  background: var(--bg0);
+  background: var(--line-soft);
   color: var(--fg-primary);
   font-size: 0.9rem;
   cursor: pointer;
@@ -470,4 +455,49 @@ body {
   color: var(--fg-dim);
   font-size: 0.72rem;
   line-height: 1.35;
+}
+
+/* The card follows what it holds smoothly (see LoginCard), so no step makes it jump. */
+.login-card-fit {
+  overflow: hidden;
+  transition: height 0.22s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-card-fit {
+    transition: none;
+  }
+}
+
+/* The start's line and the wait's line in one cell: the taller sets the height of both. */
+.login-stack {
+  display: grid;
+  margin-top: -0.35rem;
+}
+.login-pane {
+  grid-area: 1 / 1;
+  visibility: hidden;
+}
+.login-pane.on {
+  visibility: visible;
+  animation: login-fade 0.22s ease;
+}
+.login-stack .login-hint.login-safe {
+  margin-top: 0;
+  align-self: start;
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-pane.on {
+    animation: none;
+  }
+}
+
+/* "Cancel" inside the waiting line, read as part of the sentence. */
+.login-form .login-hint button.link.login-inline {
+  display: inline;
+  padding: 0;
+  font-size: inherit;
+  color: var(--accent);
+}
+.login-form .login-hint button.link.login-inline:hover {
+  text-decoration: underline;
 }

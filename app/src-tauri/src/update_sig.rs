@@ -29,6 +29,9 @@
 //! file's BLAKE2b-512 hash. The version sits in the signed comment, so an older signed
 //! installer cannot be replayed as an update either: it has to be newer than this app.
 
+// The updater runs on Windows; elsewhere only the tests use the check.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;

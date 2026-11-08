@@ -1940,3 +1940,14 @@
 .g-topbar .g-docksearch {
   flex: 0 1 460px;
 }
+
+/* A person's name being typed, in the top bar where the name buttons were. */
+.g-personname {
+  flex: 0 1 360px;
+}
+.g-tool.g-tooltext {
+  gap: 6px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 500;
+}

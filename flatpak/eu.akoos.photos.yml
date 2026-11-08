@@ -1,0 +1,77 @@
+# Flatpak manifest for the Linux build.
+#
+# The build itself has no network. flatpak/build-local.sh prepares the source it
+# builds from: a clean copy of the tree with the npm dependencies installed and the
+# Rust crates vendored (`vendor/` plus `.cargo/config.toml`). A Flathub submission
+# would describe those same inputs as generated offline sources instead.
+app-id: eu.akoos.photos
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  - org.freedesktop.Sdk.Extension.node24
+command: photosforproton
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/node24/bin
+  env:
+    CARGO_HOME: /run/build/photos-for-proton/cargo-home
+    CARGO_NET_OFFLINE: 'true'
+    NPM_CONFIG_OFFLINE: 'true'
+    NPM_CONFIG_UPDATE_NOTIFIER: 'false'
+    NPM_CONFIG_FUND: 'false'
+    NPM_CONFIG_AUDIT: 'false'
+
+finish-args:
+  # The Proton API, and the loopback address the file-manager drive listens on (the
+  # sandbox shares the host's network, so the file manager outside can reach it).
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # The keystore that persists the signed-in session (gnome-keyring / kwallet).
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.freedesktop.Notifications
+  # The GTK bookmarks, for the "Proton Photos" entry in the file manager's sidebar. The
+  # app rewrites only its own line there.
+  - --filesystem=xdg-config/gtk-3.0
+  # KDE's places, for the same entry in Dolphin; the one file, and only if it exists.
+  - --filesystem=xdg-data/user-places.xbel
+  # No other filesystem access: the save-to-folder download and the folder picker go
+  # through the xdg file-chooser portal, so a download lands where the person picks it
+  # even from inside the sandbox.
+
+# H.264 and HEVC (the upload's video frames and HEIC stills, and playback in the viewer)
+# come from org.freedesktop.Platform.codecs-extra, which the GNOME runtime declares and
+# installs by itself, so the app declares nothing for them.
+
+modules:
+  - name: photos-for-proton
+    buildsystem: simple
+    build-commands:
+      - cd app && npm run build
+      # Bundles the sidecar, copies the node runtime beside the Rust sources, and stages
+      # sharp from the sidecar's installed dependencies (no npm install, no network).
+      - PFP_OFFLINE=1 node sidecar/build.mjs
+      # custom-protocol is what `tauri build` turns on: it embeds the built frontend.
+      # Without it plain cargo ships a dev build that loads the dev-server URL, a blank page.
+      - cargo build --release --offline --locked --features tauri/custom-protocol --manifest-path app/src-tauri/Cargo.toml
+      # The app finds its sidecar beside the executable, under resources/. The node
+      # runtime is `resources/sidecar-runtime` (it cannot be `resources/sidecar`, which
+      # is the directory holding server.mjs); sharp's native addon rides in node_modules.
+      - install -Dm755 app/src-tauri/target/release/photosforproton /app/bin/photosforproton
+      - install -Dm755 app/src-tauri/binaries/sidecar-x86_64-unknown-linux-gnu /app/bin/resources/sidecar-runtime
+      - install -Dm644 sidecar/build/server.mjs /app/bin/resources/sidecar/server.mjs
+      - cp -r sidecar/build/node_modules /app/bin/resources/sidecar/node_modules
+      # The search-by-content vocabulary, read from beside server.mjs.
+      - cp -r sidecar/build/assets /app/bin/resources/sidecar/assets
+      # Desktop integration.
+      - install -Dm644 flatpak/eu.akoos.photos.desktop /app/share/applications/eu.akoos.photos.desktop
+      - install -Dm644 flatpak/eu.akoos.photos.metainfo.xml /app/share/metainfo/eu.akoos.photos.metainfo.xml
+      - install -Dm644 app/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/eu.akoos.photos.png
+      - install -Dm644 app/src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/eu.akoos.photos.png
+    sources:
+      - type: dir
+        path: ..

@@ -24,6 +24,6 @@
 // user agent; WebKitGTK (the Linux build) reports "Linux" and never "Windows", and no
 // custom user agent is set, so this is reliable. It is synchronous, so the first render
 // can gate on it without a host round-trip. Everything bound to the File Explorer / Cloud
-// Filter integration, the tray, autostart and the self-updater is Windows-only, which is
-// exactly what `isWindows` guards; the Linux build browses and downloads to a folder.
+// Filter integration, the tray and the self-updater is Windows-only, which is exactly
+// what `isWindows` guards; the Linux build has its own file-manager drive instead.
 export const isWindows = /windows/i.test(navigator.userAgent);

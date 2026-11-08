@@ -22,7 +22,9 @@
 
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
-import { ChevronRightIcon } from "./icons";
+import { CheckIcon, ChevronRightIcon } from "./icons";
+import { FaceNamer } from "./FaceNamer";
+import type { LooseFace } from "../lib/localFaces";
 import { cachedPreview, loadPreview } from "../lib/previewStore";
 import { useT } from "../lib/i18n";
 import "../styles/Library.css";
@@ -46,13 +48,24 @@ export type DriveCollections = {
   searchOtherModel?: number;
 };
 
-/** A person or label with its photos found in this library, newest first. */
-export type LibraryEntry = { name: string; uids: string[]; cover: string | null; box: FaceBox | null };
+/** A person or label with its photos found in this library, newest first. A person found on
+ *  this computer carries its id, which the name and merge actions go by. */
+export type LibraryEntry = {
+  name: string;
+  uids: string[];
+  cover: string | null;
+  box: FaceBox | null;
+  personId?: string;
+  /** How many photos to show on the card, where `uids` is not read for it (an album). */
+  count?: number;
+  /** What tells this card from the others, where the name may not (two albums of one name). */
+  key?: string;
+};
 
 export type LibraryKind = "people" | "labels";
 
 /** A page under the Albums tab: the people, the labels, or the map. */
-export type LibraryPageKind = LibraryKind | "map" | "collection";
+export type LibraryPageKind = LibraryKind | "map" | "collection" | "duplicates" | "fixdates" | "hidden";
 
 /** `badge` puts a dot on the tile: something there waits for an answer. */
 export type Tile = { key: string; label: string; icon: ReactNode; onClick: () => void; badge?: boolean };
@@ -82,7 +95,7 @@ const FACE_ZOOM_OUT = 1.4;
  * the face fills its square frame, kept inside the picture. Until the picture's own shape is
  * known it is shown whole.
  */
-function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
+export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
   const [aspect, setAspect] = useState<number | null>(null);
   // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it:
   // the larger preview takes its place once it is in.
@@ -131,14 +144,46 @@ function EntryCard({
   entry,
   cover,
   onOpen,
+  selected,
+  selecting,
+  onToggle,
+  onContext,
 }: {
   entry: LibraryEntry;
   cover: string | null | undefined;
   onOpen: (entry: LibraryEntry) => void;
+  selected?: boolean;
+  /** Something is selected, so a plain click adds to the selection rather than opening. */
+  selecting?: boolean;
+  onToggle?: (entry: LibraryEntry, range: boolean) => void;
+  onContext?: (entry: LibraryEntry, e: React.MouseEvent) => void;
 }) {
   const t = useT();
   return (
-    <button className="lib-card" onClick={() => onOpen(entry)}>
+    <button
+      className={`lib-card${selected ? " selected" : ""}`}
+      aria-pressed={onToggle ? !!selected : undefined}
+      onClick={(e) => {
+        if (onToggle && (selecting || e.ctrlKey || e.metaKey || e.shiftKey)) onToggle(entry, e.shiftKey);
+        else onOpen(entry);
+      }}
+      onContextMenu={
+        onContext
+          ? (e) => {
+              e.preventDefault();
+              // This person's menu answers the click; the shell's document listener must
+              // not open its own on top of it.
+              e.stopPropagation();
+              onContext(entry, e);
+            }
+          : undefined
+      }
+    >
+      {onToggle && (
+        <span className="lib-check" aria-hidden>
+          <CheckIcon size={14} />
+        </span>
+      )}
       {entry.cover && cover ? (
         entry.box ? (
           <span className="lib-facebox">
@@ -151,8 +196,8 @@ function EntryCard({
       <span className="lib-cardtext">
         <span className="lib-cardname">{entry.name}</span>
         <span className="lib-cardcount">
-          {t(entry.uids.length === 1 ? "common.photoCount.one" : "common.photoCount.other", {
-            count: entry.uids.length,
+          {t((entry.count ?? entry.uids.length) === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+            count: entry.count ?? entry.uids.length,
           })}
         </span>
       </span>
@@ -169,17 +214,33 @@ export function EntryGrid({
   entries,
   cardSize,
   onOpen,
+  selected,
+  onToggle,
+  onContext,
 }: {
   entries: LibraryEntry[];
   face?: boolean;
   cardSize: number;
   onOpen: (entry: LibraryEntry) => void;
+  /** The people picked, by id, where cards can be picked. */
+  selected?: Set<string>;
+  onToggle?: (entry: LibraryEntry, range: boolean) => void;
+  onContext?: (entry: LibraryEntry, e: React.MouseEvent) => void;
 }) {
   const covers = useCovers(entries);
   return (
     <div className="lib-grid" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))` }}>
       {entries.map((entry) => (
-        <EntryCard key={entry.name} entry={entry} cover={entry.cover ? covers[entry.cover] : null} onOpen={onOpen} />
+        <EntryCard
+          key={entry.key ?? entry.personId ?? entry.name}
+          entry={entry}
+          cover={entry.cover ? covers[entry.cover] : null}
+          onOpen={onOpen}
+          selected={!!entry.personId && !!selected?.has(entry.personId)}
+          selecting={!!selected && selected.size > 0}
+          onToggle={onToggle}
+          onContext={onContext}
+        />
       ))}
     </div>
   );
@@ -261,17 +322,28 @@ type PageProps = {
   state: "loading" | "failed" | "ready";
   data: DriveCollections | null;
   entries: LibraryEntry[];
+  /** The labels kept on this computer, which need no copy on Drive to show. */
+  local?: boolean;
   onOpen: (entry: LibraryEntry) => void;
   onRetry: () => void;
 };
 
 /** The people or the labels the phone saved, as cards that open their photos. */
-export function LibraryPage({ kind, cardSize, state, data, entries, onOpen, onRetry }: PageProps) {
+export function LibraryPage({ kind, cardSize, state, data, entries, local, onOpen, onRetry }: PageProps) {
   const grid = { gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))` };
   const t = useT();
 
   const sources = (data?.sources ?? []).filter((s) => s.kind === (kind === "people" ? "faces" : "labels"));
 
+  if (local && state === "ready") {
+    return entries.length === 0 ? (
+      <div className="g-empty">
+        <p className="g-empty-title">{t("library.noLabels")}</p>
+      </div>
+    ) : (
+      <EntryGrid entries={entries} face={false} cardSize={cardSize} onOpen={onOpen} />
+    );
+  }
   if (state === "loading" && !data) {
     return (
       <div className="lib-grid" style={grid}>
@@ -310,5 +382,272 @@ export function LibraryPage({ kind, cardSize, state, data, entries, onOpen, onRe
         <EntryGrid entries={entries} face={kind === "people"} cardSize={cardSize} onOpen={onOpen} />
       )}
     </>
+  );
+}
+
+/**
+ * The people found on this computer: everyone named, then the groups still to be named, with a
+ * line saying how far the look through the library has got while it runs.
+ */
+export function LocalPeoplePage({
+  named,
+  unnamed,
+  suggestions,
+  loaded,
+  scanning,
+  cardSize,
+  onOpen,
+  onMerge,
+  onDismiss,
+  selected,
+  onToggle,
+  onContext,
+  loose,
+  names,
+  onNameFaces,
+  onRejectFaces,
+}: {
+  /** The faces in no group worth naming, and how many there are in all. */
+  loose: { faces: LooseFace[]; total: number };
+  /** Everyone already named, offered while a name is typed. */
+  names: string[];
+  onNameFaces: (faceIds: string[], name: string) => Promise<void>;
+  onRejectFaces: (faceIds: string[]) => Promise<void>;
+  selected: Set<string>;
+  onToggle: (entry: LibraryEntry, range: boolean) => void;
+  onContext: (entry: LibraryEntry, e: React.MouseEvent) => void;
+  named: LibraryEntry[];
+  unnamed: LibraryEntry[];
+  /** Unnamed groups that might be a named person, each with that person. */
+  suggestions: { unnamed: LibraryEntry; named: LibraryEntry }[];
+  loaded: boolean;
+  /** The line saying how far the scan is, while it runs. */
+  scanning: string | null;
+  cardSize: number;
+  onOpen: (entry: LibraryEntry) => void;
+  onMerge: (unnamed: LibraryEntry, named: LibraryEntry) => Promise<void>;
+  onDismiss: (unnamed: LibraryEntry, named: LibraryEntry) => Promise<void>;
+}) {
+  const t = useT();
+  const grid = { gridTemplateColumns: `repeat(auto-fill, minmax(${cardSize}px, 1fr))` };
+  if (!loaded) {
+    return (
+      <div className="lib-grid" style={grid}>
+        {Array.from({ length: 8 }, (_, i) => (
+          <div className="lib-card lib-skeleton" key={i} />
+        ))}
+      </div>
+    );
+  }
+  if (named.length === 0 && unnamed.length === 0 && loose.total === 0) {
+    return (
+      <div className="g-empty">
+        <p className="g-empty-title">{t("faces.noPeople")}</p>
+        {scanning && <p className="lib-note">{scanning}</p>}
+      </div>
+    );
+  }
+  return (
+    <>
+      {scanning && <p className="lib-note scan">{scanning}</p>}
+      {suggestions.length > 0 && (
+        <SuggestionCards suggestions={suggestions} onOpen={onOpen} onMerge={onMerge} onDismiss={onDismiss} />
+      )}
+      {named.length > 0 && (
+        <EntryGrid
+          entries={named}
+          face
+          cardSize={cardSize}
+          onOpen={onOpen}
+          selected={selected}
+          onToggle={onToggle}
+          onContext={onContext}
+        />
+      )}
+      {unnamed.length > 0 && (
+        <section className="lib-section">
+          <h2 className="lib-subhead">{t("faces.notNamedYet")}</h2>
+          <EntryGrid
+            entries={unnamed}
+            face
+            cardSize={cardSize}
+            onOpen={onOpen}
+            selected={selected}
+            onToggle={onToggle}
+            onContext={onContext}
+          />
+        </section>
+      )}
+      {loose.total > 0 && (
+        <LooseFaces loose={loose} names={names} onName={onNameFaces} onReject={onRejectFaces} />
+      )}
+    </>
+  );
+}
+
+/**
+ * The faces in no group worth naming, each on its own: picked a few at a time and named, put
+ * with someone already named, or left out as not a person.
+ */
+function LooseFaces({
+  loose,
+  names,
+  onName,
+  onReject,
+}: {
+  loose: { faces: LooseFace[]; total: number };
+  names: string[];
+  onName: (faceIds: string[], name: string) => Promise<void>;
+  onReject: (faceIds: string[]) => Promise<void>;
+}) {
+  const t = useT();
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const thumbs = useThumbnails(useMemo(() => loose.faces.map((f) => f.uid), [loose]));
+  // Only faces still listed stay picked.
+  useEffect(() => {
+    setPicked((p) => {
+      const ids = new Set(loose.faces.map((f) => f.faceId));
+      const kept = [...p].filter((id) => ids.has(id));
+      return kept.length === p.size ? p : new Set(kept);
+    });
+  }, [loose]);
+  const toggle = (id: string) =>
+    setPicked((p) => {
+      const next = new Set(p);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  return (
+    <section className="lib-section">
+      <h2 className="lib-subhead">{t("faces.looseTitle")}</h2>
+      <p className="lib-note scan">
+        {loose.total > loose.faces.length
+          ? t("faces.looseMore", { shown: loose.faces.length, total: loose.total })
+          : t("faces.looseHint")}
+      </p>
+      {picked.size > 0 && (
+        <div className="lib-looseactions">
+          <span className="lib-loosecount">{t("faces.picked", { count: picked.size })}</span>
+          <FaceNamer
+            names={names}
+            onName={async (name) => {
+              await onName([...picked], name);
+              setPicked(new Set());
+            }}
+            onReject={async () => {
+              await onReject([...picked]);
+              setPicked(new Set());
+            }}
+            onCancel={() => setPicked(new Set())}
+          />
+        </div>
+      )}
+      <div className="lib-loosegrid">
+        {loose.faces.map((f) => (
+          <button
+            key={f.faceId}
+            className={`lib-findcell${picked.has(f.faceId) ? " selected" : ""}`}
+            aria-pressed={picked.has(f.faceId)}
+            onClick={() => toggle(f.faceId)}
+          >
+            {thumbs[f.uid] ? (
+              <span className="lib-facebox">
+                <FaceCover uid={f.uid} thumb={thumbs[f.uid]!} box={f.box} />
+              </span>
+            ) : null}
+            <span className="lib-check" aria-hidden>
+              <CheckIcon size={14} />
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** A face, cut round from the person's cover, at a small fixed size. */
+function FaceDot({ entry, thumb }: { entry: LibraryEntry; thumb: string | null | undefined }) {
+  return (
+    <span className="lib-suggestface">
+      {entry.cover && thumb ? (
+        <span className="lib-facebox">
+          <FaceCover uid={entry.cover} thumb={thumb} box={entry.box} />
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/**
+ * "Might be the same person", as the phone asks it: the unnamed group's face beside the named
+ * person's, with Merge and Different person. Clicking the faces opens the group to look first.
+ */
+function SuggestionCards({
+  suggestions,
+  onOpen,
+  onMerge,
+  onDismiss,
+}: {
+  suggestions: { unnamed: LibraryEntry; named: LibraryEntry }[];
+  onOpen: (entry: LibraryEntry) => void;
+  onMerge: (unnamed: LibraryEntry, named: LibraryEntry) => Promise<void>;
+  onDismiss: (unnamed: LibraryEntry, named: LibraryEntry) => Promise<void>;
+}) {
+  const t = useT();
+  const [busy, setBusy] = useState<string | null>(null);
+  const covers = useCovers(useMemo(() => suggestions.flatMap((s) => [s.unnamed, s.named]), [suggestions]));
+  const run = async (key: string, action: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(key);
+    try {
+      await action();
+    } catch {
+      /* the card stays for another try */
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <section className="lib-section">
+      <h2 className="lib-subhead">{t("faces.suggestTitle")}</h2>
+      <div className="lib-suggest">
+        {suggestions.map(({ unnamed, named }) => {
+          const key = `${unnamed.personId}>${named.personId}`;
+          return (
+            <div className="lib-suggestcard" key={key}>
+              <button className="lib-suggestfaces" onClick={() => onOpen(unnamed)} title={unnamed.name}>
+                <FaceDot entry={unnamed} thumb={unnamed.cover ? covers[unnamed.cover] : null} />
+                <FaceDot entry={named} thumb={named.cover ? covers[named.cover] : null} />
+              </button>
+              <div className="lib-suggesttext">
+                <span className="lib-suggestname">{t("faces.suggestQuestion", { name: named.name })}</span>
+                <span className="lib-suggestcount">
+                  {t(unnamed.uids.length === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+                    count: unnamed.uids.length,
+                  })}
+                </span>
+              </div>
+              <div className="lib-suggestactions">
+                <button
+                  className="lib-suggestbtn primary"
+                  disabled={busy !== null}
+                  onClick={() => void run(key, () => onMerge(unnamed, named))}
+                >
+                  {t("faces.merge")}
+                </button>
+                <button
+                  className="lib-suggestbtn"
+                  disabled={busy !== null}
+                  onClick={() => void run(key, () => onDismiss(unnamed, named))}
+                >
+                  {t("faces.differentPerson")}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }

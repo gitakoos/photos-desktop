@@ -43,11 +43,14 @@ import {
   photoTagsFor,
   startDropUpload,
   startUpload,
+  takeDropReplaced,
   statusRows,
+  thumbnailPair,
   type UploadItem,
   type UploadStatus,
 } from "./upload.ts";
 import { hydrateDir } from "./download.ts";
+import { NO_COMPRESSION, setCompression } from "./compression.ts";
 import { reportSlowUpload } from "./api.ts";
 
 const work = mkdtempSync(join(tmpdir(), "pfp-upload-test-"));
@@ -184,6 +187,25 @@ describe("a path is matched to its frame however it was spelled", () => {
   });
 });
 
+describe("a drop with nothing to upload", () => {
+  it("is counted, so the window can say so instead of waiting", async () => {
+    const empty = join(work, "no-media");
+    mkdirSync(empty, { recursive: true });
+    writeFileSync(join(empty, "IMG_0001.THM"), Buffer.alloc(16, 1));
+    const { photos } = recordingPhotos();
+    const before = getUploadStatus().emptyDrops ?? 0;
+    const total = getUploadStatus().total;
+
+    startUpload(photos, [empty]);
+    for (let i = 0; i < 50 && (getUploadStatus().emptyDrops ?? 0) === before; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    expect(getUploadStatus().emptyDrops).toBe(before + 1);
+    expect(getUploadStatus().total).toBe(total);
+  });
+});
+
 describe("thumbnails for an upload", () => {
   it("makes a video's two thumbnails out of the frame the host staged", async () => {
     const video = writeFakeVideo("holiday.mp4");
@@ -304,6 +326,17 @@ describe("thumbnails for an upload", () => {
     expect(status.failed).toBe(0);
     expect(thumbnails[0]).toHaveLength(0);
     expect(existsSync(frame)).toBe(false);
+  });
+});
+
+describe("the thumbnail of a see-through picture", () => {
+  it("lies on white, not on the black its empty pixels hold", async () => {
+    const png = await sharp({ create: { width: 64, height: 64, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } })
+      .png()
+      .toBuffer();
+    const [small] = await thumbnailPair(sharp(png));
+    const { data } = await sharp(Buffer.from(small.thumbnail)).raw().toBuffer({ resolveWithObject: true });
+    expect(Math.min(data[0], data[1], data[2])).toBeGreaterThan(240);
   });
 });
 
@@ -954,5 +987,126 @@ describe("a slow line", () => {
     const item = status.items.find((i) => i.name === "progress.jpg")!;
     expect(item.size).toBeGreaterThan(0);
     expect(item.sent).toBe(item.size);
+  });
+});
+
+describe("an upload with compression on", () => {
+  /** A Drive that records what it was asked about and what went up. */
+  function askingPhotos(already: Record<string, string> = {}) {
+    const asked: string[] = [];
+    const sent: { name: string; mediaType: string; size: number; sha1: string }[] = [];
+    return {
+      asked,
+      sent,
+      photos: {
+        findPhotoDuplicates: async (name: string): Promise<string[]> => {
+          asked.push(name);
+          return already[name] ? [already[name]] : [];
+        },
+        getFileUploader: async (name: string, meta: { mediaType: string; expectedSize: number; expectedSha1: string }) => {
+          sent.push({ name, mediaType: meta.mediaType, size: meta.expectedSize, sha1: meta.expectedSha1 });
+          return {
+            uploadFromStream: async (stream: ReadableStream) => {
+              const reader = stream.getReader();
+              while (!(await reader.read()).done) {
+                /* discarded */
+              }
+              return { completion: async () => ({ nodeUid: `uid-${sent.length}` }) };
+            },
+          };
+        },
+      },
+    };
+  }
+
+  afterAll(() => setCompression(NO_COMPRESSION));
+
+  it("asks about the original first, then sends the lighter copy under a JPEG name", async () => {
+    setCompression({ ...NO_COMPRESSION, photos: true });
+    const photo = await writeDetailedPhoto("detail.png");
+    const { photos, asked, sent } = askingPhotos();
+    startUpload(photos, [photo]);
+    const status = await settle();
+    expect(status.done).toBe(1);
+    expect(asked).toEqual(["detail.png", "detail.jpg"]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ name: "detail.jpg", mediaType: "image/jpeg" });
+    expect(sent[0].size).toBeLessThan(readFileSync(photo).length);
+    expect(status.saved).toBe(readFileSync(photo).length - sent[0].size);
+  });
+
+  it("makes no copy of a photo the library already has as it is", async () => {
+    setCompression({ ...NO_COMPRESSION, photos: true });
+    const photo = await writeDetailedPhoto("there.png");
+    const { photos, asked, sent } = askingPhotos({ "there.png": "existing" });
+    startUpload(photos, [photo]);
+    const status = await settle();
+    expect(status.skipped).toBe(1);
+    expect(asked).toEqual(["there.png"]);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("finds a copy uploaded from here before, by the copy's own name and bytes", async () => {
+    setCompression({ ...NO_COMPRESSION, photos: true });
+    const photo = await writeDetailedPhoto("again.png");
+    const { photos, sent } = askingPhotos({ "again.jpg": "uploaded-before" });
+    startUpload(photos, [photo]);
+    const status = await settle();
+    expect(status.skipped).toBe(1);
+    expect(sent).toHaveLength(0);
+  });
+
+  /** A photo staged the way the host stages a File Explorer drop. */
+  async function stagedDrop(name: string): Promise<string> {
+    const folder = join(work, "pfp-drop", `c-${name}`);
+    mkdirSync(folder, { recursive: true });
+    const path = join(folder, name);
+    writeFileSync(path, readFileSync(await writeDetailedPhoto(`src-${name}`)));
+    return path;
+  }
+
+  it.runIf(process.platform === "win32")("names a folder drop that went up lighter, once, for the host to replace", async () => {
+    setCompression({ ...NO_COMPRESSION, photos: true });
+    takeDropReplaced();
+    const path = await stagedDrop("folder.png");
+    const { photos, sent } = askingPhotos();
+    startDropUpload(photos, [path]);
+    const status = await settle();
+    expect(status.done).toBe(1);
+    expect(sent[0]).toMatchObject({ name: "folder.jpg", mediaType: "image/jpeg" });
+    expect(takeDropReplaced()).toEqual([path]);
+    expect(takeDropReplaced()).toEqual([]);
+  });
+
+  it.runIf(process.platform === "win32")("names a folder drop whose lighter copy the library already has", async () => {
+    setCompression({ ...NO_COMPRESSION, photos: true });
+    takeDropReplaced();
+    const path = await stagedDrop("before.png");
+    const { photos, sent } = askingPhotos({ "before.jpg": "uploaded-before" });
+    startDropUpload(photos, [path]);
+    const status = await settle();
+    expect(status.skipped).toBe(1);
+    expect(sent).toHaveLength(0);
+    expect(takeDropReplaced()).toEqual([path]);
+  });
+
+  it("leaves a folder drop alone when the original went up", async () => {
+    setCompression(NO_COMPRESSION);
+    takeDropReplaced();
+    const path = await stagedDrop("kept.png");
+    const { photos, sent } = askingPhotos();
+    startDropUpload(photos, [path]);
+    await settle();
+    expect(sent[0]).toMatchObject({ name: "kept.png", mediaType: "image/png" });
+    expect(takeDropReplaced()).toEqual([]);
+  });
+
+  it("sends the original with compression off", async () => {
+    setCompression(NO_COMPRESSION);
+    const photo = await writeDetailedPhoto("plain.png");
+    const { photos, sent } = askingPhotos();
+    startUpload(photos, [photo]);
+    await settle();
+    expect(sent[0]).toMatchObject({ name: "plain.png", mediaType: "image/png", size: readFileSync(photo).length });
   });
 });

@@ -126,6 +126,31 @@ describe("waiting for the sign-in", () => {
     expect(fork.calls.discarded).toEqual([]);
   });
 
+  it("asks at once when the user comes back, not at the next turn of the wait", async () => {
+    const fork = fakeFork(1, (url) => seal(keyOf(url), { keyPassword: "kp-1" }));
+    const signIn = new BrowserSignIn(fork.api, { first: 60_000, every: 60_000, giveUp: 120_000 });
+    fork.setUrl(await signIn.start());
+    signIn.checkNow();
+
+    await until(() => signIn.state().state !== "waiting");
+
+    expect(fork.calls.status).toBe(1);
+    expect(signIn.state().state).toBe("done");
+  });
+
+  it("does not ask again for a return that follows the last ask too soon", async () => {
+    const fork = fakeFork(Infinity);
+    const signIn = new BrowserSignIn(fork.api, { first: 60_000, every: 60_000, giveUp: 120_000 });
+    await signIn.start();
+    signIn.checkNow();
+    await until(() => fork.calls.status === 1);
+    signIn.checkNow();
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(fork.calls.status).toBe(1);
+    signIn.cancel();
+  });
+
   it("stops and spends the code when cancelled", async () => {
     const fork = fakeFork(Infinity);
     const signIn = new BrowserSignIn(fork.api, { first: 1, every: 50, giveUp: 60_000 });
