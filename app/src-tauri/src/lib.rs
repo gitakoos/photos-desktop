@@ -153,6 +153,9 @@ fn classified(method: &str) -> Option<Priority> {
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
         | "protectSession" | "signInChoice" | "keepSignIn" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
         | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces"
+        // The timeline's read: the grid cannot paint without it, so it goes ahead of the
+        // first screen's own thumbnails and media types rather than behind them.
+        | "startTimeline" | "timelinePage"
         // The backup settings' poll: a tiny answer that must not wait behind a page of thumbnails.
         | "sharedBackupStatus" => Priority::Interactive,
 
@@ -187,6 +190,8 @@ fn classified(method: &str) -> Option<Priority> {
         | "myFilesCheck"
         // The hidden albums' photos read again: a walk over each album.
         | "hiddenRefresh"
+        // The trash read ahead of opening it: a walk that waits its turn behind the screen.
+        | "warmTrash"
         // Keeping every photo on this PC: a whole-library download that yields to the window,
         // and the lookups that decide what it keeps.
         | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden" => Priority::Background,
@@ -198,7 +203,7 @@ fn classified(method: &str) -> Option<Priority> {
 
         // What the window asks for a screenful at a time, or waits on as it opens a view:
         // short, and wanted now.
-        "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
+        "getDurations" | "getMediaTypes" | "getTimeline"
         | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
         | "facePeople" | "facePersonCandidates" | "facePersonFaces" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
@@ -1241,7 +1246,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "warmTrash" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,
@@ -3684,6 +3689,14 @@ mod log_tests {
         assert_eq!(deadline_for("listForMount"), long);
         assert!(deadline_for("getPreview") < long);
         assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
+    }
+
+    #[test]
+    fn the_timeline_read_goes_ahead_of_the_first_screens_work() {
+        for method in ["startTimeline", "timelinePage"] {
+            assert!(priority_for(method) > priority_for("getThumbnails"), "{method}");
+            assert!(priority_for(method) > priority_for("getMediaTypes"), "{method}");
+        }
     }
 
     #[test]

@@ -325,6 +325,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
+  warmTrash: () => session.listTrashed(),
   hiddenState: () => session.hiddenState(),
   hiddenSet: (p) =>
     session.hiddenSet(p?.kind === "albums" ? "albums" : "photos", uidList(p?.uids), p?.hidden !== false),

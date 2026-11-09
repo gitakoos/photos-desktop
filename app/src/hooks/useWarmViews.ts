@@ -91,7 +91,7 @@ export function useWarmViews(ready: boolean, onTimeline: boolean, reloadKey: num
       await new Promise((r) => setTimeout(r, 400));
       if (!fresh()) return;
       try {
-        const rows = await rpc<TrashItem[]>("listTrashed");
+        const rows = await rpc<TrashItem[]>("warmTrash");
         if (fresh()) setTrash(rows);
       } catch {
         /* as above */
