@@ -63,4 +63,17 @@ describe("the photos the Fix dates page lists", () => {
     expect(dateFromName("IMG_20230431_101010.jpg", NOW)).toBeNull();
     expect(dateFromName("IMG_20990101_120000.jpg", NOW)).toBeNull();
   });
+
+  it("allows a day ahead in a name, for today's noon read in the morning, and no more", () => {
+    const morning = new Date(2026, 10, 6, 9, 0, 0).getTime();
+    expect(dateFromName("IMG-20261106-WA0001.jpg", morning)).toBe(at(2026, 11, 6));
+    expect(dateFromName("IMG-20261108-WA0001.jpg", morning)).toBeNull();
+    expect(dateFromName("IMG_20261108_090000.jpg", morning)).toBeNull();
+    expect(dateFromName("IMG_20990101_120000.jpg", morning)).toBeNull();
+  });
+
+  it("keeps its own line for a date still to come", () => {
+    expect(dateProblem(NOW + 25 * 3600_000, "DSC_0042.JPG", NOW)).toEqual({ kind: "future" });
+    expect(dateProblem(NOW + 23 * 3600_000, "DSC_0042.JPG", NOW)).toBeNull();
+  });
 });

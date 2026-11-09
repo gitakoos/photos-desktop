@@ -52,4 +52,12 @@ describe("the date a file name gives", () => {
     expect(dateFromName("IMG_19800101_120000.jpg", NOW)).toBeNull();
     expect(dateFromName("IMG_20990101_120000.jpg", NOW)).toBeNull();
   });
+
+  it("allows a day ahead, for today's noon read in the morning, and no more", () => {
+    const morning = new Date(2026, 9, 24, 9, 0, 0).getTime();
+    expect(dateFromName("IMG-20261024-WA0001.jpg", morning)).toBe(at(2026, 10, 24));
+    expect(dateFromName("IMG-20261026-WA0001.jpg", morning)).toBeNull();
+    expect(dateFromName("IMG_20261026_090000.jpg", morning)).toBeNull();
+    expect(dateFromName("IMG_20990101_120000.jpg", morning)).toBeNull();
+  });
 });
