@@ -144,6 +144,11 @@ windows = { version = "0.61", features = [
   # Whether the connection is metered, which holds the same pass.
   "Networking_Connectivity",
   "Data_Xml_Dom",
+  # Reading the window thread's call stack into the log when it stops answering
+  # (src/hang_watch.rs). Kernel comes with it because CONTEXT is gated behind it.
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_Kernel",
+  "Win32_System_LibraryLoader",
   # Windows Hello, the lock on the Hidden page, and the interop that parents its prompt
   # to the app's window.
   "Security_Credentials_UI",

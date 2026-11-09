@@ -47,6 +47,8 @@ mod local_file;
 mod local_folder;
 mod photo_edit;
 mod secure_store;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod hang_watch;
 mod update_sig;
 mod upload_frame;
 mod video_compress;
@@ -3160,6 +3162,9 @@ pub fn run() {
             // launch sweeps too, because the folder emptied here is the one its own
             // decoded previews are staged in.
             cloud_mount::reap_temp_leftovers();
+            // From here on a window that stops answering says where in the log.
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            hang_watch::start(app.handle());
             #[cfg(not(windows))]
             files_drive::reap(app.handle());
             // A launch that exists only to show a file stops here, with one window on
