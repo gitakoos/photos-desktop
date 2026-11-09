@@ -25,7 +25,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { backupBaseline } from "./backupBaseline.ts";
 import { writeBackupFlags } from "./backupFlags.ts";
@@ -729,5 +729,177 @@ describe("photos read side by side", () => {
       expect(many.vectors).toEqual(one.vectors);
       expect(many.faceCount).toBe(one.faceCount);
     }
+  });
+});
+
+describe("the full scan", () => {
+  beforeEach(() => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-scan-")));
+    setDataKey(randomBytes(32));
+  });
+
+  /** A scanner whose own run is over and left `uids` scanned; the models open but are never run. */
+  async function scanned(uids: string[]) {
+    const s = scanner();
+    (s as any).openModels = async () => ({});
+    const lib = library(uids);
+    s.setSource(lib.source);
+    await settle(s);
+    expect(s.store.scanned().sort()).toEqual(uids);
+    return { s, source: lib.source };
+  }
+
+  async function ended(s: FaceScanner): Promise<void> {
+    while (s.getSweep().running) await new Promise((r) => setTimeout(r, 5));
+    await settle(s);
+  }
+
+  /** A library whose reading waits until let go, and says when it has begun. */
+  function holdReading(source: ScanSource) {
+    let begun: () => void = () => {};
+    const reading = new Promise<void>((r) => (begun = r));
+    let letGo: () => void = () => {};
+    const gate = new Promise<void>((r) => (letGo = r));
+    source.sweepPictures = async function* () {
+      begun();
+      await gate;
+    };
+    return { reading, letGo };
+  }
+
+  it("starts no run of the scan while it goes on, and hands back to the scan after", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    const { reading, letGo } = holdReading(source);
+    const release = vi.spyOn(s as any, "releaseModels");
+    s.startLibrarySweep();
+    await reading;
+    release.mockClear();
+    (s as any).kick();
+    expect((s as any).running).toBeNull();
+    expect(release).not.toHaveBeenCalled();
+    letGo();
+    await ended(s);
+    expect((s as any).recheck).not.toBeNull();
+    s.stop(false);
+  });
+
+  it("takes the scan's waiting recheck off when it starts", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    const { reading, letGo } = holdReading(source);
+    expect((s as any).recheck).not.toBeNull();
+    s.startLibrarySweep();
+    await reading;
+    expect((s as any).recheck).toBeNull();
+    letGo();
+    await ended(s);
+    s.stop(false);
+  });
+
+  it("marks nothing when the models cannot open, and says only the kind of error", async () => {
+    const { s, source } = await scanned(["vol~a", "vol~b"]);
+    (s as any).openModels = async () => {
+      throw new TypeError("no such file: C:/models/face.onnx");
+    };
+    source.sweepPictures = async function* (uids) {
+      for (const uid of uids) yield { uid, bytes: Buffer.from("picture") };
+    };
+    const log = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    s.startLibrarySweep();
+    await ended(s);
+    const written = log.mock.calls.map(([text]) => String(text));
+    log.mockRestore();
+    expect(s.store.isSwept("vol~a")).toBe(false);
+    expect(s.store.isSwept("vol~b")).toBe(false);
+    expect(s.getSweep().running).toBe(false);
+    expect(written).toContain("[faces] full scan stopped: TypeError\n");
+    s.stop(false);
+  });
+
+  /** Models in memory, as a photo read leaves them, each noting when it is let go. */
+  function resident(s: FaceScanner) {
+    const release = vi.fn(async () => {});
+    (s as any).models = { detector: { release }, embedder: { release }, accel: "cpu" };
+    return release;
+  }
+
+  /** Once the sweep started first has wound down, which is after its status already says stopped. */
+  function firstSweep(s: FaceScanner) {
+    const sweepAll = vi.spyOn(s as any, "sweepAll");
+    return () => sweepAll.mock.results[0]!.value as Promise<void>;
+  }
+
+  it("lets the models go when it is stopped", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    // Paused, so no run of the scan comes after to let them go in its place.
+    s.setPaused(true);
+    const { reading, letGo } = holdReading(source);
+    const release = resident(s);
+    const woundDown = firstSweep(s);
+    s.startLibrarySweep();
+    await reading;
+    s.stopSweep();
+    letGo();
+    await woundDown();
+    expect(release).toHaveBeenCalledTimes(2);
+    expect((s as any).models).toBeNull();
+    expect(s.store.isSwept("vol~a")).toBe(false);
+    s.stop(false);
+  });
+
+  it("lets the models go when they fail to open", async () => {
+    const { s } = await scanned(["vol~a"]);
+    s.setPaused(true);
+    const release = resident(s);
+    (s as any).openModels = async () => {
+      throw new TypeError("no such file");
+    };
+    const log = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    s.startLibrarySweep();
+    await ended(s);
+    log.mockRestore();
+    expect(release).toHaveBeenCalledTimes(2);
+    expect((s as any).models).toBeNull();
+    s.stop(false);
+  });
+
+  it("leaves the models to the scan that started again when it was stopped", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    const { reading, letGo } = holdReading(source);
+    let listed: (uids: string[]) => void = () => {};
+    source.listUids = () => new Promise((r) => (listed = r));
+    const woundDown = firstSweep(s);
+    s.startLibrarySweep();
+    await reading;
+    const release = resident(s);
+    s.stopSweep();
+    expect((s as any).running).not.toBeNull();
+    letGo();
+    await woundDown();
+    expect(release).not.toHaveBeenCalled();
+    listed(["vol~a"]);
+    await settle(s);
+    expect(release).toHaveBeenCalledTimes(2);
+    s.stop(false);
+  });
+
+  it("leaves the models to a full scan started again straight after", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    s.setPaused(true);
+    const first = holdReading(source);
+    const woundDown = firstSweep(s);
+    s.startLibrarySweep();
+    await first.reading;
+    const release = resident(s);
+    s.stopSweep();
+    const second = holdReading(source);
+    s.startLibrarySweep();
+    await second.reading;
+    first.letGo();
+    await woundDown();
+    expect(release).not.toHaveBeenCalled();
+    second.letGo();
+    await ended(s);
+    expect(release).toHaveBeenCalledTimes(2);
+    s.stop(false);
   });
 });

@@ -1639,6 +1639,7 @@ export class ProtonSession {
     faceScanner.setSource({
       listUids: async () => (await this.getTimeline()).map((item) => item.uid),
       pictures: (uids, ahead) => this.scanPictures(photos, uids, ahead),
+      sweepPictures: (uids, ahead) => this.sweepPictures(photos, uids, ahead),
       listTrashed: async () => {
         const links = new Set<string>();
         for await (const uid of withStallGuard(photos.iterateTrashedNodeUids(), SDK_STALL_MS, "iterateTrashedNodeUids")) {
@@ -1848,6 +1849,23 @@ export class ProtonSession {
   }
 
   /**
+   * What the full face scan reads for `uids`: the large preview where there is one, which is
+   * far less to download for a whole library, and the scan's own reading for the others.
+   */
+  private async *sweepPictures(
+    photos: any,
+    uids: string[],
+    ahead?: number,
+  ): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+    const without: string[] = [];
+    for await (const got of this.scanPreviews(photos, uids, [ThumbnailType.Type2])) {
+      if (got.bytes) yield got;
+      else without.push(got.uid);
+    }
+    if (without.length) yield* this.scanPictures(photos, without, ahead);
+  }
+
+  /**
    * The small thumbnails the duplicate finder fingerprints: the cached ones first, the rest
    * fetched and cached, as the grid would. It waits while the grid has thumbnails of its own
    * waiting, so a page on screen is never held up by it. A photo a fetch did not answer is left
@@ -1885,10 +1903,14 @@ export class ProtonSession {
   /**
    * The large previews of `uids` for the face scan: the cached ones first, the rest fetched and
    * not cached, since a scan reads the whole library once. A photo without a large preview
-   * falls back to its small one. One a fetch did not answer (a stall, a network error) is left
+   * falls back to the next of `types`. One a fetch did not answer (a stall, a network error) is left
    * out, so the scan asks for it again later instead of taking it for a photo without faces.
    */
-  private async *scanPreviews(photos: any, uids: string[]): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+  private async *scanPreviews(
+    photos: any,
+    uids: string[],
+    types: ThumbnailType[] = [ThumbnailType.Type2, ThumbnailType.Type1],
+  ): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
     const missing: string[] = [];
     for (const uid of uids) {
       const cached = thumbGet(uid, ThumbnailType.Type2);
@@ -1897,7 +1919,7 @@ export class ProtonSession {
     }
     // Large previews first; the photos that have none are asked for their small one.
     let ask = missing;
-    for (const type of [ThumbnailType.Type2, ThumbnailType.Type1]) {
+    for (const type of types) {
       if (ask.length === 0) return;
       const without: string[] = [];
       try {

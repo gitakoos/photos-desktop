@@ -63,6 +63,7 @@ import {
   type FaceHit,
 } from "./faces.ts";
 import { FaceStore, MAX_FACE_INDEX, type FaceRecord } from "./faceStore.ts";
+import { sweepLibrary } from "./faceSweep.ts";
 import { adoptScanned, applyCopy, compareWithPhone, copyFits, copyForDrive, describeComparison } from "./faceSync.ts";
 import type { FaceCopy, FaceCopyToWrite, SearchCopyToWrite } from "./driveData.ts";
 import { markGpuFailed, openModel, type Accel } from "./inference.ts";
@@ -153,6 +154,11 @@ export type ScanSource = {
    * `ahead` is how many downloads may run at once.
    */
   pictures(uids: string[], ahead?: number): AsyncIterable<{ uid: string; bytes: Buffer | null }>;
+  /**
+   * What the full scan reads for these photos: the large preview where there is one, else as
+   * `pictures` does, so a look at the whole library does not download it in originals.
+   */
+  sweepPictures?(uids: string[], ahead?: number): AsyncIterable<{ uid: string; bytes: Buffer | null }>;
   /** The photos in the Drive trash, by link id, which keep their faces; throws when they cannot be read. */
   listTrashed(): Promise<Set<string>>;
   /** Which photos are hidden: they are not scanned, and their faces never go to Drive. */
@@ -203,14 +209,14 @@ export type ScanStatus = {
 
 type Models = { detector: any; embedder: any; accel: Accel };
 
-/** How far "Find more photos" has got for one person. */
+/** How far "Find more photos" has got for one person, or the full scan, whose `personId` is null. */
 export type SweepStatus = {
   personId: string | null;
   running: boolean;
-  /** Photos looked at again, of those with no face found the first time. */
+  /** Photos looked at again, of those with no face found the first time, or of the library's. */
   done: number;
   total: number;
-  /** Faces found that might be the person. */
+  /** Faces found that might be the person; for the full scan, the faces added. */
   found: number;
 };
 
@@ -532,6 +538,8 @@ export class FaceScanner {
 
   /** Starts a run unless one is going or nothing can run. */
   private kick(): void {
+    // A sweep has the models; the end of one starts the scan again.
+    if (this.sweepStatus.running) return;
     if (!this.wanted || this.paused || !this.source) return;
     if (this.running) {
       this.startAfter = true;
@@ -1009,6 +1017,32 @@ export class FaceScanner {
     return this.getSweep();
   }
 
+  /**
+   * The full scan: every photo read again, tile by tile, keeping the faces already known. Like
+   * "Find more photos", the scan steps aside while it runs, and each photo is looked at this way once.
+   */
+  startLibrarySweep(): SweepStatus {
+    if (this.sweepStatus.running && this.sweepStatus.personId === null) return this.getSweep();
+    if (!this.enabled || !this.source || !this.store.isLoaded()) throw new Error("Face recognition is not running");
+    const generation = ++this.sweepGeneration;
+    // The scan's own run ends at its next photo; it starts again once this is done.
+    this.generation++;
+    if (this.recheck) clearTimeout(this.recheck);
+    this.recheck = null;
+    this.sweepStatus = { personId: null, running: true, done: 0, total: 0, found: 0 };
+    void this.sweepAll(generation)
+      .catch((e) => {
+        if (!(e instanceof Stopped)) process.stderr.write(`[faces] full scan stopped: ${(e as Error)?.name ?? "error"}\n`);
+      })
+      .finally(() => {
+        if (this.sweepGeneration === generation) this.sweepStatus.running = false;
+        this.saveQuietly();
+        this.status.version++;
+        this.kick();
+      });
+    return this.getSweep();
+  }
+
   stopSweep(): SweepStatus {
     this.sweepGeneration++;
     this.sweepStatus.running = false;
@@ -1034,6 +1068,57 @@ export class FaceScanner {
       },
     );
     this.releaseModels();
+  }
+
+  private async sweepAll(generation: number): Promise<void> {
+    const live = () => this.sweepGeneration === generation && this.enabled && !!this.source;
+    // A run of the scan that was mid-photo finishes it first.
+    while (this.running) {
+      if (!live()) throw new Stopped();
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    try {
+      // Opened here, so models that cannot open end the run with no photo marked as looked at.
+      await this.openModels();
+      const source = this.source!;
+      const hidden = source.hiddenTest();
+      const result = await sweepLibrary({
+        todo: this.store.scanned().filter((uid) => !this.store.isSwept(uid) && !hidden(uid)),
+        batch: BATCH,
+        read: (uids) => {
+          const ahead = this.speed().level.downloads;
+          return source.sweepPictures ? source.sweepPictures(uids, ahead) : source.pictures(uids, ahead);
+        },
+        look: async (bytes, uid) => this.analyze(await decodeLikePhone(bytes), uid, true),
+        known: (uid) => this.store.facesOf(uid),
+        put: (uid, faces) => this.store.put(uid, faces),
+        markSwept: (uid) => this.store.markSwept(uid),
+        live,
+        onProgress: (done, total, added) => {
+          this.sweepStatus.done = done;
+          this.sweepStatus.total = total;
+          this.sweepStatus.found = added;
+        },
+        onBatchEnd: async () => {
+          // What was found shows as it comes, not only at the end.
+          await placeNew(this.store);
+          this.saveQuietly();
+          this.status.version++;
+          const pause = this.speed().level.pauseMs;
+          if (pause > 0) await sleep(pause);
+        },
+      });
+      if (result === "stopped") return;
+      await placeNew(this.store);
+      reconsiderLeftovers(this.store);
+      this.saveQuietly();
+      this.status.version++;
+      this.onDriveChange?.();
+    } finally {
+      // Stopped, the scan starts again at once and a new full scan can too: whichever took over while
+      // this one wound down is using the models, and lets them go itself when it ends.
+      if (!this.running && (this.sweepGeneration === generation || !this.sweepStatus.running)) this.releaseModels();
+    }
   }
 
   /**

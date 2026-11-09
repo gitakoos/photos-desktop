@@ -96,6 +96,8 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
   faceSweepStart: (p) => faceScanner.startSweep(str(p?.id)),
   faceSweepStop: () => faceScanner.stopSweep(),
   faceSweepStatus: () => faceScanner.getSweep(),
+  faceLibrarySweepStart: () => faceScanner.startLibrarySweep(),
+  faceLibrarySweepStop: () => faceScanner.stopSweep(),
   faceSuggestionDismiss: (p) => change(() => dismissSuggestion(store(), str(p?.unnamed), str(p?.named))),
   facePersonReject: (p) => change(() => ({ count: rejectPerson(store(), str(p?.id)) })),
   facePersonRemovePhotos: (p) =>

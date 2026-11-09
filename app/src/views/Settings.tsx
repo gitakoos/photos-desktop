@@ -76,6 +76,7 @@ import {
   TextIcon,
   TrashIcon,
   TuneIcon,
+  ZoomInIcon,
 } from "../components/icons";
 import type { DriveCollections } from "../components/Library";
 import { barColor, formatBytes, type Account } from "../components/ProfileMenu";
@@ -2097,6 +2098,82 @@ function PauseRow({ paused, act }: { paused: boolean; act?: FacesAct }) {
   );
 }
 
+type SweepStatus = { personId: string | null; running: boolean; done: number; total: number; found: number };
+
+/** The full scan: started and stopped here, and followed while it runs. Per person, it is the person's page's. */
+function FullScanRow({ act }: { act?: FacesAct }) {
+  const t = useT();
+  const { lang } = useLang();
+  const [sweep, setSweep] = useState<SweepStatus | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const running = !!sweep?.running && sweep.personId === null;
+
+  useEffect(() => {
+    let live = true;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = await rpc<SweepStatus>("faceSweepStatus");
+        if (!live) return;
+        setSweep(next);
+        if (next.running && next.personId === null) timer = window.setTimeout(poll, 2000);
+      } catch {
+        /* shown as not running */
+      }
+    };
+    void poll();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [running]);
+
+  return (
+    <div className="st-row">
+      <span className="st-row-ico" aria-hidden>
+        <ZoomInIcon size={18} />
+      </span>
+      <div className="st-text">
+        <div className="st-label">{t("settings.faceFullScan")}</div>
+        <div className="st-desc">{t("settings.faceFullScanDesc")}</div>
+        {unavailable && <div className="st-desc bad">{t("settings.faceFullScanUnavailable")}</div>}
+        {running && sweep && (
+          <>
+            <div className="st-desc st-status">
+              {t("settings.faceFullScanProgress", {
+                done: sweep.done.toLocaleString(lang),
+                total: sweep.total.toLocaleString(lang),
+                found: sweep.found.toLocaleString(lang),
+              })}
+            </div>
+            <div className="st-progress">
+              <div style={{ width: `${Math.round((sweep.done / Math.max(1, sweep.total)) * 100)}%` }} />
+            </div>
+          </>
+        )}
+      </div>
+      {running ? (
+        <button
+          className="st-row-btn"
+          onClick={() => void act?.("faceLibrarySweepStop").then((s) => setSweep(s as SweepStatus), () => {})}
+        >
+          {t("settings.faceFullScanStop")}
+        </button>
+      ) : (
+        <button
+          className="st-row-btn"
+          onClick={() => {
+            setUnavailable(false);
+            void act?.("faceLibrarySweepStart").then((s) => setSweep(s as SweepStatus), () => setUnavailable(true));
+          }}
+        >
+          {t("settings.faceFullScanStart")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * How fast the scan reads the library, the same speed for the faces and the search. Shows the speed
  * this PC starts at until one is picked, and says so while the battery or a metered connection
@@ -2346,6 +2423,7 @@ function FacesPane({
             />
           </label>
         )}
+        {settings.localFaces && <FullScanRow act={faces?.act} />}
         <div className="st-row off">
           <span className="st-row-ico" aria-hidden>
             <TrashIcon size={18} />

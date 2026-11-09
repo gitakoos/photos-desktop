@@ -230,7 +230,8 @@ fn classified(method: &str) -> Option<Priority> {
         | "faceSearchClear" | "faceNameFaces" | "faceRejectFaces" | "faceNotThisPerson" | "facePersonRename"
         | "facePersonMerge" | "facePersonReject" | "facePersonDecline" | "facePersonCover"
         | "facePersonAddFaces" | "facePersonRemovePhotos" | "faceSuggestionDismiss"
-        | "faceSweepStart" | "faceSweepStop" | "labelsAdd" | "labelsRemove" | "labelsSet"
+        | "faceSweepStart" | "faceSweepStop" | "faceLibrarySweepStart" | "faceLibrarySweepStop"
+        | "labelsAdd" | "labelsRemove" | "labelsSet"
         | "labelCreate" | "labelRename" | "labelDelete" | "sharedBackupSet" | "sharedBackupNow"
         | "diagSave" | "diagSetDetailed" | "duplicatesStart" | "duplicatesTrash"
         | "duplicatesIgnore" | "ocrModelDownload" | "ocrModelRemove" | "ocrStart" | "hiddenSet" => Priority::UserAction,
