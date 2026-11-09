@@ -287,8 +287,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getDriveCollections: (p) => session.getDriveCollections(!!p?.refresh, driveKinds(p)),
   sharedBackupSet: (p) => session.setSharedBackup(p?.on === true, driveKinds(p)),
   sharedBackupStatus: () => session.sharedBackupStatus(),
-  sharedBackupNow: () => {
-    void session.backUpNow().catch(() => undefined);
+  sharedBackupNow: (p) => {
+    void session.backUpNow(p?.force === true).catch(() => undefined);
     return session.sharedBackupStatus();
   },
   sharedBackupLoad: () => session.loadFromDrive(),

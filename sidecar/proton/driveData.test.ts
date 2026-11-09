@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 
 import { CryptoProxy, initCrypto } from "./crypto.ts";
 import {
+  copyPresent,
   facesFileDevice,
   labelsFileDevice,
   listDriveBackups,
@@ -41,10 +42,13 @@ import {
   readSearchSnapshot,
   saveCopy,
   searchFileDevice,
+  verifyFaceCopy,
+  verifySearchCopy,
   writeFaceCopy,
   writeLabelCopy,
   writeSearchCopy,
   type CopyCache,
+  type FaceCopyToWrite,
 } from "./driveData.ts";
 
 /** Seals `plain` the way the Android app's MlSnapshotEnvelope does, chunk by chunk. */
@@ -676,19 +680,23 @@ describe("reading the phone's copies", () => {
 
 describe("saving this install's copy", () => {
   /** A Drive with the app's folder and one sub-folder, whose uploads are recorded. */
-  function drive(conflict: { existingNodeUid?: string; isUnfinishedUpload?: boolean } | null, trashed: string[] = []) {
+  function drive(conflict: { existingNodeUid?: string; isUnfinishedUpload?: boolean } | null, trashed: string[] = [], present = false) {
     const calls: { kind: string; target: string; override?: boolean }[] = [];
     const folder = (uid: string, name: string) => ({ uid, type: "folder", name: { ok: true, value: name } });
     const uploader = (fail: boolean) => ({
-      uploadFromStream: async () => ({
-        completion: async () => {
-          if (fail && conflict) {
-            const e = Object.assign(new Error("exists"), { name: "NodeWithSameNameExistsValidationError", ...conflict });
-            throw e;
-          }
-          return { nodeUid: "saved" };
-        },
-      }),
+      uploadFromStream: async (_stream: unknown, _thumbnails: unknown, onProgress?: (sent: number) => void) => {
+        onProgress?.(4);
+        onProgress?.(8);
+        return {
+          completion: async () => {
+            if (fail && conflict) {
+              const e = Object.assign(new Error("exists"), { name: "NodeWithSameNameExistsValidationError", ...conflict });
+              throw e;
+            }
+            return { nodeUid: "saved" };
+          },
+        };
+      },
     });
     return {
       calls,
@@ -700,6 +708,7 @@ describe("saving this install's copy", () => {
           if (uid === "labels" && trashed.includes("old")) {
             yield { uid: "old", type: "file", name: { ok: true, value: "labels-x.pfplb" }, trashTime: new Date(1) };
           }
+          if (uid === "labels" && present) yield { uid: "file-1", type: "file", name: { ok: true, value: "labels-x.pfplb" } };
         },
         getNode: async (uid: string) => ({ uid, trashTime: trashed.includes(uid) ? new Date(1) : undefined }),
         restoreNodes: async function* (uids: string[]) {
@@ -752,5 +761,88 @@ describe("saving this install's copy", () => {
   it("does not take over anything else that fails", async () => {
     const d = drive({ existingNodeUid: "file-1", isUnfinishedUpload: true });
     await expect(saveCopy(d.client, "Labels", "labels-x.pfplb", Buffer.from("x"), new Date(1))).rejects.toThrow("exists");
+  });
+
+  it("tells how far the upload got", async () => {
+    const d = drive(null);
+    const seen: number[] = [];
+    await saveCopy(d.client, "Labels", "labels-x.pfplb", Buffer.from("x"), new Date(1), (sent) => seen.push(sent));
+    expect(seen).toEqual([4, 8]);
+  });
+
+  it("finds a copy that is there", async () => {
+    expect(await copyPresent(drive(null, [], true).client, "Labels", "labels-x.pfplb")).toBe(true);
+  });
+
+  it("does not find a copy that is gone", async () => {
+    expect(await copyPresent(drive(null).client, "Labels", "labels-x.pfplb")).toBe(false);
+    expect(await copyPresent(drive(null).client, "ML data", "labels-x.pfplb")).toBe(false);
+    expect(await copyPresent(drive(null, ["old"]).client, "Labels", "labels-x.pfplb")).toBe(false);
+  });
+
+  const invalid = expect.objectContaining({ name: "CopyInvalid" });
+  const faceCopy: FaceCopyToWrite = {
+    deviceId: "d1",
+    deviceLabel: "Phone",
+    createdAt: 1,
+    faceModelVersion: 7,
+    faceModelSha256: "ab",
+    clusterParamsVersion: 1,
+    embeddingDim: 2,
+    faces: [
+      {
+        key: "k1",
+        index: 0,
+        box: [0, 0, 1, 1],
+        score: 1,
+        blur: null,
+        rejected: false,
+        person: null,
+        confirmed: null,
+        points: [],
+        embedding: new Float32Array([1, 0]),
+      },
+    ],
+    notPerson: [],
+    covers: [],
+    markers: [
+      { key: "k1", swept: false },
+      { key: "k2", swept: false },
+    ],
+  };
+
+  it("accepts a face copy that holds it all", () => {
+    expect(() => verifyFaceCopy(writeFaceCopy(faceCopy), { faces: 1, photos: 2 })).not.toThrow();
+  });
+
+  it("rejects a face copy that came out short", () => {
+    const plain = writeFaceCopy(faceCopy);
+    expect(() => verifyFaceCopy(plain, { faces: 2, photos: 2 })).toThrow(invalid);
+    expect(() => verifyFaceCopy(plain, { faces: 1, photos: 3 })).toThrow(invalid);
+  });
+
+  const searchCopy = writeSearchCopy({
+    deviceId: "d1",
+    deviceLabel: "Phone",
+    createdAt: 1,
+    modelId: "space-a",
+    dim: 1,
+    entries: [
+      ["k0", new Uint16Array([0x3c00])],
+      ["k1", null],
+    ],
+  });
+
+  it("accepts a search copy that holds it all, a photo that could not be read not counted", () => {
+    expect(() => verifySearchCopy(searchCopy, { vectors: 1 })).not.toThrow();
+  });
+
+  it("rejects a search copy that came out short", () => {
+    expect(() => verifySearchCopy(searchCopy, { vectors: 2 })).toThrow(invalid);
+  });
+
+  it("rejects a copy that does not read back at all", () => {
+    expect(() => verifyFaceCopy(writeFaceCopy(faceCopy).subarray(0, 20), { faces: 1, photos: 2 })).toThrow(invalid);
+    expect(() => verifySearchCopy(searchCopy.subarray(0, 20), { vectors: 1 })).toThrow(invalid);
   });
 });

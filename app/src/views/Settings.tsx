@@ -83,6 +83,16 @@ import type { CompressionTier, VideoCodecChoice } from "../lib/compression";
 import type { Activity } from "../components/Sidebar";
 import type { LocalLabel } from "../hooks/useLocalLabels";
 import { matchingLabels, sameLabel } from "../lib/labels";
+import {
+  BACKUP_KINDS,
+  backupBlocked,
+  backupPartLine,
+  backupSendingLine,
+  backupSynced,
+  type BackupKind,
+  type BackupPartLine,
+  type BackupStatus,
+} from "../lib/backupStatus";
 import { MyFilesPicker, type ChosenFile } from "../components/MyFilesPicker";
 import { unpinAllOffline, watchOffline, type OfflineStatus } from "../lib/offline";
 import { applyTheme, PICKABLE_PALETTES, resolvedMode, type PaletteKey, type ThemeMode } from "../lib/theme";
@@ -2762,8 +2772,12 @@ function BackupPane({
       : backup.failed
         ? t("settings.sharedBackupFailed")
         : backup.lastAt
-          ? t("settings.sharedBackupSynced", { date: date.format(new Date(backup.lastAt)) })
+          ? backupSynced(backup.parts)
+            ? t("settings.sharedBackupSynced", { date: date.format(new Date(backup.lastAt)) })
+            : t("backup.nothingSaved")
           : null;
+  const partText = (kind: BackupKind, { key, values }: BackupPartLine) => t(key, { ...values, part: t(`backup.part.${kind}`) });
+  const sending = backup?.progress ?? null;
   const deviceName = (b: DriveBackup) => (b.own ? t("settings.driveCopiesThis") : (b.name ?? t("settings.driveCopiesOther")));
   const copiesLine =
     copies.state === "loading" && copies.list.length === 0
@@ -2847,6 +2861,35 @@ function BackupPane({
           <div className="st-text">
             <div className="st-label">{t("settings.sharedBackupNow")}</div>
             <div className="st-desc">{t("settings.sharedBackupNowDesc")}</div>
+            {BACKUP_KINDS.map((kind) => {
+              const part = backup?.parts[kind];
+              if (!part) return null;
+              return (
+                <div key={kind} className={`st-desc${part.result === "failed" || part.result === "blocked" ? " bad" : " st-status"}`}>
+                  {partText(kind, backupPartLine(kind, part, (at) => date.format(new Date(at))))}
+                </div>
+              );
+            })}
+            {/* One button under all the lines: it overrides every copy held back, so all their numbers show first. */}
+            {backup && backupBlocked(backup.parts) && (
+              <div className="st-keep-line">
+                <button
+                  className="st-row-btn"
+                  disabled={backup.running || loading}
+                  onClick={() => void rpc("sharedBackupNow", { force: true }).catch(() => {})}
+                >
+                  {t("backup.saveAnyway")}
+                </button>
+              </div>
+            )}
+            {sending && (
+              <>
+                <div className="st-desc st-status">{partText(sending.kind, backupSendingLine(sending))}</div>
+                <div className="st-progress">
+                  <div style={{ width: `${sending.total > 0 ? Math.round((sending.sent / sending.total) * 100) : 0}%` }} />
+                </div>
+              </>
+            )}
           </div>
           <button
             className="st-row-btn"
@@ -3124,8 +3167,6 @@ function useDriveBackups(roundAt: number | null) {
   );
   return { list, state, trash };
 }
-
-type BackupStatus = { on: boolean; running: boolean; lastAt: number | null; failed: boolean };
 
 /** The shared backup's status, read every few seconds while the pane is open. */
 function useBackupStatus(): BackupStatus | null {

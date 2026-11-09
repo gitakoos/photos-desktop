@@ -150,7 +150,9 @@ fn classified(method: &str) -> Option<Priority> {
         | "localLockState" | "localLockCheck" | "localLockSet" | "localLockClear"
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
         | "protectSession" | "signInChoice" | "keepSignIn" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
-        | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces" => Priority::Interactive,
+        | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces"
+        // The backup settings' poll: a tiny answer that must not wait behind a page of thumbnails.
+        | "sharedBackupStatus" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
         // even though the user is looking at that photo: the transfer itself runs inside
@@ -202,7 +204,7 @@ fn classified(method: &str) -> Option<Priority> {
 
         // The window's status polls: tiny answers.
         "uploadStatus" | "dropReplaced" | "dateEditStatus" | "offlineStatus" | "offlineAlbums" | "saveStatus" | "hydrateProgress" | "updateStatus"
-        | "faceScanStatus" | "faceSweepStatus" | "labelsVersion" | "sharedBackupStatus"
+        | "faceScanStatus" | "faceSweepStatus" | "labelsVersion"
         | "duplicatesStatus" | "ocrModelStatus" | "ocrResult" | "hiddenState" | "faceWipeSeen" => Priority::UserAction,
 
         // The backups on Drive the backup settings list, a folder listing each, and the trash of one.
@@ -3687,5 +3689,10 @@ mod log_tests {
             );
         }
         assert_eq!(priority_for("warmThumbnails"), Priority::Background);
+    }
+
+    #[test]
+    fn the_backup_status_goes_before_a_page_of_thumbnails() {
+        assert!(priority_for("sharedBackupStatus") > priority_for("getThumbnails"));
     }
 }

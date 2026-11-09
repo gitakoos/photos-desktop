@@ -898,9 +898,16 @@ export function saveFaceCopy(client: any, deviceId: string, sealed: Buffer, at: 
 /**
  * Puts one of this install's copies on Drive, in `My files/Photos for Proton/<folder>`, making the
  * folders when they are not there yet: as a new revision of the file it wrote before, or as a new
- * file the first time. Returns the file's uid.
+ * file the first time. Returns the file's uid. `onProgress` hears the bytes sent so far.
  */
-export async function saveCopy(client: any, folder: string, name: string, sealed: Buffer, at: Date): Promise<string> {
+export async function saveCopy(
+  client: any,
+  folder: string,
+  name: string,
+  sealed: Buffer,
+  at: Date,
+  onProgress?: (sent: number) => void,
+): Promise<string> {
   const root = await client.getMyFilesRootFolder();
   const app = (await childNamed(client, root.uid, APP_FOLDER)) ?? (await client.createFolder(root.uid, APP_FOLDER));
   const ml = (await childNamed(client, app.uid, folder)) ?? (await client.createFolder(app.uid, folder));
@@ -924,7 +931,7 @@ export async function saveCopy(client: any, folder: string, name: string, sealed
         controller.close();
       },
     });
-    const controller = await uploader.uploadFromStream(stream, []);
+    const controller = await uploader.uploadFromStream(stream, [], onProgress);
     const { nodeUid } = await controller.completion();
     return nodeUid as string;
   };
@@ -946,6 +953,44 @@ export async function saveCopy(client: any, folder: string, name: string, sealed
     }
     return send(await client.getFileRevisionUploader(conflict.existingNodeUid, metadata));
   }
+}
+
+/** Whether one of this install's copies is still on Drive, out of the trash. Makes no folders. */
+export async function copyPresent(client: any, folder: string, name: string): Promise<boolean> {
+  const root = await client.getMyFilesRootFolder();
+  const app = await childNamed(client, root.uid, APP_FOLDER);
+  const parent = app && (await childNamed(client, app.uid, folder));
+  if (!parent) return false;
+  for await (const node of client.iterateFolderChildren(parent.uid)) {
+    if (node?.type === "file" && !node.trashTime && nodeName(node) === name) return true;
+  }
+  return false;
+}
+
+/** A copy that does not read back as what it was made from; `failReason` knows it by its name. */
+function copyInvalid(): Error {
+  const e = new Error("the copy does not hold what it was made from");
+  e.name = "CopyInvalid";
+  return e;
+}
+
+function readBack<T>(read: (plain: Buffer) => T, plain: Buffer): T {
+  try {
+    return read(plain);
+  } catch {
+    throw copyInvalid();
+  }
+}
+
+/** Throws unless a face copy about to be sealed reads back with all its faces and photos. */
+export function verifyFaceCopy(plain: Buffer, expected: { faces: number; photos: number }): void {
+  const { copy } = readBack(readFaceCopy, plain);
+  if (copy.faces.length !== expected.faces || copy.scanned.length !== expected.photos) throw copyInvalid();
+}
+
+/** Throws unless a search copy about to be sealed reads back with all its vectors. */
+export function verifySearchCopy(plain: Buffer, expected: { vectors: number }): void {
+  if (readBack(readSearchSnapshot, plain).keys.length !== expected.vectors) throw copyInvalid();
 }
 
 // ---- The search snapshot ----

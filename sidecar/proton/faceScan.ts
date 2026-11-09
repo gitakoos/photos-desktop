@@ -77,9 +77,11 @@ import {
   CLIP_SIDE,
 } from "./searchIndex.ts";
 import { EMBEDDING_DIM, SEARCH_MODEL_ID, type SearchCopy } from "./semantic.ts";
+import { backupBaseline, shrinkOf, type Baseline } from "./backupBaseline.ts";
 import { markFreshInstall, readBackupFlags, writeBackupFlags } from "./backupFlags.ts";
 import { installDeviceId } from "./deviceId.ts";
 import { diag } from "./diag.ts";
+import type { SaveResult, ShrinkReport, SkipReason } from "./sharedBackup.ts";
 import { isReady } from "./store.ts";
 import {
   PowerWatch,
@@ -167,6 +169,9 @@ export type ScanState =
   | "paused"
   | "done"
   | "failed";
+
+/** The states the window shows as a scan at work (`scanBusy`, app/src/lib/localFaces.ts). */
+const SCAN_BUSY: ScanState[] = ["models", "waiting", "scanning", "grouping", "finding"];
 
 export type ScanStatus = {
   state: ScanState;
@@ -664,6 +669,7 @@ export class FaceScanner {
     // The faces of a run still going are not written over the delete: it ends at its next photo.
     this.store.clear();
     this.store.flush();
+    backupBaseline.clear("faces");
     writeBackupFlags({ knownWipe: at });
     this.compared = false;
     this.status.version++;
@@ -725,6 +731,7 @@ export class FaceScanner {
       try {
         if (!this.search.isLoaded()) this.search.load();
         this.search.clear();
+        backupBaseline.clear("search");
       } catch {
         /* locked: nothing held to clear */
       }
@@ -806,6 +813,13 @@ export class FaceScanner {
     return all || !(this.savedVersion === this.status.version && this.status.drive.savedAt !== null);
   }
 
+  /** Why the faces are not being saved, when it is more than there being nothing new. */
+  facesSkip(all: boolean): SkipReason | null {
+    if (this.facesDirty(all)) return null;
+    if (!this.enabled) return "recognition-off";
+    return this.store.isLoaded() && this.store.people.heldOver.length > 0 ? "names-held" : null;
+  }
+
   /** Whether this computer's copy on Drive carries the newest delete everywhere it knows of. */
   wipeSaved(): boolean {
     return this.savedWipe >= this.knownWipe();
@@ -825,8 +839,53 @@ export class FaceScanner {
     return (all || this.search.version !== this.savedSearchVersion) && this.search.counts().indexed > 0;
   }
 
-  /** Writes the search index made here to Drive, every photo by its link id. */
-  async saveSearch(all = false): Promise<boolean> {
+  /** Why the search index is not being saved, when it is more than there being nothing new. */
+  searchSkip(all: boolean): SkipReason | null {
+    if (this.searchDirty(all)) return null;
+    if (!this.indexing) return "index-off";
+    return this.search.isLoaded() && this.search.counts().indexed === 0 ? "nothing-to-save" : null;
+  }
+
+  /**
+   * The library listed for a copy to be weighed against it, when no run of the scan has (one that
+   * is paused, or has not begun). False when it could not be, or came back with no photo in it.
+   */
+  private async listLibrary(): Promise<boolean> {
+    const source = this.source;
+    if (!source) return false;
+    try {
+      const library = await source.listUids();
+      if (this.source !== source) return false;
+      // A run of the scan that listed it meanwhile has the newer list.
+      if (this.uidByLink.size === 0) this.uidByLink = new Map(library.map((uid) => [uid.slice(uid.indexOf("~") + 1), uid]));
+      return this.uidByLink.size > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * What makes a copy holding `current` wait, if anything: a library that cannot be listed, as only
+   * the photos still in it count, or being too much smaller than the last copy written. With no
+   * last copy there is nothing to weigh it against.
+   */
+  private async heldBack(
+    kind: "faces" | "search",
+    current: Baseline,
+  ): Promise<{ blocked: ShrinkReport } | { skipped: SkipReason } | null> {
+    if (backupBaseline.get(kind) === null) return null;
+    if (this.uidByLink.size === 0 && !(await this.listLibrary())) return { skipped: "library-unlisted" };
+    const hidden = this.source?.hiddenTest() ?? (() => false);
+    const eligible = (link: string) => {
+      const uid = this.uidByLink.get(link);
+      return uid !== undefined && !hidden(uid);
+    };
+    const blocked = shrinkOf(backupBaseline.get(kind), current, eligible, SCAN_BUSY.includes(this.status.state));
+    return blocked && { blocked };
+  }
+
+  /** Writes the search index made here to Drive, every photo by its link id; `force` also when it would wait. */
+  async saveSearch(all = false, force = false): Promise<SaveResult> {
     const writer = this.searchWriter;
     if (!writer || !this.searchDirty(all)) return false;
     const version = this.search.version;
@@ -835,6 +894,12 @@ export class FaceScanner {
       .entries()
       .map(([uid, v]): [string, Uint16Array | null] => [uid.slice(uid.indexOf("~") + 1), v])
       .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    const current: Baseline = {};
+    for (const [link, vector] of entries) if (vector) current[link] = 1;
+    if (!force) {
+      const held = await this.heldBack("search", current);
+      if (held) return held;
+    }
     const wrote = await writer(
       {
         deviceId: installDeviceId(),
@@ -846,9 +911,10 @@ export class FaceScanner {
       },
       all,
     );
+    backupBaseline.record("search", current);
     this.savedSearchVersion = version;
     if (wrote) process.stderr.write(`[search] saved the index to Drive: ${entries.length} photos\n`);
-    return wrote;
+    return { wrote, counts: { vectors: Object.keys(current).length } };
   }
 
   /** The library's photo of a Drive link id, as last listed. */
@@ -866,8 +932,21 @@ export class FaceScanner {
     if (this.syncing) this.onDriveChange?.();
   }
 
-  /** Writes the faces' copy to Drive. Throws when it could not, for the backup to report. */
-  async saveFaces(all = false): Promise<boolean> {
+  /**
+   * Whether the copy about to go out takes a delete everywhere to the other devices, which nothing
+   * holds back. `savedWipe` starts over with each run of the app, so a delete saved long ago looks
+   * unsaved again: one really still to go out has also reset the reference, and with face
+   * recognition off a delete is all that is ever saved.
+   */
+  private wipePending(wipe: number): boolean {
+    return wipe > 0 && wipe > this.savedWipe && (!this.enabled || backupBaseline.get("faces") === null);
+  }
+
+  /**
+   * Writes the faces' copy to Drive; `force` also when it would wait. Throws when it could not, for
+   * the backup to report.
+   */
+  async saveFaces(all = false, force = false): Promise<SaveResult> {
     const writer = this.driveWriter;
     if (!writer || !this.facesDirty(all)) return false;
     const version = this.status.version;
@@ -875,13 +954,21 @@ export class FaceScanner {
     try {
       const at = Date.now();
       const copy = copyForDrive(this.store, deviceLabel(), at, wipe, this.source?.hiddenTest() ?? (() => false));
+      const current: Baseline = {};
+      for (const marker of copy.markers) current[marker.key] = 0;
+      for (const face of copy.faces) current[face.key] = (current[face.key] ?? 0) + 1;
+      if (!force && !this.wipePending(wipe)) {
+        const held = await this.heldBack("faces", current);
+        if (held) return held;
+      }
       const wrote = await writer(copy, all);
+      backupBaseline.record("faces", current);
       if (wrote) process.stderr.write(`[faces] saved the copy to Drive: ${copy.faces.length} faces, ${copy.markers.length} photos\n`);
       this.saveQuietly();
       this.savedVersion = version;
       this.savedWipe = wipe;
       this.status.drive = { savedAt: wrote ? at : (this.status.drive.savedAt ?? at), failed: false };
-      return wrote;
+      return { wrote, counts: { faces: copy.faces.length, photos: copy.markers.length } };
     } catch (e) {
       this.status.drive = { ...this.status.drive, failed: true };
       process.stderr.write(`[faces] the copy on Drive was not saved: ${(e as Error)?.name ?? "error"}\n`);
@@ -1378,6 +1465,7 @@ export class FaceScanner {
     if (!this.loadStore()) throw new Error("Locked");
     this.store.clear();
     this.store.flush();
+    backupBaseline.clear("faces");
     markFreshInstall();
     this.compared = false;
     this.status.version++;
@@ -1396,6 +1484,7 @@ export class FaceScanner {
     if (!this.loadStore()) throw new Error("Locked");
     this.store.clear();
     this.store.flush();
+    backupBaseline.clear("faces");
     writeBackupFlags({ knownWipe: Date.now(), trashPending: true });
     this.compared = false;
     this.status.version++;
@@ -1416,6 +1505,7 @@ export class FaceScanner {
         if (!this.store.isLoaded() && this.source) this.store.load();
         this.store.clear();
         this.store.flush();
+        backupBaseline.clear("faces");
       } catch {
         /* nothing to write */
       }
