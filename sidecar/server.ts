@@ -176,6 +176,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getThumbnails: (p) => session.getThumbnails(p.uids),
   warmThumbnails: (p) => session.warmThumbnails(p.uids),
   getPreview: (p) => session.getPreview(p.uid),
+  getFacePreview: (p) => session.getPreview(p.uid),
   getOriginal: (p) => session.getOriginal(p.uid),
   releaseOriginal: (p) => session.releaseOriginal(p?.uid),
   readOriginalBytes: (p) => session.readOriginalBytes(p.token),

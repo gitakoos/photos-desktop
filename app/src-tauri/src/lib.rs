@@ -192,7 +192,7 @@ fn classified(method: &str) -> Option<Priority> {
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
         // warmer, behind which a page stayed empty for as long as a cold batch took.
-        "getThumbnails" | "getAlbums" | "getAlbumPhotos" | "getShared" => Priority::UserAction,
+        "getThumbnails" | "getFacePreview" | "getAlbums" | "getAlbumPhotos" | "getShared" => Priority::UserAction,
 
         // What the window asks for a screenful at a time, or waits on as it opens a view:
         // short, and wanted now.
