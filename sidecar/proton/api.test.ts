@@ -31,6 +31,7 @@ import {
   isApiUrl,
   makeSdkHttpClient,
   refreshSession,
+  serverDateOf,
   userAgentFor,
   watchSlowUploads,
 } from "./api.ts";
@@ -342,5 +343,16 @@ describe("file content on a slow line", () => {
     took = SLOW_BLOCK_MS;
     await upload();
     expect(slow).toBe(1);
+  });
+});
+
+describe("serverDateOf", () => {
+  it("prefers x-pm-date, falls back to date, and rejects anything unreadable", () => {
+    expect(
+      serverDateOf(new Headers({ "x-pm-date": "Mon, 09 Nov 2026 12:00:00 GMT", date: "Mon, 09 Nov 2026 13:00:00 GMT" }))?.getTime(),
+    ).toBe(Date.UTC(2026, 10, 9, 12));
+    expect(serverDateOf(new Headers({ date: "Mon, 09 Nov 2026 13:00:00 GMT" }))?.getTime()).toBe(Date.UTC(2026, 10, 9, 13));
+    expect(serverDateOf(new Headers({ date: "not a date" }))).toBeNull();
+    expect(serverDateOf(new Headers())).toBeNull();
   });
 });

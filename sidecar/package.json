@@ -9,7 +9,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@protontech/crypto": "^2.0.1",
+    "@protontech/crypto": "2.2.0",
     "@protontech/drive-sdk": "0.22.2",
     "@protontech/global-types": "^1.1.0",
     "exifr": "^7.1.3",
