@@ -933,6 +933,7 @@ export const fr: Record<string, string> = {
   "upload.zipFilterName": "Archives zip",
   "upload.importUnpacking": "Décompression de la partie {part} sur {parts} : {done} sur {total}",
   "upload.importReading": "Lecture de l'export…",
+  "upload.importVideos": "Préparation des vidéos… cela peut prendre quelques minutes",
   "importReview.title": "Vérifier l'import",
   "importReview.hint": "Cliquez sur une photo pour l'exclure, et à nouveau pour la remettre. Maj+clic fait de même pour toutes les photos entre la dernière cliquée et celle-ci.",
   "importReview.discard": "Abandonner",

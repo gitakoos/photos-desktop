@@ -931,6 +931,7 @@ export const sk: Record<string, string> = {
   "upload.zipFilterName": "Archívy zip",
   "upload.importUnpacking": "Rozbaľovanie časti {part} z {parts}: {done} z {total}",
   "upload.importReading": "Načítava sa export…",
+  "upload.importVideos": "Príprava videí… môže to trvať niekoľko minút",
   "importReview.title": "Kontrola importu",
   "importReview.hint": "Kliknutím fotku vynecháte, ďalším kliknutím ju vrátite. Shift+kliknutie urobí to isté so všetkými fotkami medzi naposledy kliknutou a touto.",
   "importReview.discard": "Zahodiť",

@@ -931,6 +931,7 @@ export const es: Record<string, string> = {
   "upload.zipFilterName": "Archivos zip",
   "upload.importUnpacking": "Descomprimiendo la parte {part} de {parts}: {done} de {total}",
   "upload.importReading": "Leyendo la exportación…",
+  "upload.importVideos": "Preparando los vídeos… puede tardar unos minutos",
   "importReview.title": "Revisar la importación",
   "importReview.hint": "Haz clic en una foto para omitirla y otra vez para recuperarla. Mayús+clic hace lo mismo con todas las fotos entre la última en la que hiciste clic y esta.",
   "importReview.discard": "Descartar",

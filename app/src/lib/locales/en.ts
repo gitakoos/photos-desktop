@@ -930,6 +930,7 @@ export const en: Record<string, string> = {
   "upload.zipFilterName": "Zip archives",
   "upload.importUnpacking": "Unpacking part {part} of {parts}: {done} of {total}",
   "upload.importReading": "Reading the export…",
+  "upload.importVideos": "Preparing the videos… this can take a few minutes",
   "importReview.title": "Review the import",
   "importReview.hint": "Click a photo to leave it out, and again to put it back. Shift+click does the same for every photo between the last one you clicked and this one.",
   "importReview.discard": "Discard",

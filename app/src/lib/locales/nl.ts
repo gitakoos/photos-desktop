@@ -931,6 +931,7 @@ export const nl: Record<string, string> = {
   "upload.zipFilterName": "Zip-archieven",
   "upload.importUnpacking": "Deel {part} van {parts} uitpakken: {done} van {total}",
   "upload.importReading": "Export wordt gelezen…",
+  "upload.importVideos": "Video's voorbereiden… dit kan enkele minuten duren",
   "importReview.title": "Import controleren",
   "importReview.hint": "Klik op een foto om hem over te slaan en nog eens om hem terug te zetten. Shift+klik doet hetzelfde voor alle foto's tussen de laatst aangeklikte en deze.",
   "importReview.discard": "Weggooien",

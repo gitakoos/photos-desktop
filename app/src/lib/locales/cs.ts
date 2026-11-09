@@ -930,6 +930,7 @@ export const cs: Record<string, string> = {
   "upload.zipFilterName": "Archivy zip",
   "upload.importUnpacking": "Rozbalování části {part} z {parts}: {done} z {total}",
   "upload.importReading": "Načítání exportu…",
+  "upload.importVideos": "Příprava videí… může to trvat několik minut",
   "importReview.title": "Kontrola importu",
   "importReview.hint": "Kliknutím fotku vynecháte, dalším kliknutím ji vrátíte. Shift+kliknutí udělá totéž se všemi fotkami mezi naposledy kliknutou a touto.",
   "importReview.discard": "Zahodit",

@@ -930,6 +930,7 @@ export const hu: Record<string, string> = {
   "upload.zipFilterName": "Zip-archívumok",
   "upload.importUnpacking": "Kicsomagolás, {part}/{parts}. rész: {done} / {total}",
   "upload.importReading": "Az export beolvasása…",
+  "upload.importVideos": "Videók előkészítése… ez néhány percig is eltarthat",
   "importReview.title": "Az import áttekintése",
   "importReview.hint": "Kattints egy képre, hogy kihagyd, még egyszer, hogy visszavedd. Shift+kattintással ugyanez történik az előzőleg kattintott és az aktuális kép közötti összes képpel.",
   "importReview.discard": "Elvetés",

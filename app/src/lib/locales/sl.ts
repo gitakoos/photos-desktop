@@ -932,6 +932,7 @@ export const sl: Record<string, string> = {
   "upload.zipFilterName": "Arhivi zip",
   "upload.importUnpacking": "Razširjanje dela {part} od {parts}: {done} od {total}",
   "upload.importReading": "Branje izvoza…",
+  "upload.importVideos": "Priprava videoposnetkov… to lahko traja nekaj minut",
   "importReview.title": "Pregled uvoza",
   "importReview.hint": "Klik na fotografijo jo izpusti, ponoven klik jo vrne. Shift+klik naredi isto za vse fotografije med nazadnje kliknjeno in to.",
   "importReview.discard": "Zavrzi",
