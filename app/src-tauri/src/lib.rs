@@ -2606,10 +2606,28 @@ fn run_updater(app: AppHandle) -> Result<(), String> {
             note(&app, "[update] no verified installer staged, not launching");
             return Err("no installer staged".into());
         }
+        // Held open with only reads shared from before the check until after the launch:
+        // TEMP is writable by anything running as this user, and without the hold a file
+        // swapped in between the signature check and the start would run unchecked. While
+        // this handle lives no one can write, rename or delete the installer; reading it,
+        // as the check and the loader do, is still allowed.
+        let _hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 0x0000_0001;
+            match std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path) {
+                Ok(f) => f,
+                Err(_) => {
+                    note(&app, "[update] the staged installer is in use, not launching");
+                    return Err("the installer is in use".into());
+                }
+            }
+        };
         // Checked here, by the process that runs it, right before it runs: signed with
         // the update key and newer than this app, or it is deleted and not run.
         let signature = std::env::temp_dir().join("pfp-update.exe.minisig");
         if let Err(e) = update_sig::verify_installer(&path, &signature, &app.package_info().version) {
+            // Dropped first: a handle that shares only reads would block the delete below.
+            drop(_hold);
             note(&app, &format!("[update] installer refused: {e}"));
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(&signature);
