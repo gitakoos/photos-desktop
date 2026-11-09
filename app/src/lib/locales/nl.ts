@@ -610,6 +610,7 @@ export const nl: Record<string, string> = {
   "faces.save": "Opslaan",
   "faces.inPhoto": "Personen",
   "faces.inPhotoNone": "Op deze foto is geen gezicht gevonden.",
+  "faces.strip": "{count} gezichten",
   "faces.change": "Wijzigen",
   "faces.notThis": "Dit is niet {name}",
   "faces.notThisTitle": "Is dit niet {name}?",

@@ -612,6 +612,7 @@ export const sl: Record<string, string> = {
   "faces.save": "Shrani",
   "faces.inPhoto": "Osebe",
   "faces.inPhotoNone": "Na tej fotografiji ni bilo najdenega obraza.",
+  "faces.strip": "Obrazi: {count}",
   "faces.change": "Spremeni",
   "faces.notThis": "Ni to {name}",
   "faces.notThisTitle": "Ni to {name}?",

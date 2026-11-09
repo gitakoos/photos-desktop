@@ -612,6 +612,7 @@ export const cs: Record<string, string> = {
   "faces.save": "Uložit",
   "faces.inPhoto": "Osoby",
   "faces.inPhotoNone": "Na této fotce se nenašla žádná tvář.",
+  "faces.strip": "Tváře: {count}",
   "faces.change": "Změnit",
   "faces.notThis": "Není to {name}",
   "faces.notThisTitle": "Není to {name}?",

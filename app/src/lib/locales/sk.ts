@@ -612,6 +612,7 @@ export const sk: Record<string, string> = {
   "faces.save": "Uložiť",
   "faces.inPhoto": "Osoby",
   "faces.inPhotoNone": "Na tejto fotke sa nenašla žiadna tvár.",
+  "faces.strip": "Tváre: {count}",
   "faces.change": "Zmeniť",
   "faces.notThis": "Nie je to {name}",
   "faces.notThisTitle": "Nie je to {name}?",

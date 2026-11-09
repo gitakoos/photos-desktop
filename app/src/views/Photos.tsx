@@ -141,8 +141,9 @@ import { useThumbnails } from "../hooks/useThumbnails";
 import { DebugHud } from "../components/DebugHud";
 import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
 import { useLocalFaces } from "../hooks/useLocalFaces";
-import { inTimelineOrder, isScanSpeed, scanBusy, statusLine, type PersonView } from "../lib/localFaces";
+import { focusFor, inTimelineOrder, isScanSpeed, scanBusy, statusLine, type PersonFace, type PersonView } from "../lib/localFaces";
 import { PersonActions, PersonPicker } from "../components/PersonActions";
+import { FaceStrip } from "../components/FaceStrip";
 import { PersonFindPanel } from "../components/PersonFindPanel";
 import { DateEditPanel } from "../components/DateEditPanel";
 import { photoSpanLabel } from "../lib/albumSpan";
@@ -1492,6 +1493,35 @@ export function Photos({
     () => (semanticItems.length > 0 ? [...filtered, ...semanticItems] : filtered),
     [filtered, semanticItems],
   );
+  // The open person's faces, read again as the people change. Only the scan on this computer
+  // has the boxes, so a person read from Drive has none. Kept with whose they are: a page moved
+  // on to someone else shows nothing of the last person while its own faces are read.
+  const facesPersonId = settings.localFaces ? uidFilter?.personId : undefined;
+  const peopleVersion = localFaces.status?.version;
+  const [openFaces, setOpenFaces] = useState<{ id: string; faces: PersonFace[] } | null>(null);
+  useEffect(() => {
+    if (!facesPersonId) return;
+    let live = true;
+    rpc<PersonFace[]>("facePersonFaces", { id: facesPersonId }).then(
+      (faces) => {
+        if (live) setOpenFaces({ id: facesPersonId, faces });
+      },
+      () => {
+        /* the page stands without them */
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [facesPersonId, peopleVersion]);
+  // Only faces on photos the page shows: not one hidden or trashed since, which could not open.
+  const personFaces = useMemo(() => {
+    if (!facesPersonId || openFaces?.id !== facesPersonId) return [];
+    const onPage = new Set(shown.map((it) => it.uid));
+    return openFaces.faces.filter((f) => onPage.has(f.uid));
+  }, [facesPersonId, openFaces, shown]);
+  const personFocus = useMemo(() => focusFor(personFaces), [personFaces]);
+
   // A photo to open in the viewer as soon as the list it was opened into is on screen.
   const [openOnShow, setOpenOnShow] = useState<string | null>(null);
   useEffect(() => {
@@ -3460,6 +3490,15 @@ export function Photos({
 
             {((loading && items.length === 0) || !hidingKnown) && <PhotoGridSkeleton count={30} cellSize={cellSize} />}
 
+            {hidingKnown && personFaces.length > 0 && (
+              <FaceStrip
+                faces={personFaces}
+                onOpen={(uid) => {
+                  if (!sel.wasDragging()) setLightboxIdx(shown.findIndex((f) => f.uid === uid));
+                }}
+              />
+            )}
+
             {albumMatches.length > 0 && (
               <section className="g-sres">
                 <h3 className="g-sres-title">{t("nav.albums")}</h3>
@@ -3529,6 +3568,7 @@ export function Photos({
                   onContext={onCellContext}
                   offlineUids={offlineUids}
                   localUids={localUids}
+                  focus={personFocus}
                 />
               )}
             />}

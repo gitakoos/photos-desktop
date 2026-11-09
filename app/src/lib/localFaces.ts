@@ -85,6 +85,9 @@ export type PhotoFace = {
   name: string | null;
 };
 
+/** One of a person's faces: the photo it is on and where on it. */
+export type PersonFace = { uid: string; box: [number, number, number, number] };
+
 /** What `facePeople` answers. */
 export type LocalPeople = {
   named: PersonView[];
@@ -120,6 +123,20 @@ export function searchIndexing(status: FaceScanStatus | null): boolean {
  */
 export function inTimelineOrder(uids: string[], order: Map<string, number>): string[] {
   return uids.filter((u) => order.has(u)).sort((a, b) => order.get(a)! - order.get(b)!);
+}
+
+/**
+ * Where to centre each photo on a person's page, as a CSS object-position by uid: on the middle
+ * of the first of their faces listed for that photo.
+ */
+export function focusFor(faces: { uid: string; box: number[] }[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { uid, box } of faces) {
+    if (out[uid]) continue;
+    const [left, top, right, bottom] = box;
+    out[uid] = `${(((left + right) / 2) * 100).toFixed(1)}% ${(((top + bottom) / 2) * 100).toFixed(1)}%`;
+  }
+  return out;
 }
 
 /** The status line under the switch, as a key and its values; null when there is nothing to say. */

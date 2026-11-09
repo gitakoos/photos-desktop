@@ -523,6 +523,40 @@
   margin-right: 340px;
 }
 
+/* A person's faces above their photos. */
+.lib-strip {
+  margin: 0 0 16px;
+}
+.lib-strip-title {
+  margin: 0 0 8px;
+  color: var(--fg-dim);
+  font-size: 13px;
+  font-weight: 600;
+}
+.lib-strip-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scrollbar-width: thin;
+}
+.lib-strip-face {
+  position: relative;
+  flex: 0 0 72px;
+  width: 72px;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--surface-2);
+  cursor: zoom-in;
+}
+.lib-strip-face:hover {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* ---- Faces in no group, and naming one or a few ---- */
 .lib-loosegrid {
   display: grid;

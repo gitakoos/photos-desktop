@@ -198,7 +198,7 @@ fn classified(method: &str) -> Option<Priority> {
         // short, and wanted now.
         "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
         | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
-        | "facePeople" | "facePersonCandidates" | "labelsList" | "labelsOf" | "myFilesList"
+        | "facePeople" | "facePersonCandidates" | "facePersonFaces" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
         | "duplicatesGroups" => Priority::UserAction,
 

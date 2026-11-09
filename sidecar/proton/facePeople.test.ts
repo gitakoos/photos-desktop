@@ -35,6 +35,7 @@ import {
   declineCandidates,
   dismissSuggestion,
   facesOnPhoto,
+  personFaces,
   listLoose,
   nameFaces,
   notThisPerson,
@@ -724,5 +725,33 @@ describe("telling names apart", () => {
     expect(Object.keys(p.curation).sort()).toEqual(
       [`2\u0000${foldPersonName("Adam")}\u0000l2#0`, `2\u0000${foldPersonName("Ádám")}\u0000l1#0`].sort(),
     );
+  });
+});
+
+describe("a person's faces", () => {
+  it("lists them best first, each with its photo and box", () => {
+    const store = new FaceStore();
+    store.load();
+    const rand = seeded(3);
+    const one = direction(rand);
+    store.put("p1", [{ ...face("p1", 0, one, 0.7), box: [0.1, 0.1, 0.2, 0.2] }]);
+    store.put("p2", [{ ...face("p2", 0, one, 0.95), box: [0.3, 0.3, 0.4, 0.4] }]);
+    store.put("p3", [{ ...face("p3", 0, one, 0.8), box: [0.5, 0.5, 0.6, 0.6] }]);
+    store.put("other", [face("other", 0, one, 0.99)]);
+    store.people.people.push({ id: "ann", name: "Ann", isOther: false }, { id: "bob", name: "Bob", isOther: false });
+    Object.assign(store.people.assign, { "p1#0": "ann", "p2#0": "ann", "p3#0": "ann", "other#0": "bob" });
+
+    expect(personFaces(store, "ann")).toEqual([
+      { uid: "p2", box: [0.3, 0.3, 0.4, 0.4] },
+      { uid: "p3", box: [0.5, 0.5, 0.6, 0.6] },
+      { uid: "p1", box: [0.1, 0.1, 0.2, 0.2] },
+    ]);
+  });
+
+  it("has none for someone without faces", () => {
+    const store = new FaceStore();
+    store.load();
+    library(store);
+    expect(personFaces(store, "nobody")).toEqual([]);
   });
 });

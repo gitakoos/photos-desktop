@@ -610,6 +610,7 @@ export const hu: Record<string, string> = {
   "faces.save": "Mentés",
   "faces.inPhoto": "Személyek",
   "faces.inPhotoNone": "Ezen a fotón nem található arc.",
+  "faces.strip": "{count} arc",
   "faces.change": "Módosítás",
   "faces.notThis": "Nem {name}",
   "faces.notThisTitle": "Nem {name}?",

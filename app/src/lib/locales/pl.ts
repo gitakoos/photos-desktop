@@ -612,6 +612,7 @@ export const pl: Record<string, string> = {
   "faces.save": "Zapisz",
   "faces.inPhoto": "Osoby",
   "faces.inPhotoNone": "Na tym zdjęciu nie znaleziono twarzy.",
+  "faces.strip": "Twarze: {count}",
   "faces.change": "Zmień",
   "faces.notThis": "To nie {name}",
   "faces.notThisTitle": "To nie {name}?",
