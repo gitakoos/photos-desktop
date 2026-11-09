@@ -869,6 +869,8 @@ export const hu: Record<string, string> = {
   "viewer.zoom": "Nagyítás",
   "viewer.fullscreen": "Teljes képernyő",
   "viewer.exitFullscreen": "Kilépés a teljes képernyőből",
+  "viewer.hideFaces": "Arccímkék elrejtése",
+  "viewer.showFaces": "Arccímkék megjelenítése",
   "viewer.videoLoading": "Videó betöltése…",
   "viewer.videoError":
     "Ez a videóformátum itt nem játszható le. Töltsd le, és nézd meg egy másik lejátszóban.",

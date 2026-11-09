@@ -870,6 +870,8 @@ export const it: Record<string, string> = {
   "viewer.zoom": "Zoom",
   "viewer.fullscreen": "Schermo intero",
   "viewer.exitFullscreen": "Esci da schermo intero",
+  "viewer.hideFaces": "Nascondi le etichette dei volti",
+  "viewer.showFaces": "Mostra le etichette dei volti",
   "viewer.videoLoading": "Caricamento video…",
   "viewer.videoError":
     "Questo formato video non può essere riprodotto qui. Scaricalo per guardarlo in un altro lettore.",

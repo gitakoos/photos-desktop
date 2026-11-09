@@ -4157,6 +4157,21 @@ export function Photos({
               />
             ) : undefined
           }
+          faces={
+            settings.localFaces
+              ? {
+                  version: localFaces.status?.version ?? 0,
+                  names: localEntries.named.map((e) => e.name),
+                  act: localFaces.act,
+                  onOpenPerson: (personId) => {
+                    const entry = allPeople.find((e) => e.personId === personId);
+                    if (!entry) return;
+                    setLightboxIdx(null);
+                    openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "people", personId: entry.personId });
+                  },
+                }
+              : undefined
+          }
           isLocal={localUids.has(current.uid)}
           isOffline={offlineUids.has(current.uid)}
           // Only ever a definite answer, never a guess. A known video branches the

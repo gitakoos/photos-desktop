@@ -870,6 +870,8 @@ export const sk: Record<string, string> = {
   "viewer.zoom": "Priblíženie",
   "viewer.fullscreen": "Celá obrazovka",
   "viewer.exitFullscreen": "Ukončiť celú obrazovku",
+  "viewer.hideFaces": "Skryť označenia tvárí",
+  "viewer.showFaces": "Zobraziť označenia tvárí",
   "viewer.videoLoading": "Načítava sa video…",
   "viewer.videoError":
     "Tento formát videa sa tu nedá prehrať. Stiahnite si ho a prehrajte v inom prehrávači.",

@@ -869,6 +869,8 @@ export const nl: Record<string, string> = {
   "viewer.zoom": "Zoom",
   "viewer.fullscreen": "Volledig scherm",
   "viewer.exitFullscreen": "Volledig scherm afsluiten",
+  "viewer.hideFaces": "Gezichtslabels verbergen",
+  "viewer.showFaces": "Gezichtslabels tonen",
   "viewer.videoLoading": "Video laden…",
   "viewer.videoError":
     "Dit videoformaat kan hier niet worden afgespeeld. Download het en bekijk het in een andere speler.",

@@ -870,6 +870,8 @@ export const en: Record<string, string> = {
   "viewer.zoom": "Zoom",
   "viewer.fullscreen": "Full screen",
   "viewer.exitFullscreen": "Exit full screen",
+  "viewer.hideFaces": "Hide face tags",
+  "viewer.showFaces": "Show face tags",
   "viewer.videoLoading": "Loading video…",
   "viewer.videoError":
     "This video format cannot be played here. Download it to watch in another player.",

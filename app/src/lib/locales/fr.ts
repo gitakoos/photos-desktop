@@ -871,6 +871,8 @@ export const fr: Record<string, string> = {
   "viewer.zoom": "Zoom",
   "viewer.fullscreen": "Plein écran",
   "viewer.exitFullscreen": "Quitter le plein écran",
+  "viewer.hideFaces": "Masquer les étiquettes des visages",
+  "viewer.showFaces": "Afficher les étiquettes des visages",
   "viewer.videoLoading": "Chargement de la vidéo…",
   "viewer.videoError":
     "Ce format vidéo ne peut pas être lu ici. Téléchargez-la pour la regarder dans un autre lecteur.",

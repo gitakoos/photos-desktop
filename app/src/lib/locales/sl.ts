@@ -870,6 +870,8 @@ export const sl: Record<string, string> = {
   "viewer.zoom": "Povečava",
   "viewer.fullscreen": "Celozaslonski način",
   "viewer.exitFullscreen": "Izhod iz celozaslonskega načina",
+  "viewer.hideFaces": "Skrij oznake obrazov",
+  "viewer.showFaces": "Prikaži oznake obrazov",
   "viewer.videoLoading": "Nalaganje videa…",
   "viewer.videoError":
     "Tega formata videa tukaj ni mogoče predvajati. Prenesi ga in si ga oglej v drugem predvajalniku.",

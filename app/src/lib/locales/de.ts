@@ -872,6 +872,8 @@ export const de: Record<string, string> = {
   "viewer.zoom": "Zoom",
   "viewer.fullscreen": "Vollbild",
   "viewer.exitFullscreen": "Vollbild beenden",
+  "viewer.hideFaces": "Gesichtsmarkierungen ausblenden",
+  "viewer.showFaces": "Gesichtsmarkierungen einblenden",
   "viewer.videoLoading": "Video wird geladen…",
   "viewer.videoError":
     "Dieses Videoformat kann hier nicht abgespielt werden. Lade es herunter und sieh es dir in einem anderen Player an.",
