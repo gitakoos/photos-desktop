@@ -84,6 +84,7 @@ import {
   HIDDEN_FOLDER,
   LABELS_FOLDER,
   ML_FOLDER,
+  copyPresent,
   facesFileName,
   hiddenFileName,
   labelsFileName,
@@ -95,6 +96,8 @@ import {
   searchFileName,
   sealEnvelope,
   trashDriveFiles,
+  verifyFaceCopy,
+  verifySearchCopy,
   writeFaceCopy,
   writeHiddenCopy,
   writeLabelCopy,
@@ -335,6 +338,8 @@ const CRYPTO_CACHE_LIMIT = 20_000;
 const OCR_KEPT = 40;
 /** A copy's save that fails on the network is tried again after these pauses. */
 const UPLOAD_RETRY_MS = [2_000, 5_000];
+/** A turn for everything else: the status stays answered while a large copy is read and sealed. */
+const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** The shortest password of the user's own that a browser sign-in may be sealed with. */
 const MIN_APP_PASSWORD = 8;
@@ -541,15 +546,35 @@ export class ProtonSession {
       {
         kind: "faces",
         dirty: (all) => faceScanner.facesDirty(all) || readBackupFlags().trashPending,
-        save: async (all) => {
-          const wrote = await faceScanner.saveFaces(all);
+        skipReason: (all) => faceScanner.facesSkip(all),
+        gone: () => this.copyGone("faces", ML_FOLDER, facesFileName),
+        save: async (all, force) => {
+          const saved = await faceScanner.saveFaces(all, force);
           await this.trashOtherFaceCopies();
-          return wrote;
+          return saved;
         },
       },
-      { kind: "search", dirty: (all) => faceScanner.searchDirty(all), save: (all) => faceScanner.saveSearch(all) },
-      { kind: "labels", dirty: (all) => this.labelsDirty(all), save: (all) => this.saveLabels(all) },
-      { kind: "hidden", dirty: (all) => this.hiddenDirty(all), save: (all) => this.saveHidden(all) },
+      {
+        kind: "search",
+        dirty: (all) => faceScanner.searchDirty(all),
+        skipReason: (all) => faceScanner.searchSkip(all),
+        gone: () => this.copyGone("search", ML_FOLDER, searchFileName),
+        save: (all, force) => faceScanner.saveSearch(all, force),
+      },
+      {
+        kind: "labels",
+        dirty: (all) => this.labelsDirty(all),
+        skipReason: () => (this.labelsEmpty() ? "nothing-to-save" : null),
+        gone: async () => this.labelsDirty(true) && this.copyGone("labels", LABELS_FOLDER, labelsFileName),
+        save: (all) => this.saveLabels(all),
+      },
+      {
+        kind: "hidden",
+        dirty: (all) => this.hiddenDirty(all),
+        skipReason: () => (hiddenStore.isEmpty() ? "nothing-to-save" : null),
+        gone: () => this.copyGone("hidden", HIDDEN_FOLDER, hiddenFileName),
+        save: (all) => this.saveHidden(all),
+      },
     ],
   );
   private photos: any = null;
@@ -840,11 +865,12 @@ export class ProtonSession {
 
   /**
    * "Back up now": one round of the shared backup whether its automatic rounds are on or not, every
-   * copy of this computer's written, after the other devices' were read.
+   * copy of this computer's written, after the other devices' were read. `force` writes also a copy
+   * that would be held back for being smaller than the last.
    */
-  async backUpNow(): Promise<BackupStatus> {
+  async backUpNow(force = false): Promise<BackupStatus> {
     if (!this.sdkBase) throw new Error("Not signed in");
-    await faceScanner.shareOnce(() => this.backup.backUpNow());
+    await faceScanner.shareOnce(() => this.backup.backUpNow(force));
     return this.backup.getStatus();
   }
 
@@ -933,8 +959,12 @@ export class ProtonSession {
 
   private labelsDirty(all = false): boolean {
     if (!this.backupKinds?.labels || (!all && labelStore.version === this.savedLabelsVersion)) return false;
+    return !this.labelsEmpty();
+  }
+
+  private labelsEmpty(): boolean {
     const state = labelStore.get();
-    return Object.keys(state.photos).length + Object.keys(state.names).length + Object.keys(state.deleted).length > 0;
+    return Object.keys(state.photos).length + Object.keys(state.names).length + Object.keys(state.deleted).length === 0;
   }
 
   /** Puts the other devices' hidden lists together with this one, the later change winning. */
@@ -980,7 +1010,7 @@ export class ProtonSession {
     const id = installDeviceId();
     const at = Date.now();
     const copy = hiddenStore.forDrive(id, deviceLabel(), at);
-    const wrote = await this.upload("hidden", writeHiddenCopy({ ...copy, createdAt: 0 }), writeHiddenCopy(copy), HIDDEN_FOLDER, hiddenFileName(id), at, all);
+    const wrote = await this.upload("hidden", writeHiddenCopy({ ...copy, createdAt: 0 }), writeHiddenCopy(copy), HIDDEN_FOLDER, hiddenFileName(id), at, { all });
     this.savedHiddenVersion = version;
     if (wrote) process.stderr.write(`[hidden] saved the hidden list to Drive: ${copy.photos.length} photos, ${copy.albums.length} albums\n`);
     return wrote;
@@ -992,7 +1022,7 @@ export class ProtonSession {
     const id = installDeviceId();
     const at = Date.now();
     const copy = labelsForDrive(labelStore.get(), id, deviceLabel(), at);
-    const wrote = await this.upload("labels", writeLabelCopy({ ...copy, createdAt: 0 }), writeLabelCopy(copy), LABELS_FOLDER, labelsFileName(id), at, all);
+    const wrote = await this.upload("labels", writeLabelCopy({ ...copy, createdAt: 0 }), writeLabelCopy(copy), LABELS_FOLDER, labelsFileName(id), at, { all });
     this.savedLabelsVersion = version;
     if (wrote) process.stderr.write(`[labels] saved the labels to Drive: ${copy.photos.length} photos\n`);
     return wrote;
@@ -1000,9 +1030,10 @@ export class ProtonSession {
 
   /**
    * Writes one of this computer's copies to Drive unless it holds what the copy there already
-   * does (`all` writes it anyway): `same` is the copy with its time left out, which is what is
-   * compared. A save that fails on the network is tried again twice, after 2 and 5 seconds. Answers
-   * whether it was written.
+   * does and that copy is still there (`all` writes it anyway): `same` is the copy with its time
+   * left out, which is what is compared. `verify` throws when the copy did not come out whole, and
+   * then nothing is sent. A save that fails on the network is tried again twice, after 2 and 5
+   * seconds. Answers whether it was written.
    */
   private async upload(
     kind: BackupKind,
@@ -1011,13 +1042,32 @@ export class ProtonSession {
     folder: string,
     name: string,
     at: number,
-    all = false,
+    opts: { all: boolean; verify?: (plain: Buffer) => void },
   ): Promise<boolean> {
-    if (!all && this.savedCopies.unchanged(kind, same)) return false;
+    if (!opts.all && this.savedCopies.unchanged(kind, same)) {
+      // A listing that failed says nothing about the file: the copy counts as still there.
+      const present = await Promise.resolve()
+        .then(() => copyPresent(this.backupClient(), folder, name))
+        .catch(() => true);
+      if (present) return false;
+    }
+    await yieldNow();
+    opts.verify?.(plain);
+    await yieldNow();
     const sealed = await this.sealForDrive(plain);
-    await withRetry(() => saveCopy(this.backupClient(), folder, name, sealed, new Date(at)), UPLOAD_RETRY_MS);
+    await yieldNow();
+    await withRetry(
+      () => saveCopy(this.backupClient(), folder, name, sealed, new Date(at), (sent) => this.backup.reportProgress(kind, sent, sealed.length)),
+      UPLOAD_RETRY_MS,
+    );
     this.savedCopies.record(kind, same);
     return true;
+  }
+
+  /** Whether a copy written from here is no longer on Drive; one never written is not missing. */
+  private async copyGone(kind: BackupKind, folder: string, fileName: (deviceId: string) => string): Promise<boolean> {
+    if (!this.savedCopies.has(kind)) return false;
+    return !(await copyPresent(this.backupClient(), folder, fileName(installDeviceId())));
   }
 
   /** Seals `plain` to the account's primary address key and signs it with it, as the phone does. */
@@ -1589,6 +1639,7 @@ export class ProtonSession {
     faceScanner.setSource({
       listUids: async () => (await this.getTimeline()).map((item) => item.uid),
       pictures: (uids, ahead) => this.scanPictures(photos, uids, ahead),
+      sweepPictures: (uids, ahead) => this.sweepPictures(photos, uids, ahead),
       listTrashed: async () => {
         const links = new Set<string>();
         for await (const uid of withStallGuard(photos.iterateTrashedNodeUids(), SDK_STALL_MS, "iterateTrashedNodeUids")) {
@@ -1609,7 +1660,7 @@ export class ProtonSession {
       thumbnails: (uids) => this.duplicateThumbnails(photos, uids),
     });
     faceScanner.setDriveWriter(
-      (copy, all) =>
+      (copy, all = false) =>
         this.upload(
           "faces",
           writeFaceCopy({ ...copy, createdAt: 0 }),
@@ -1617,9 +1668,9 @@ export class ProtonSession {
           ML_FOLDER,
           facesFileName(copy.deviceId),
           copy.createdAt,
-          all,
+          { all, verify: (plain) => verifyFaceCopy(plain, { faces: copy.faces.length, photos: copy.markers.length }) },
         ),
-      (copy, all) =>
+      (copy, all = false) =>
         this.upload(
           "search",
           writeSearchCopy({ ...copy, createdAt: 0 }),
@@ -1627,7 +1678,7 @@ export class ProtonSession {
           ML_FOLDER,
           searchFileName(copy.deviceId),
           copy.createdAt,
-          all,
+          { all, verify: (plain) => verifySearchCopy(plain, { vectors: copy.entries.filter(([, vector]) => vector).length }) },
         ),
       () => this.backup.changed(),
     );
@@ -1798,6 +1849,23 @@ export class ProtonSession {
   }
 
   /**
+   * What the full face scan reads for `uids`: the large preview where there is one, which is
+   * far less to download for a whole library, and the scan's own reading for the others.
+   */
+  private async *sweepPictures(
+    photos: any,
+    uids: string[],
+    ahead?: number,
+  ): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+    const without: string[] = [];
+    for await (const got of this.scanPreviews(photos, uids, [ThumbnailType.Type2])) {
+      if (got.bytes) yield got;
+      else without.push(got.uid);
+    }
+    if (without.length) yield* this.scanPictures(photos, without, ahead);
+  }
+
+  /**
    * The small thumbnails the duplicate finder fingerprints: the cached ones first, the rest
    * fetched and cached, as the grid would. It waits while the grid has thumbnails of its own
    * waiting, so a page on screen is never held up by it. A photo a fetch did not answer is left
@@ -1835,10 +1903,14 @@ export class ProtonSession {
   /**
    * The large previews of `uids` for the face scan: the cached ones first, the rest fetched and
    * not cached, since a scan reads the whole library once. A photo without a large preview
-   * falls back to its small one. One a fetch did not answer (a stall, a network error) is left
+   * falls back to the next of `types`. One a fetch did not answer (a stall, a network error) is left
    * out, so the scan asks for it again later instead of taking it for a photo without faces.
    */
-  private async *scanPreviews(photos: any, uids: string[]): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
+  private async *scanPreviews(
+    photos: any,
+    uids: string[],
+    types: ThumbnailType[] = [ThumbnailType.Type2, ThumbnailType.Type1],
+  ): AsyncGenerator<{ uid: string; bytes: Buffer | null }> {
     const missing: string[] = [];
     for (const uid of uids) {
       const cached = thumbGet(uid, ThumbnailType.Type2);
@@ -1847,7 +1919,7 @@ export class ProtonSession {
     }
     // Large previews first; the photos that have none are asked for their small one.
     let ask = missing;
-    for (const type of [ThumbnailType.Type2, ThumbnailType.Type1]) {
+    for (const type of types) {
       if (ask.length === 0) return;
       const without: string[] = [];
       try {

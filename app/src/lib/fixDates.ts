@@ -20,15 +20,11 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { parseFilenameDate } from "./filenameDate";
+
 // The photos whose date cannot be right, for the Fix dates page: no date at all (shown as
 // 1 January 1970), a date still to come, or a file name that records another day.
 
-/** A year, month and day, and after it maybe an hour, minute and second (and milliseconds). */
-const STAMP =
-  /(?<!\d)((?:19|20)\d{2})[-_.]?(\d{2})[-_.]?(\d{2})(?:[ _T.-]?(\d{2})[-_.:h]?(\d{2})[-_.:m]?(\d{2})\d{0,3})?(?!\d)/;
-
-/** The earliest year a name is believed for. */
-const FIRST_YEAR = 1990;
 const DAY = 24 * 3600_000;
 /** How far a name and the date may part before it counts: time zones and midnight stay inside. */
 const NAME_SLACK = 2 * DAY;
@@ -39,19 +35,10 @@ const NO_DATE_BEFORE = Date.UTC(1971, 0, 2);
  * The capture time a file name gives, read as local time, the way the sidecar reads it for
  * the date editor: `IMG_20230512_141502.jpg`, `Screenshot_2023-05-12-14-15-02.png`,
  * `VID-20230512-WA0001.mp4`. A date with no time is noon of that day. Null when the name gives
- * no real date.
+ * no real date. Up to a day ahead is let by, for that noon read in the morning.
  */
 export function dateFromName(name: string, now = Date.now()): number | null {
-  const m = STAMP.exec(name);
-  if (!m) return null;
-  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  if (year < FIRST_YEAR || month < 1 || month > 12 || day < 1 || day > 31) return null;
-  const time = m[4] !== undefined ? [Number(m[4]), Number(m[5]), Number(m[6])] : null;
-  const [hour, minute, second] = time && time[0] < 24 && time[1] < 60 && time[2] < 60 ? time : [12, 0, 0];
-  const date = new Date(year, month - 1, day, hour, minute, second);
-  if (date.getMonth() !== month - 1 || date.getDate() !== day) return null;
-  const ms = date.getTime();
-  return ms > now + DAY ? null : ms;
+  return parseFilenameDate(name, now + DAY);
 }
 
 export type DateProblem =

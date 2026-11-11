@@ -91,6 +91,9 @@ export const SEARCH_DIR = "search";
 /** What this install's copies on Drive held when last written (sharedBackup.ts). */
 export const BACKUP_STATE_FILE = "backup-state";
 
+/** What those copies held, photo by photo, for a smaller one not to be written over them (backupBaseline.ts). */
+export const BACKUP_BASELINE_FILE = "backup-baseline";
+
 /** This install's id among the account's devices (deviceId.ts). */
 export const DEVICE_ID_FILE = "device-id";
 
@@ -214,6 +217,7 @@ export function wipeCache(): void {
     discardDir(join(dataDir, LABELS_DIR));
     rmSync(join(dataDir, DEVICE_ID_FILE), { force: true });
     rmSync(join(dataDir, BACKUP_STATE_FILE), { force: true });
+    rmSync(join(dataDir, BACKUP_BASELINE_FILE), { force: true });
     rmSync(join(dataDir, BACKUP_FLAGS_FILE), { force: true });
     rmSync(join(dataDir, DUPLICATES_FILE), { force: true });
     rmSync(join(dataDir, HIDDEN_FILE), { force: true });

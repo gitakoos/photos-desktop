@@ -335,6 +335,12 @@ function facesByPerson(store: FaceStore): Map<string, FaceRecord[]> {
   return out;
 }
 
+/** A person's faces, the best first: the photo each is on and where on it. */
+export function personFaces(store: FaceStore, id: string): { uid: string; box: FaceRecord["box"] }[] {
+  const faces = facesByPerson(store).get(id) ?? [];
+  return faces.sort((a, b) => b.score - a.score).map((f) => ({ uid: f.uid, box: f.box }));
+}
+
 /** The leftovers, made the first time a face is put there. */
 export function otherPerson(p: PeopleState): Person {
   let other = p.people.find((x) => x.isOther);

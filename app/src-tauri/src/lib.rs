@@ -47,6 +47,8 @@ mod local_file;
 mod local_folder;
 mod photo_edit;
 mod secure_store;
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod hang_watch;
 mod update_sig;
 mod upload_frame;
 mod video_compress;
@@ -150,7 +152,12 @@ fn classified(method: &str) -> Option<Priority> {
         | "localLockState" | "localLockCheck" | "localLockSet" | "localLockClear"
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
         | "protectSession" | "signInChoice" | "keepSignIn" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
-        | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces" => Priority::Interactive,
+        | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces"
+        // The timeline's read: the grid cannot paint without it, so it goes ahead of the
+        // first screen's own thumbnails and media types rather than behind them.
+        | "startTimeline" | "timelinePage"
+        // The backup settings' poll: a tiny answer that must not wait behind a page of thumbnails.
+        | "sharedBackupStatus" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
         // even though the user is looking at that photo: the transfer itself runs inside
@@ -183,6 +190,8 @@ fn classified(method: &str) -> Option<Priority> {
         | "myFilesCheck"
         // The hidden albums' photos read again: a walk over each album.
         | "hiddenRefresh"
+        // The trash read ahead of opening it: a walk that waits its turn behind the screen.
+        | "warmTrash"
         // Keeping every photo on this PC: a whole-library download that yields to the window,
         // and the lookups that decide what it keeps.
         | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden" => Priority::Background,
@@ -190,19 +199,19 @@ fn classified(method: &str) -> Option<Priority> {
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
         // warmer, behind which a page stayed empty for as long as a cold batch took.
-        "getThumbnails" | "getAlbums" | "getAlbumPhotos" | "getShared" => Priority::UserAction,
+        "getThumbnails" | "getFacePreview" | "getAlbums" | "getAlbumPhotos" | "getShared" => Priority::UserAction,
 
         // What the window asks for a screenful at a time, or waits on as it opens a view:
         // short, and wanted now.
-        "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
+        "getDurations" | "getMediaTypes" | "getTimeline"
         | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
-        | "facePeople" | "facePersonCandidates" | "labelsList" | "labelsOf" | "myFilesList"
+        | "facePeople" | "facePersonCandidates" | "facePersonFaces" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
         | "duplicatesGroups" => Priority::UserAction,
 
         // The window's status polls: tiny answers.
         "uploadStatus" | "dropReplaced" | "dateEditStatus" | "offlineStatus" | "offlineAlbums" | "saveStatus" | "hydrateProgress" | "updateStatus"
-        | "faceScanStatus" | "faceSweepStatus" | "labelsVersion" | "sharedBackupStatus"
+        | "faceScanStatus" | "faceSweepStatus" | "labelsVersion"
         | "duplicatesStatus" | "ocrModelStatus" | "ocrResult" | "hiddenState" | "faceWipeSeen" => Priority::UserAction,
 
         // The backups on Drive the backup settings list, a folder listing each, and the trash of one.
@@ -228,7 +237,8 @@ fn classified(method: &str) -> Option<Priority> {
         | "faceSearchClear" | "faceNameFaces" | "faceRejectFaces" | "faceNotThisPerson" | "facePersonRename"
         | "facePersonMerge" | "facePersonReject" | "facePersonDecline" | "facePersonCover"
         | "facePersonAddFaces" | "facePersonRemovePhotos" | "faceSuggestionDismiss"
-        | "faceSweepStart" | "faceSweepStop" | "labelsAdd" | "labelsRemove" | "labelsSet"
+        | "faceSweepStart" | "faceSweepStop" | "faceLibrarySweepStart" | "faceLibrarySweepStop"
+        | "labelsAdd" | "labelsRemove" | "labelsSet"
         | "labelCreate" | "labelRename" | "labelDelete" | "sharedBackupSet" | "sharedBackupNow"
         | "diagSave" | "diagSetDetailed" | "duplicatesStart" | "duplicatesTrash"
         | "duplicatesIgnore" | "ocrModelDownload" | "ocrModelRemove" | "ocrStart" | "hiddenSet" => Priority::UserAction,
@@ -1236,7 +1246,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "warmTrash" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,
@@ -2596,10 +2606,28 @@ fn run_updater(app: AppHandle) -> Result<(), String> {
             note(&app, "[update] no verified installer staged, not launching");
             return Err("no installer staged".into());
         }
+        // Held open with only reads shared from before the check until after the launch:
+        // TEMP is writable by anything running as this user, and without the hold a file
+        // swapped in between the signature check and the start would run unchecked. While
+        // this handle lives no one can write, rename or delete the installer; reading it,
+        // as the check and the loader do, is still allowed.
+        let _hold = {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 0x0000_0001;
+            match std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path) {
+                Ok(f) => f,
+                Err(_) => {
+                    note(&app, "[update] the staged installer is in use, not launching");
+                    return Err("the installer is in use".into());
+                }
+            }
+        };
         // Checked here, by the process that runs it, right before it runs: signed with
         // the update key and newer than this app, or it is deleted and not run.
         let signature = std::env::temp_dir().join("pfp-update.exe.minisig");
         if let Err(e) = update_sig::verify_installer(&path, &signature, &app.package_info().version) {
+            // Dropped first: a handle that shares only reads would block the delete below.
+            drop(_hold);
             note(&app, &format!("[update] installer refused: {e}"));
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(&signature);
@@ -3157,6 +3185,9 @@ pub fn run() {
             // launch sweeps too, because the folder emptied here is the one its own
             // decoded previews are staged in.
             cloud_mount::reap_temp_leftovers();
+            // From here on a window that stops answering says where in the log.
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            hang_watch::start(app.handle());
             #[cfg(not(windows))]
             files_drive::reap(app.handle());
             // A launch that exists only to show a file stops here, with one window on
@@ -3679,6 +3710,14 @@ mod log_tests {
     }
 
     #[test]
+    fn the_timeline_read_goes_ahead_of_the_first_screens_work() {
+        for method in ["startTimeline", "timelinePage"] {
+            assert!(priority_for(method) > priority_for("getThumbnails"), "{method}");
+            assert!(priority_for(method) > priority_for("getMediaTypes"), "{method}");
+        }
+    }
+
+    #[test]
     fn what_a_page_draws_goes_before_the_warmer() {
         for on_screen in ["getThumbnails", "getAlbums", "getAlbumPhotos", "getShared"] {
             assert!(
@@ -3687,5 +3726,10 @@ mod log_tests {
             );
         }
         assert_eq!(priority_for("warmThumbnails"), Priority::Background);
+    }
+
+    #[test]
+    fn the_backup_status_goes_before_a_page_of_thumbnails() {
+        assert!(priority_for("sharedBackupStatus") > priority_for("getThumbnails"));
     }
 }

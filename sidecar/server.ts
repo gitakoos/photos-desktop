@@ -176,6 +176,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getThumbnails: (p) => session.getThumbnails(p.uids),
   warmThumbnails: (p) => session.warmThumbnails(p.uids),
   getPreview: (p) => session.getPreview(p.uid),
+  getFacePreview: (p) => session.getPreview(p.uid),
   getOriginal: (p) => session.getOriginal(p.uid),
   releaseOriginal: (p) => session.releaseOriginal(p?.uid),
   readOriginalBytes: (p) => session.readOriginalBytes(p.token),
@@ -287,8 +288,8 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getDriveCollections: (p) => session.getDriveCollections(!!p?.refresh, driveKinds(p)),
   sharedBackupSet: (p) => session.setSharedBackup(p?.on === true, driveKinds(p)),
   sharedBackupStatus: () => session.sharedBackupStatus(),
-  sharedBackupNow: () => {
-    void session.backUpNow().catch(() => undefined);
+  sharedBackupNow: (p) => {
+    void session.backUpNow(p?.force === true).catch(() => undefined);
     return session.sharedBackupStatus();
   },
   sharedBackupLoad: () => session.loadFromDrive(),
@@ -324,6 +325,7 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
+  warmTrash: () => session.listTrashed(),
   hiddenState: () => session.hiddenState(),
   hiddenSet: (p) =>
     session.hiddenSet(p?.kind === "albums" ? "albums" : "photos", uidList(p?.uids), p?.hidden !== false),

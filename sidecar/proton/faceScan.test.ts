@@ -25,8 +25,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { backupBaseline } from "./backupBaseline.ts";
+import { writeBackupFlags } from "./backupFlags.ts";
+import type { FaceCopyToWrite, SearchCopyToWrite } from "./driveData.ts";
 import { FACE_EMBEDDING_DIM } from "./faceCluster.ts";
 import { FaceScanner, analyzeImage, modelDownloadProgress, tilesFor, type ScanSource } from "./faceScan.ts";
 import type { FaceRecord } from "./faceStore.ts";
@@ -257,6 +260,330 @@ describe("this computer's face copy after a change of the face models", () => {
   });
 });
 
+describe("this computer's copies against the last ones written", () => {
+  beforeEach(() => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-shrink-")));
+    setDataKey(randomBytes(32));
+  });
+
+  const links = (n: number) => Array.from({ length: n }, (_, i) => `p${i}`);
+  const dropTo = (n: number) => ({ photosBefore: 100, photosAfter: n, itemsBefore: 100, itemsAfter: n });
+
+  /** The first `n` photos of the library looked at, a face found on each. */
+  function holding(s: FaceScanner, n: number): void {
+    s.store.clear();
+    for (const link of links(n)) s.store.put(`vol~${link}`, [face(`vol~${link}`)]);
+  }
+
+  /** The first `n` photos of the library indexed. */
+  function indexing(s: FaceScanner, n: number): void {
+    s.search.clear();
+    for (const link of links(n)) s.search.put(`vol~${link}`, new Uint16Array(1));
+  }
+
+  /** Face recognition and the index on and shared, a library of a hundred listed, the faces of them all held. */
+  function sharing() {
+    const faces: FaceCopyToWrite[] = [];
+    const search: SearchCopyToWrite[] = [];
+    const s = new FaceScanner();
+    s.setDriveWriter(
+      async (copy) => {
+        faces.push(copy);
+        return true;
+      },
+      async (copy) => {
+        search.push(copy);
+        return true;
+      },
+    );
+    s.setEnabled(true, false, false, true, true);
+    s.store.load();
+    s.search.load();
+    (s as any).uidByLink = new Map(links(100).map((link) => [link, `vol~${link}`]));
+    holding(s, 100);
+    return { s, faces, search };
+  }
+
+  it("does not send a copy with fewer photos than the last one", async () => {
+    const { s, faces } = sharing();
+    expect(await s.saveFaces(true)).toEqual({ wrote: true, counts: { faces: 100, photos: 100 } });
+    holding(s, 97);
+    s.changed();
+    expect(await s.saveFaces(true)).toEqual({ blocked: dropTo(97) });
+    expect(faces).toHaveLength(1);
+    // Still to save, so the next round looks at it again.
+    expect(s.facesDirty()).toBe(true);
+    s.stop(false);
+  });
+
+  it("sends it when forced", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    holding(s, 97);
+    expect(await s.saveFaces(true, true)).toEqual({ wrote: true, counts: { faces: 97, photos: 97 } });
+    expect(faces).toHaveLength(2);
+    expect(Object.keys(backupBaseline.get("faces")!)).toHaveLength(97);
+    s.stop(false);
+  });
+
+  it("lets a small drop by, but none during a scan", async () => {
+    for (const state of ["models", "waiting", "scanning", "grouping", "finding"]) {
+      initStore(mkdtempSync(join(tmpdir(), "pfp-shrink-")));
+      const { s, faces } = sharing();
+      await s.saveFaces(true);
+      holding(s, 99);
+      (s as any).status.state = state;
+      expect(await s.saveFaces(true)).toEqual({ blocked: dropTo(99) });
+      expect(faces).toHaveLength(1);
+      (s as any).status.state = "done";
+      expect(await s.saveFaces(true)).toEqual({ wrote: true, counts: { faces: 99, photos: 99 } });
+      s.stop(false);
+    }
+  });
+
+  it("does not count the photos gone from the library or hidden", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    for (const link of links(100).slice(90, 95)) (s as any).uidByLink.delete(link);
+    const hidden = new Set(links(100).slice(95).map((link) => `vol~${link}`));
+    (s as any).source = { hiddenTest: () => (uid: string) => hidden.has(uid) };
+    holding(s, 90);
+    expect(await s.saveFaces(true)).toEqual({ wrote: true, counts: { faces: 90, photos: 90 } });
+    expect(faces).toHaveLength(2);
+    s.stop(false);
+  });
+
+  /** The scan paused, so no run lists the library, and what stands in the library's place. */
+  function pausedWith(s: FaceScanner, source: ScanSource): void {
+    s.setPaused(true);
+    s.setSource(source);
+    (s as any).uidByLink = new Map();
+  }
+
+  const whole = () => library(links(100).map((link) => `vol~${link}`)).source;
+  const unlistable = (): ScanSource => ({
+    ...library([]).source,
+    listUids: async () => {
+      throw new Error("offline");
+    },
+  });
+
+  it("waits when there is a reference and the library cannot be listed", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    (s as any).uidByLink = new Map();
+    holding(s, 100);
+    // No source at all, then one whose listing fails.
+    expect(await s.saveFaces(true)).toEqual({ skipped: "library-unlisted" });
+    pausedWith(s, unlistable());
+    expect(await s.saveFaces(true)).toEqual({ skipped: "library-unlisted" });
+    expect(faces).toHaveLength(1);
+    s.stop(false);
+  });
+
+  it("waits when there is a reference and the listing comes back empty", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    pausedWith(s, library([]).source);
+    holding(s, 97);
+    expect(await s.saveFaces(true)).toEqual({ skipped: "library-unlisted" });
+    expect(faces).toHaveLength(1);
+    s.stop(false);
+  });
+
+  it("writes a first copy with nothing to weigh it against, the library unlisted", async () => {
+    const { s, faces } = sharing();
+    pausedWith(s, library([]).source);
+    expect(await s.saveFaces(true)).toEqual({ wrote: true, counts: { faces: 100, photos: 100 } });
+    expect(faces).toHaveLength(1);
+    s.stop(false);
+  });
+
+  it("lists the library itself with the scan paused, once, and weighs the copy as usual", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    const source = whole();
+    const listUids = vi.spyOn(source, "listUids");
+    pausedWith(s, source);
+    holding(s, 97);
+    expect(await s.saveFaces(true)).toEqual({ blocked: dropTo(97) });
+    expect(s.uidOfLink("p0")).toBe("vol~p0");
+    expect(await s.saveFaces(true)).toEqual({ blocked: dropTo(97) });
+    expect(listUids).toHaveBeenCalledTimes(1);
+    expect(faces).toHaveLength(1);
+    holding(s, 100);
+    expect(await s.saveFaces(true)).toEqual({ wrote: true, counts: { faces: 100, photos: 100 } });
+    s.stop(false);
+  });
+
+  it("sends the copy that carries a delete, with the library listed or not", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    (s as any).uidByLink = new Map();
+    (s as any).wipeHere(20, false);
+    expect(await s.saveFaces()).toEqual({ wrote: true, counts: { faces: 0, photos: 0 } });
+    expect(faces.map((c) => c.facesWipedAt)).toEqual([0, 20]);
+    s.stop(false);
+  });
+
+  it("does not take a delete saved on an earlier run for one still to go out", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    // What is known of the saved delete starts over with each run of the app, the reference does not.
+    writeBackupFlags({ knownWipe: 20 });
+    holding(s, 97);
+    expect(await s.saveFaces(true)).toEqual({ blocked: dropTo(97) });
+    expect(faces).toHaveLength(1);
+    s.stop(false);
+  });
+
+  it("carries a delete on with recognition off, when no library will be listed", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    writeBackupFlags({ knownWipe: 20 });
+    s.setEnabled(false);
+    (s as any).uidByLink = new Map();
+    expect(await s.saveFaces()).toMatchObject({ wrote: true });
+    expect(faces).toHaveLength(2);
+    expect(s.wipeSaved()).toBe(true);
+    s.stop(false);
+  });
+
+  it("says why faces are not saved with recognition off", () => {
+    const { s } = sharing();
+    s.setEnabled(false);
+    expect(s.facesSkip(false)).toBe("recognition-off");
+    s.stop(false);
+  });
+
+  it("says why faces are not saved while names wait for their photos", () => {
+    const { s } = sharing();
+    s.store.people.heldOver = [{ uid: "vol~p0", box: [0.1, 0.1, 0.3, 0.4], kind: "name", name: "Ann" }];
+    expect(s.facesSkip(true)).toBe("names-held");
+    s.stop(false);
+  });
+
+  it("gives no reason for faces with nothing new, or still to save", async () => {
+    const { s } = sharing();
+    expect(s.facesSkip(false)).toBeNull();
+    await s.saveFaces();
+    expect(s.facesSkip(false)).toBeNull();
+    s.stop(false);
+  });
+
+  it("says why the search index is not saved when indexing is off", () => {
+    const { s } = sharing();
+    s.setEnabled(true, false, false, true, false);
+    expect(s.searchSkip(false)).toBe("index-off");
+    s.stop(false);
+  });
+
+  it("says when there is no search index to save yet", async () => {
+    const { s } = sharing();
+    expect(s.searchSkip(true)).toBe("nothing-to-save");
+    indexing(s, 1);
+    expect(s.searchSkip(true)).toBeNull();
+    await s.saveSearch();
+    expect(s.searchSkip(false)).toBeNull();
+    s.stop(false);
+  });
+
+  it("holds a smaller search index back the same way, and forced it goes", async () => {
+    const { s, search } = sharing();
+    indexing(s, 100);
+    expect(await s.saveSearch(true)).toEqual({ wrote: true, counts: { vectors: 100 } });
+    indexing(s, 97);
+    expect(await s.saveSearch(true)).toEqual({ blocked: dropTo(97) });
+    expect(search).toHaveLength(1);
+    expect(await s.saveSearch(true, true)).toEqual({ wrote: true, counts: { vectors: 97 } });
+    expect(search).toHaveLength(2);
+    expect(Object.keys(backupBaseline.get("search")!)).toHaveLength(97);
+    s.stop(false);
+  });
+
+  it("counts a photo that could not be read as no vector", async () => {
+    const { s } = sharing();
+    indexing(s, 2);
+    s.search.put("vol~p2", null);
+    expect(await s.saveSearch(true)).toEqual({ wrote: true, counts: { vectors: 2 } });
+    expect(backupBaseline.get("search")).toEqual({ p0: 1, p1: 1 });
+    s.stop(false);
+  });
+
+  it("waits with the search index too when there is a reference and the library cannot be listed", async () => {
+    const { s, search } = sharing();
+    indexing(s, 100);
+    await s.saveSearch(true);
+    pausedWith(s, unlistable());
+    indexing(s, 100);
+    expect(await s.saveSearch(true)).toEqual({ skipped: "library-unlisted" });
+    expect(search).toHaveLength(1);
+    s.stop(false);
+  });
+
+  it("writes a first search index with nothing to weigh it against, the library unlisted", async () => {
+    const { s, search } = sharing();
+    indexing(s, 100);
+    pausedWith(s, library([]).source);
+    expect(await s.saveSearch(true)).toEqual({ wrote: true, counts: { vectors: 100 } });
+    expect(search).toHaveLength(1);
+    s.stop(false);
+  });
+
+  it("weighs the search index too with the scan paused", async () => {
+    const { s, search } = sharing();
+    indexing(s, 100);
+    await s.saveSearch(true);
+    pausedWith(s, whole());
+    indexing(s, 97);
+    expect(await s.saveSearch(true)).toEqual({ blocked: dropTo(97) });
+    expect(search).toHaveLength(1);
+    s.stop(false);
+  });
+
+  it("forgets the reference when the user deletes the faces", async () => {
+    const { s } = sharing();
+    await s.saveFaces(true);
+    expect(backupBaseline.get("faces")).not.toBeNull();
+    await s.clearHere();
+    expect(backupBaseline.get("faces")).toBeNull();
+    s.stop(false);
+  });
+
+  it("forgets it for a delete everywhere, for clearing it all, and for a delete from another device", async () => {
+    const deletes: ((s: FaceScanner) => unknown)[] = [(s) => s.clearEverywhere(), (s) => s.clearAll(), (s) => (s as any).wipeHere(20, false)];
+    for (const remove of deletes) {
+      initStore(mkdtempSync(join(tmpdir(), "pfp-shrink-")));
+      const { s } = sharing();
+      await s.saveFaces(true);
+      expect(backupBaseline.get("faces")).not.toBeNull();
+      await remove(s);
+      expect(backupBaseline.get("faces")).toBeNull();
+      s.stop(false);
+    }
+  });
+
+  it("forgets only the search index's when the user deletes that", () => {
+    const { s } = sharing();
+    backupBaseline.record("faces", { p0: 1 });
+    backupBaseline.record("search", { p0: 1 });
+    s.clearSearch();
+    expect(backupBaseline.get("search")).toBeNull();
+    expect(backupBaseline.get("faces")).toEqual({ p0: 1 });
+    s.stop(false);
+  });
+
+  it("keeps it through a rescan, so a half-done one is not sent", async () => {
+    const { s, faces } = sharing();
+    await s.saveFaces(true);
+    s.rescan();
+    expect(backupBaseline.get("faces")).not.toBeNull();
+    expect(await s.saveFaces(true)).toEqual({ blocked: dropTo(0) });
+    expect(faces).toHaveLength(1);
+    s.stop(false);
+  });
+});
+
 /** A noisy little JPEG, different for every seed, sharp enough everywhere for a face to be kept. */
 async function noisyJpeg(seed: number): Promise<Buffer> {
   const rand = seeded(seed);
@@ -402,5 +729,177 @@ describe("photos read side by side", () => {
       expect(many.vectors).toEqual(one.vectors);
       expect(many.faceCount).toBe(one.faceCount);
     }
+  });
+});
+
+describe("the full scan", () => {
+  beforeEach(() => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-scan-")));
+    setDataKey(randomBytes(32));
+  });
+
+  /** A scanner whose own run is over and left `uids` scanned; the models open but are never run. */
+  async function scanned(uids: string[]) {
+    const s = scanner();
+    (s as any).openModels = async () => ({});
+    const lib = library(uids);
+    s.setSource(lib.source);
+    await settle(s);
+    expect(s.store.scanned().sort()).toEqual(uids);
+    return { s, source: lib.source };
+  }
+
+  async function ended(s: FaceScanner): Promise<void> {
+    while (s.getSweep().running) await new Promise((r) => setTimeout(r, 5));
+    await settle(s);
+  }
+
+  /** A library whose reading waits until let go, and says when it has begun. */
+  function holdReading(source: ScanSource) {
+    let begun: () => void = () => {};
+    const reading = new Promise<void>((r) => (begun = r));
+    let letGo: () => void = () => {};
+    const gate = new Promise<void>((r) => (letGo = r));
+    source.sweepPictures = async function* () {
+      begun();
+      await gate;
+    };
+    return { reading, letGo };
+  }
+
+  it("starts no run of the scan while it goes on, and hands back to the scan after", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    const { reading, letGo } = holdReading(source);
+    const release = vi.spyOn(s as any, "releaseModels");
+    s.startLibrarySweep();
+    await reading;
+    release.mockClear();
+    (s as any).kick();
+    expect((s as any).running).toBeNull();
+    expect(release).not.toHaveBeenCalled();
+    letGo();
+    await ended(s);
+    expect((s as any).recheck).not.toBeNull();
+    s.stop(false);
+  });
+
+  it("takes the scan's waiting recheck off when it starts", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    const { reading, letGo } = holdReading(source);
+    expect((s as any).recheck).not.toBeNull();
+    s.startLibrarySweep();
+    await reading;
+    expect((s as any).recheck).toBeNull();
+    letGo();
+    await ended(s);
+    s.stop(false);
+  });
+
+  it("marks nothing when the models cannot open, and says only the kind of error", async () => {
+    const { s, source } = await scanned(["vol~a", "vol~b"]);
+    (s as any).openModels = async () => {
+      throw new TypeError("no such file: C:/models/face.onnx");
+    };
+    source.sweepPictures = async function* (uids) {
+      for (const uid of uids) yield { uid, bytes: Buffer.from("picture") };
+    };
+    const log = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    s.startLibrarySweep();
+    await ended(s);
+    const written = log.mock.calls.map(([text]) => String(text));
+    log.mockRestore();
+    expect(s.store.isSwept("vol~a")).toBe(false);
+    expect(s.store.isSwept("vol~b")).toBe(false);
+    expect(s.getSweep().running).toBe(false);
+    expect(written).toContain("[faces] full scan stopped: TypeError\n");
+    s.stop(false);
+  });
+
+  /** Models in memory, as a photo read leaves them, each noting when it is let go. */
+  function resident(s: FaceScanner) {
+    const release = vi.fn(async () => {});
+    (s as any).models = { detector: { release }, embedder: { release }, accel: "cpu" };
+    return release;
+  }
+
+  /** Once the sweep started first has wound down, which is after its status already says stopped. */
+  function firstSweep(s: FaceScanner) {
+    const sweepAll = vi.spyOn(s as any, "sweepAll");
+    return () => sweepAll.mock.results[0]!.value as Promise<void>;
+  }
+
+  it("lets the models go when it is stopped", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    // Paused, so no run of the scan comes after to let them go in its place.
+    s.setPaused(true);
+    const { reading, letGo } = holdReading(source);
+    const release = resident(s);
+    const woundDown = firstSweep(s);
+    s.startLibrarySweep();
+    await reading;
+    s.stopSweep();
+    letGo();
+    await woundDown();
+    expect(release).toHaveBeenCalledTimes(2);
+    expect((s as any).models).toBeNull();
+    expect(s.store.isSwept("vol~a")).toBe(false);
+    s.stop(false);
+  });
+
+  it("lets the models go when they fail to open", async () => {
+    const { s } = await scanned(["vol~a"]);
+    s.setPaused(true);
+    const release = resident(s);
+    (s as any).openModels = async () => {
+      throw new TypeError("no such file");
+    };
+    const log = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    s.startLibrarySweep();
+    await ended(s);
+    log.mockRestore();
+    expect(release).toHaveBeenCalledTimes(2);
+    expect((s as any).models).toBeNull();
+    s.stop(false);
+  });
+
+  it("leaves the models to the scan that started again when it was stopped", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    const { reading, letGo } = holdReading(source);
+    let listed: (uids: string[]) => void = () => {};
+    source.listUids = () => new Promise((r) => (listed = r));
+    const woundDown = firstSweep(s);
+    s.startLibrarySweep();
+    await reading;
+    const release = resident(s);
+    s.stopSweep();
+    expect((s as any).running).not.toBeNull();
+    letGo();
+    await woundDown();
+    expect(release).not.toHaveBeenCalled();
+    listed(["vol~a"]);
+    await settle(s);
+    expect(release).toHaveBeenCalledTimes(2);
+    s.stop(false);
+  });
+
+  it("leaves the models to a full scan started again straight after", async () => {
+    const { s, source } = await scanned(["vol~a"]);
+    s.setPaused(true);
+    const first = holdReading(source);
+    const woundDown = firstSweep(s);
+    s.startLibrarySweep();
+    await first.reading;
+    const release = resident(s);
+    s.stopSweep();
+    const second = holdReading(source);
+    s.startLibrarySweep();
+    await second.reading;
+    first.letGo();
+    await woundDown();
+    expect(release).not.toHaveBeenCalled();
+    second.letGo();
+    await ended(s);
+    expect(release).toHaveBeenCalledTimes(2);
+    s.stop(false);
   });
 });

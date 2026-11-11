@@ -21,6 +21,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import { PersonAddIcon } from "./icons";
+import { layoutFaceTags, type FaceTag } from "../lib/faceTags";
 import { useT } from "../lib/i18n";
 import { fittedRect, type TextRead } from "../lib/textLayout";
 import { TextLayer } from "./ViewerText";
@@ -77,6 +79,7 @@ export function PhotoViewer({
   onZoom,
   textRead,
   textQuiet = false,
+  faceTags,
 }: {
   src?: string;
   loading?: boolean;
@@ -95,6 +98,8 @@ export function PhotoViewer({
   textRead?: TextRead | null;
   /** The text was read ahead: selectable, never shown. */
   textQuiet?: boolean;
+  /** The faces found on the photo, tagged over it and kept on their faces through zoom and pan. */
+  faceTags?: FaceTag[];
 }) {
   const t = useT();
   const [view, setView] = useState<View>(FIT);
@@ -116,6 +121,20 @@ export function PhotoViewer({
     setView(FIT);
     setNatural(null);
   }, [photoKey ?? src]);
+
+  // Where the image element sits in the stage, untouched by the zoom's transform: what the
+  // face tags are placed from. Read again whenever the stage changes size.
+  const [frame, setFrame] = useState<{ l: number; t: number; w: number; h: number } | null>(null);
+  useEffect(() => {
+    const img = imgRef.current;
+    const wrap = wrapRef.current;
+    if (!img || !wrap) return;
+    const read = () => setFrame({ l: img.offsetLeft, t: img.offsetTop, w: img.offsetWidth, h: img.offsetHeight });
+    read();
+    const ro = new ResizeObserver(read);
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [natural]);
 
   // The fit's size follows the window, so the percent shown stays the photo's own.
   useEffect(() => {
@@ -266,12 +285,59 @@ export function PhotoViewer({
         </div>
       )}
 
+      {faceTags && faceTags.length > 0 && natural && frame && (
+        <FaceTags tags={faceTags} natural={natural} frame={frame} view={view} moving={panning} />
+      )}
+
       {loading && (
         <div className="pv-loading" role="status" aria-live="polite">
           <span className="pv-spinner" aria-hidden="true" />
           <span>{t("common.loading")}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Name tags pinned over the faces, as the Android viewer draws them. Only the name pills take the
+ * mouse: the rings let it through to the photo and to the text read off it.
+ */
+function FaceTags({
+  tags,
+  natural,
+  frame,
+  view,
+  moving,
+}: {
+  tags: FaceTag[];
+  natural: { w: number; h: number };
+  frame: { l: number; t: number; w: number; h: number };
+  view: View;
+  moving: boolean;
+}) {
+  const t = useT();
+  return (
+    <div className={`pv-tags${moving ? " moving" : ""}`}>
+      {layoutFaceTags(tags, natural, frame, view).map(({ tag, box, pill }) => (
+        <div key={tag.key}>
+          <span className="pv-face" style={{ left: box.l, top: box.t, width: box.w, height: box.h }} />
+          <button
+            className={`pv-tag${tag.name ? "" : " add"}`}
+            style={{ left: pill.l, top: pill.t, minWidth: pill.w }}
+            title={tag.name ?? t("faces.name")}
+            aria-label={tag.name ?? t("faces.name")}
+            onMouseDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              tag.onClick?.();
+            }}
+          >
+            {tag.name ?? <PersonAddIcon size={14} />}
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

@@ -20,12 +20,13 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { CheckIcon, ChevronRightIcon } from "./icons";
 import { FaceNamer } from "./FaceNamer";
 import type { LooseFace } from "../lib/localFaces";
 import { cachedPreview, loadPreview } from "../lib/previewStore";
+import { createFaceQueue } from "../lib/faceQueue";
 import { useT } from "../lib/i18n";
 import "../styles/Library.css";
 
@@ -90,6 +91,11 @@ export function LibraryTiles({ tiles }: { tiles: Tile[] }) {
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 const FACE_ZOOM_OUT = 1.4;
 
+/** How many face previews are asked for at once; a page of people asking for all of theirs
+ *  together queued every other call behind them. */
+const FACE_PREVIEWS_AT_ONCE = 3;
+const askFacePreview = createFaceQueue((uid) => loadPreview(uid, "getFacePreview"), FACE_PREVIEWS_AT_ONCE);
+
 /**
  * The cover cut to the face: the picture is scaled and moved so a square FACE_ZOOM_OUT times
  * the face fills its square frame, kept inside the picture. Until the picture's own shape is
@@ -99,16 +105,40 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
   const [aspect, setAspect] = useState<number | null>(null);
   // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it:
   // the larger preview takes its place once it is in.
-  const [preview, setPreview] = useState<string | null>(() => cachedPreview(uid) ?? null);
+  // Held with the photo it belongs to, so a cover whose photo changes under it drops the old one.
+  const [held, setHeld] = useState<{ uid: string; url: string } | null>(null);
+  const preview = held?.uid === uid ? held.url : cachedPreview(uid) ?? null;
+  // Asked for only once the face is on screen, a few at a time.
+  const ref = useRef<HTMLImageElement>(null);
+  const [seen, setSeen] = useState(false);
   useEffect(() => {
+    if (seen || preview) return;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setSeen(true);
+      return;
+    }
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        setSeen(true);
+        io.disconnect();
+      }
+    }, { rootMargin: "200px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [uid, seen, preview]);
+  useEffect(() => {
+    if (!seen || preview) return;
     let live = true;
-    void loadPreview(uid).then((url) => {
-      if (live && url) setPreview(url);
+    const drop = askFacePreview(uid, (url) => {
+      if (live && url) setHeld({ uid, url });
     });
     return () => {
       live = false;
+      drop();
     };
-  }, [uid]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, seen]);
   const src = preview ?? thumb;
   let style: CSSProperties | undefined;
   if (box && aspect) {
@@ -126,6 +156,7 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
   }
   return (
     <img
+      ref={ref}
       src={src}
       alt=""
       draggable={false}

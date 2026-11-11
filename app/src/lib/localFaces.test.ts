@@ -23,6 +23,7 @@
 import { describe, expect, it } from "vitest";
 import {
   facesStatus,
+  focusFor,
   inTimelineOrder,
   isScanSpeed,
   scanBusy,
@@ -113,5 +114,21 @@ describe("the scan speed in Settings", () => {
     expect(isScanSpeed("balanced")).toBe(true);
     expect(isScanSpeed("turbo")).toBe(false);
     expect(isScanSpeed(undefined)).toBe(false);
+  });
+});
+
+describe("focusFor", () => {
+  it("centres a photo on the middle of the face", () => {
+    expect(focusFor([{ uid: "a", box: [0.2, 0.4, 0.4, 0.6] }])).toEqual({ a: "30.0% 50.0%" });
+  });
+
+  it("keeps the first face of a photo that has two", () => {
+    expect(
+      focusFor([
+        { uid: "a", box: [0, 0, 0.2, 0.2] },
+        { uid: "a", box: [0.8, 0.8, 1, 1] },
+        { uid: "b", box: [0.8, 0.8, 1, 1] },
+      ]),
+    ).toEqual({ a: "10.0% 10.0%", b: "90.0% 90.0%" });
   });
 });

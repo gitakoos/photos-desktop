@@ -52,6 +52,8 @@ const TIMEOUT_MS: Record<string, number> = {
   // Whole-library and whole-collection walks. The timeline is the longest call in the
   // app: on a cold run it decrypts a node per photo before the grid can paint at all.
   getTimeline: 15 * MINUTE,
+  startTimeline: 15 * MINUTE,
+  timelinePage: 15 * MINUTE,
   getMetadata: 5 * MINUTE,
   getDurations: 5 * MINUTE,
   getMediaTypes: 5 * MINUTE,
@@ -59,6 +61,7 @@ const TIMEOUT_MS: Record<string, number> = {
   getAlbumPhotos: 5 * MINUTE,
   getAlbumPhotoUids: 5 * MINUTE,
   listTrashed: 5 * MINUTE,
+  warmTrash: 5 * MINUTE,
   getShared: 5 * MINUTE,
   // A batch of decrypts admitted below everything else, so the wait for the channel
   // can dwarf the work itself.

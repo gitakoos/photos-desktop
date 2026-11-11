@@ -35,10 +35,12 @@ import { ShareDialog } from "./ShareDialog";
 import { AlbumPicker } from "./AlbumDialogs";
 import { ContextMenu, type MenuAction } from "./ContextMenu";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
+import { FaceNamer } from "./FaceNamer";
 import {
   CalendarIcon,
   CloudIcon,
   DownloadIcon,
+  FaceIcon,
   FolderOpenIcon,
   HeartIcon,
   LibraryAddIcon,
@@ -53,6 +55,7 @@ import { PhotoEditor } from "./PhotoEditor";
 import { DateEditPanel } from "./DateEditPanel";
 import { cloudEditorSource, isEditableImage, saveCloudEdit } from "../lib/cloudEditor";
 import { TAG, withFavorite } from "../lib/tags";
+import type { PhotoFace } from "../lib/localFaces";
 import { useT } from "../lib/i18n";
 import "../styles/Lightbox.css";
 
@@ -129,7 +132,27 @@ type Props = {
    * is being replaced by its corrected copy.
    */
   onDateEditStarted?: () => void;
+  /**
+   * Face recognition, when it is on: the faces on each photo are tagged over it. `version` goes
+   * up whenever the people change, so the tags are read again.
+   */
+  faces?: {
+    version: number;
+    names: string[];
+    act: (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+    onOpenPerson: (personId: string) => void;
+  };
 };
+
+/** Whether the face tags are drawn over the photo: the viewer's own switch, remembered. */
+const FACE_TAGS_KEY = "pfp.viewer.faceTags";
+function readFaceTagsOn(): boolean {
+  try {
+    return localStorage.getItem(FACE_TAGS_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
 
 /**
  * How long a photo has to be the one on screen before the calls that are not its
@@ -186,8 +209,45 @@ export function Lightbox({
   hiding,
   openWith,
   onDateEditStarted,
+  faces,
 }: Props) {
   const t = useT();
+  // The faces on this photo, tagged with the photo they belong to, read once it settles.
+  const [photoFaces, setPhotoFaces] = useState<{ uid: string; list: PhotoFace[] } | null>(null);
+  const [tagsOn, setTagsOn] = useState(readFaceTagsOn);
+  // The face being named, by its id.
+  const [naming, setNaming] = useState<string | null>(null);
+  const facesOn = !!faces;
+  const facesVersion = faces?.version;
+  useEffect(() => {
+    if (!facesOn) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      rpc<PhotoFace[]>("facesOnPhoto", { uid }).then(
+        (list) => live && setPhotoFaces({ uid, list }),
+        () => live && setPhotoFaces({ uid, list: [] }),
+      );
+    }, SETTLE_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [uid, facesOn, facesVersion]);
+  const faceList = facesOn && photoFaces?.uid === uid ? photoFaces.list : [];
+  const namingFace = faceList.find((f) => f.faceId === naming);
+  const openFace = (f: PhotoFace) => {
+    if (f.personId && f.name) faces?.onOpenPerson(f.personId);
+    else setNaming(f.faceId);
+  };
+  const toggleTags = () => {
+    const next = !tagsOn;
+    setTagsOn(next);
+    try {
+      localStorage.setItem(FACE_TAGS_KEY, next ? "1" : "0");
+    } catch {
+      /* the switch holds for this run only */
+    }
+  };
   const neighbours = useCloudMedia(items, index, onJump);
   // Both carry the photo they belong to. A uid change re-renders before the effect
   // below can clear them, so an untagged value would spend that render paired with the
@@ -240,6 +300,7 @@ export function Lightbox({
     setError("");
     setConfirming(false);
     setSharing(false);
+    setNaming(null);
     setDetails(null);
     setFavOverride(null);
     setVideoUrl(null);
@@ -649,8 +710,23 @@ export function Lightbox({
         else if (e.key.toLowerCase() === "s") setSharing(true);
       }}
       fileSize={details?.size ?? null}
+      faceTags={
+        tagsOn
+          ? faceList.map((f) => ({ key: f.faceId, box: f.box, name: f.name, onClick: () => openFace(f) }))
+          : undefined
+      }
       toolbar={
         <>
+          {!isVideo && faceList.length > 0 && (
+            <button
+              className={`lbx-ibtn ${tagsOn ? "sel" : ""}`}
+              onClick={toggleTags}
+              title={t(tagsOn ? "viewer.hideFaces" : "viewer.showFaces")}
+              aria-label={t(tagsOn ? "viewer.hideFaces" : "viewer.showFaces")}
+            >
+              <FaceIcon size={17} />
+            </button>
+          )}
           {/* Edit first and named, as in Windows Photos; the rest are icons named in their
               tooltips. Favourite colours in when held, as a state. */}
           {canEdit && (
@@ -809,6 +885,45 @@ export function Lightbox({
               .catch(() => {})
           }
         />
+      )}
+
+      {/* A face picked on the photo to be named. The keys stay in here, so typing a name or
+          leaving with Escape does nothing to the viewer behind it. */}
+      {namingFace && faces && (
+        <div
+          className="cf-backdrop"
+          onClick={(e) => {
+            e.stopPropagation();
+            setNaming(null);
+          }}
+        >
+          <div
+            className="cf-panel"
+            role="dialog"
+            aria-label={t("faces.name")}
+            tabIndex={-1}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") setNaming(null);
+            }}
+          >
+            <h3 className="cf-title">{t("faces.name")}</h3>
+            <FaceNamer
+              names={faces.names}
+              initial={namingFace.name ?? ""}
+              onName={async (name) => {
+                await faces.act("faceNameFaces", { faceIds: [namingFace.faceId], name });
+                setNaming(null);
+              }}
+              onReject={async () => {
+                await faces.act("faceRejectFaces", { faceIds: [namingFace.faceId] });
+                setNaming(null);
+              }}
+              onCancel={() => setNaming(null)}
+            />
+          </div>
+        </div>
       )}
 
       {confirming && (

@@ -25,6 +25,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { setLightboxOpen } from "../lib/lightboxSignal";
 import { formatBytes } from "../lib/format";
 import { MIN_SCALE, PhotoViewer, ZOOM_STEP, type ZoomApi, type ZoomState } from "./PhotoViewer";
+import type { FaceTag } from "../lib/faceTags";
 import { ViewerContents, ViewerFilmstrip } from "./ViewerFilmstrip";
 import { VideoControls } from "./VideoControls";
 import { WindowButtons } from "./Titlebar";
@@ -156,6 +157,8 @@ type Props = {
   aside?: ReactNode;
   /** Dialogs and notices that belong over the whole viewer. */
   children?: ReactNode;
+  /** The faces on the photo, tagged over it. */
+  faceTags?: FaceTag[];
 };
 
 /**
@@ -197,6 +200,7 @@ export function ViewerShell({
   initialSide,
   aside,
   children,
+  faceTags,
 }: Props) {
   const t = useT();
   const text = useViewerText(stage.kind === "image" ? (textSource ?? null) : null, itemKey);
@@ -531,6 +535,7 @@ export function ViewerShell({
             onZoom={onZoom}
             textRead={text.state.kind === "ready" || text.state.kind === "quiet" ? text.state.read : null}
             textQuiet={text.state.kind === "quiet"}
+            faceTags={faceTags}
           />
         )}
         <TextPill state={text.state} onLeave={text.leave} />

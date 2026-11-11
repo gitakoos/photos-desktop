@@ -23,6 +23,7 @@
 // Raw Proton API client for the sidecar: auth + core endpoints, plus the
 // session-aware HTTP client the Drive SDK consumes.
 
+import { updateServerTimeWithUpdateTimestamp } from "@protontech/crypto/serverTime";
 import { Agent } from "undici";
 import { isTransient } from "./transient.ts";
 import { diag } from "./diag.ts";
@@ -46,6 +47,17 @@ export function userAgentFor(platform: NodeJS.Platform): string {
 export const USER_AGENT = userAgentFor(process.platform);
 
 const API_ORIGIN = new URL(BASE_URL).origin;
+
+/**
+ * The server's own time from a response: `x-pm-date` is the authoritative one, the standard
+ * `Date` header the documented fallback. Null when neither is there or readable.
+ */
+export function serverDateOf(headers: Headers): Date | null {
+  const raw = headers.get("x-pm-date") ?? headers.get("date");
+  if (!raw) return null;
+  const when = new Date(raw);
+  return Number.isNaN(when.getTime()) ? null : when;
+}
 
 /**
  * Whether a request goes to the Proton API itself, the only place the session's tokens
@@ -272,6 +284,30 @@ export function makeSdkHttpClient(
     return headers;
   }
 
+  /**
+   * Feeds the crypto clock with the server's own time, the same hook the SDK's official CLI
+   * installs. Node keys and manifest signatures are dated by `serverTime()`, which falls back to
+   * the device clock as long as it is never fed, and the API rejects keys and signatures dated by
+   * a clock it considers wrong (e.g. ahead of its own), surfacing as "Invalid manifest signature."
+   * at commit.
+   */
+  let loggedServerClock = false;
+  function noteServerTime(url: string, res: Response, requestStartedAt: Date): void {
+    if (!isApiUrl(url)) return;
+    const when = serverDateOf(res.headers);
+    if (!when) return;
+    updateServerTimeWithUpdateTimestamp(when, requestStartedAt);
+    if (!loggedServerClock) {
+      loggedServerClock = true;
+      const midpoint = requestStartedAt.getTime() + (Date.now() - requestStartedAt.getTime()) / 2;
+      // Only the header's name and a number: nothing about the account or its files.
+      diag.log("session", "crypto_clock", {
+        source: res.headers.has("x-pm-date") ? "x-pm-date" : "date",
+        estimatedOffsetMs: Math.round(midpoint - when.getTime()),
+      });
+    }
+  }
+
   let refreshing: Promise<void> | null = null;
   function refresh(): Promise<void> {
     if (!refreshing) {
@@ -300,7 +336,13 @@ export function makeSdkHttpClient(
   }
 
   async function withAuthRetry(url: string, run: () => Promise<Response>): Promise<Response> {
-    const res = await run();
+    const runAndUpdateServerTime = async () => {
+      const requestStartedAt = new Date();
+      const response = await run();
+      noteServerTime(url, response, requestStartedAt);
+      return response;
+    };
+    const res = await runAndUpdateServerTime();
     if (res.status === 401 && isApiUrl(url)) {
       try {
         await refresh();
@@ -310,7 +352,7 @@ export function makeSdkHttpClient(
         if (!isTransient(e)) onLost?.();
         return res; // refresh failed: surface the original 401
       }
-      return run(); // retry once with the fresh access token
+      return runAndUpdateServerTime(); // retry once with the fresh access token
     }
     return res;
   }

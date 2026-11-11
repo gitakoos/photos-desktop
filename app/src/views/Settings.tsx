@@ -76,6 +76,7 @@ import {
   TextIcon,
   TrashIcon,
   TuneIcon,
+  ZoomInIcon,
 } from "../components/icons";
 import type { DriveCollections } from "../components/Library";
 import { barColor, formatBytes, type Account } from "../components/ProfileMenu";
@@ -83,6 +84,16 @@ import type { CompressionTier, VideoCodecChoice } from "../lib/compression";
 import type { Activity } from "../components/Sidebar";
 import type { LocalLabel } from "../hooks/useLocalLabels";
 import { matchingLabels, sameLabel } from "../lib/labels";
+import {
+  BACKUP_KINDS,
+  backupBlocked,
+  backupPartLine,
+  backupSendingLine,
+  backupSynced,
+  type BackupKind,
+  type BackupPartLine,
+  type BackupStatus,
+} from "../lib/backupStatus";
 import { MyFilesPicker, type ChosenFile } from "../components/MyFilesPicker";
 import { unpinAllOffline, watchOffline, type OfflineStatus } from "../lib/offline";
 import { applyTheme, PICKABLE_PALETTES, resolvedMode, type PaletteKey, type ThemeMode } from "../lib/theme";
@@ -2087,6 +2098,82 @@ function PauseRow({ paused, act }: { paused: boolean; act?: FacesAct }) {
   );
 }
 
+type SweepStatus = { personId: string | null; running: boolean; done: number; total: number; found: number };
+
+/** The full scan: started and stopped here, and followed while it runs. Per person, it is the person's page's. */
+function FullScanRow({ act }: { act?: FacesAct }) {
+  const t = useT();
+  const { lang } = useLang();
+  const [sweep, setSweep] = useState<SweepStatus | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const running = !!sweep?.running && sweep.personId === null;
+
+  useEffect(() => {
+    let live = true;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = await rpc<SweepStatus>("faceSweepStatus");
+        if (!live) return;
+        setSweep(next);
+        if (next.running && next.personId === null) timer = window.setTimeout(poll, 2000);
+      } catch {
+        /* shown as not running */
+      }
+    };
+    void poll();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [running]);
+
+  return (
+    <div className="st-row">
+      <span className="st-row-ico" aria-hidden>
+        <ZoomInIcon size={18} />
+      </span>
+      <div className="st-text">
+        <div className="st-label">{t("settings.faceFullScan")}</div>
+        <div className="st-desc">{t("settings.faceFullScanDesc")}</div>
+        {unavailable && <div className="st-desc bad">{t("settings.faceFullScanUnavailable")}</div>}
+        {running && sweep && (
+          <>
+            <div className="st-desc st-status">
+              {t("settings.faceFullScanProgress", {
+                done: sweep.done.toLocaleString(lang),
+                total: sweep.total.toLocaleString(lang),
+                found: sweep.found.toLocaleString(lang),
+              })}
+            </div>
+            <div className="st-progress">
+              <div style={{ width: `${Math.round((sweep.done / Math.max(1, sweep.total)) * 100)}%` }} />
+            </div>
+          </>
+        )}
+      </div>
+      {running ? (
+        <button
+          className="st-row-btn"
+          onClick={() => void act?.("faceLibrarySweepStop").then((s) => setSweep(s as SweepStatus), () => {})}
+        >
+          {t("settings.faceFullScanStop")}
+        </button>
+      ) : (
+        <button
+          className="st-row-btn"
+          onClick={() => {
+            setUnavailable(false);
+            void act?.("faceLibrarySweepStart").then((s) => setSweep(s as SweepStatus), () => setUnavailable(true));
+          }}
+        >
+          {t("settings.faceFullScanStart")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * How fast the scan reads the library, the same speed for the faces and the search. Shows the speed
  * this PC starts at until one is picked, and says so while the battery or a metered connection
@@ -2336,6 +2423,7 @@ function FacesPane({
             />
           </label>
         )}
+        {settings.localFaces && <FullScanRow act={faces?.act} />}
         <div className="st-row off">
           <span className="st-row-ico" aria-hidden>
             <TrashIcon size={18} />
@@ -2762,8 +2850,12 @@ function BackupPane({
       : backup.failed
         ? t("settings.sharedBackupFailed")
         : backup.lastAt
-          ? t("settings.sharedBackupSynced", { date: date.format(new Date(backup.lastAt)) })
+          ? backupSynced(backup.parts)
+            ? t("settings.sharedBackupSynced", { date: date.format(new Date(backup.lastAt)) })
+            : t("backup.nothingSaved")
           : null;
+  const partText = (kind: BackupKind, { key, values }: BackupPartLine) => t(key, { ...values, part: t(`backup.part.${kind}`) });
+  const sending = backup?.progress ?? null;
   const deviceName = (b: DriveBackup) => (b.own ? t("settings.driveCopiesThis") : (b.name ?? t("settings.driveCopiesOther")));
   const copiesLine =
     copies.state === "loading" && copies.list.length === 0
@@ -2847,6 +2939,35 @@ function BackupPane({
           <div className="st-text">
             <div className="st-label">{t("settings.sharedBackupNow")}</div>
             <div className="st-desc">{t("settings.sharedBackupNowDesc")}</div>
+            {BACKUP_KINDS.map((kind) => {
+              const part = backup?.parts[kind];
+              if (!part) return null;
+              return (
+                <div key={kind} className={`st-desc${part.result === "failed" || part.result === "blocked" ? " bad" : " st-status"}`}>
+                  {partText(kind, backupPartLine(kind, part, (at) => date.format(new Date(at))))}
+                </div>
+              );
+            })}
+            {/* One button under all the lines: it overrides every copy held back, so all their numbers show first. */}
+            {backup && backupBlocked(backup.parts) && (
+              <div className="st-keep-line">
+                <button
+                  className="st-row-btn"
+                  disabled={backup.running || loading}
+                  onClick={() => void rpc("sharedBackupNow", { force: true }).catch(() => {})}
+                >
+                  {t("backup.saveAnyway")}
+                </button>
+              </div>
+            )}
+            {sending && (
+              <>
+                <div className="st-desc st-status">{partText(sending.kind, backupSendingLine(sending))}</div>
+                <div className="st-progress">
+                  <div style={{ width: `${sending.total > 0 ? Math.round((sending.sent / sending.total) * 100) : 0}%` }} />
+                </div>
+              </>
+            )}
           </div>
           <button
             className="st-row-btn"
@@ -3124,8 +3245,6 @@ function useDriveBackups(roundAt: number | null) {
   );
   return { list, state, trash };
 }
-
-type BackupStatus = { on: boolean; running: boolean; lastAt: number | null; failed: boolean };
 
 /** The shared backup's status, read every few seconds while the pane is open. */
 function useBackupStatus(): BackupStatus | null {
