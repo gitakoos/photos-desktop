@@ -981,6 +981,17 @@ export function Photos({
     if (!searchActive || indexedUpTo.current >= items.length) return;
     let cancelled = false;
     setIndexing(true);
+    // Each update copies the whole map and refilters the library, so batches are
+    // committed at most every FLUSH_MS (the first at once).
+    const FLUSH_MS = 250;
+    let pending: Record<string, NodeMeta> = {};
+    let flushedAt = 0;
+    const flush = () => {
+      const batch = pending;
+      pending = {};
+      flushedAt = performance.now();
+      if (Object.keys(batch).length > 0) setMeta((prev) => ({ ...prev, ...batch }));
+    };
 
     (async () => {
       const BATCH = 150; // the SDK batches node lookups server side
@@ -992,21 +1003,23 @@ export function Photos({
             { uids },
           );
           if (cancelled) return;
-          setMeta((prev) => {
-            const next = { ...prev };
-            for (const r of res) next[r.uid] = { name: r.name, mediaType: r.mediaType };
-            return next;
-          });
+          for (const r of res) pending[r.uid] = { name: r.name, mediaType: r.mediaType };
+          if (performance.now() - flushedAt >= FLUSH_MS) flush();
         } catch {
           /* one bad batch must not stop the rest */
         }
         indexedUpTo.current = Math.min(i + BATCH, items.length);
       }
-      if (!cancelled) setIndexing(false);
+      if (!cancelled) {
+        flush();
+        setIndexing(false);
+      }
     })();
 
     return () => {
       cancelled = true;
+      // What was fetched counts as indexed, so it must not be dropped.
+      flush();
       // Here rather than past the guard above: an interrupted run never reaches that
       // line, which is what left "Indexing…" on screen for the rest of the session.
       setIndexing(false);
