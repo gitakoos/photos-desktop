@@ -121,3 +121,47 @@ describe("renaming a photo", () => {
     expect(metaGet("uid-1")).toEqual({ name: "new.jpg", mediaType: "image/jpeg", size: 10 });
   });
 });
+
+describe("the drive's first listing takes the window's timeline", () => {
+  function countingTimeline(total: number) {
+    const reads = { count: 0 };
+    return {
+      reads,
+      getMyPhotosRootFolder: async () => ({ uid: "root" }),
+      async *iterateTimeline() {
+        reads.count++;
+        for (let i = 0; i < total; i++) {
+          await pause(1);
+          yield { nodeUid: `uid-${i}`, captureTime: new Date(1_700_000_000_000 - i * 1000), tags: [] };
+        }
+      },
+      async *iterateNodes(uids: string[]) {
+        for (const uid of uids) yield { uid, name: { ok: true, value: `${uid}.jpg` }, mediaType: "image/jpeg" };
+      },
+    };
+  }
+
+  it("waits while the window's read is under way, then lists from it without reading again", async () => {
+    const photos = countingTimeline(30);
+    const session = signedIn(photos);
+    session.startTimeline();
+    expect(session.mountTimelineReady().ready).toBe(false);
+    await vi.waitFor(() => expect(session.mountTimelineReady().ready).toBe(true));
+    const page = await session.listForMount(0, 100, true);
+    expect(page.total).toBe(30);
+    expect(photos.reads.count).toBe(1);
+  });
+
+  it("reads afresh for a later listing, which is there to catch what changed", async () => {
+    const photos = countingTimeline(5);
+    const session = signedIn(photos);
+    session.startTimeline();
+    await vi.waitFor(() => expect(session.mountTimelineReady().ready).toBe(true));
+    await session.listForMount(0, 100, false);
+    expect(photos.reads.count).toBe(2);
+  });
+
+  it("is ready at once when the window has started no read", () => {
+    expect(signedIn(countingTimeline(1)).mountTimelineReady().ready).toBe(true);
+  });
+});

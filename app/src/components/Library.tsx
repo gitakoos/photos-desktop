@@ -20,12 +20,13 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { CheckIcon, ChevronRightIcon } from "./icons";
 import { FaceNamer } from "./FaceNamer";
 import type { LooseFace } from "../lib/localFaces";
-import { cachedPreview, loadPreview } from "../lib/previewStore";
+import { useThumbServerBase } from "../lib/thumbStore";
+import { faceCoverUrl } from "../lib/faceCoverUrl";
 import { useT } from "../lib/i18n";
 import "../styles/Library.css";
 
@@ -89,50 +90,171 @@ export function LibraryTiles({ tiles }: { tiles: Tile[] }) {
 
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 const FACE_ZOOM_OUT = 1.4;
+/** The least, near an edge: as the thumbnail server's FACE_ZOOM_OUT_MIN. */
+const FACE_ZOOM_OUT_MIN = 1.2;
 
 /**
- * The cover cut to the face: the picture is scaled and moved so a square FACE_ZOOM_OUT times
- * the face fills its square frame, kept inside the picture. Until the picture's own shape is
- * known it is shown whole.
+ * Calls `onNear` once `el` comes within a screen of the view, through one observer for each
+ * scrolling area (shared by every face in it); returns the way to stop watching. Watched
+ * against the area that scrolls, not the window: a margin around the window does not reach
+ * past a scrolling area's edge, which clips what is in it.
  */
-export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
-  const [aspect, setAspect] = useState<number | null>(null);
-  // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it:
-  // the larger preview takes its place once it is in.
-  const [preview, setPreview] = useState<string | null>(() => cachedPreview(uid) ?? null);
-  useEffect(() => {
-    let live = true;
-    void loadPreview(uid).then((url) => {
-      if (live && url) setPreview(url);
-    });
-    return () => {
-      live = false;
+const nearWatch = new Map<Element, () => void>();
+const nearObservers = new Map<Element | null, { observer: IntersectionObserver; watched: number }>();
+function scrollingAreaOf(el: Element): Element | null {
+  for (let at = el.parentElement; at; at = at.parentElement) {
+    const { overflowY } = getComputedStyle(at);
+    if (overflowY === "auto" || overflowY === "scroll") return at;
+  }
+  return null;
+}
+function whenNear(el: Element, onNear: () => void): () => void {
+  if (typeof IntersectionObserver === "undefined") {
+    onNear();
+    return () => {};
+  }
+  const root = scrollingAreaOf(el);
+  let area = nearObservers.get(root);
+  if (!area) {
+    const made: { observer: IntersectionObserver; watched: number } = {
+      observer: new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const call = nearWatch.get(entry.target);
+            if (call) stop(entry.target);
+            call?.();
+          }
+        },
+        { root, rootMargin: "100% 0px" },
+      ),
+      watched: 0,
     };
-  }, [uid]);
-  const src = preview ?? thumb;
+    nearObservers.set(root, made);
+    area = made;
+  }
+  const watching = area;
+  // Stops watching `target`; an area with nothing left to watch lets its observer go.
+  function stop(target: Element) {
+    if (!nearWatch.delete(target)) return;
+    watching.observer.unobserve(target);
+    if (--watching.watched === 0 && nearObservers.get(root) === watching) {
+      watching.observer.disconnect();
+      nearObservers.delete(root);
+    }
+  }
+  nearWatch.set(el, onNear);
+  watching.watched++;
+  watching.observer.observe(el);
+  return () => stop(el);
+}
+
+/** How long a face's cut may take before the grid thumbnail stands in for it. */
+const STAND_IN_AFTER_MS = 350;
+
+/** A person's cover cut to their face: a square FACE_ZOOM_OUT times the face. */
+export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
+  // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it.
+  // The thumbnail server cuts the face out of the HD preview and serves it card-sized, so
+  // the window decodes a small square rather than a 1920 px preview per person, and a
+  // cover off screen is never asked for (the image loads lazily).
+  const base = useThumbServerBase();
+  // The circle's size on screen, so a small one is cut small (from the grid thumbnail), and
+  // whether it is near the screen at all: a circle far off asks for nothing, so a page of
+  // hundreds of faces costs what is in view.
+  const [px, setPx] = useState<number | null>(null);
+  const [near, setNear] = useState(false);
+  const probe = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    const el = probe.current;
+    const frame = el?.parentElement;
+    if (!el || !frame) return;
+    const side = Math.max(frame.clientWidth, frame.clientHeight);
+    // Not laid out (hidden as it mounted): the largest cut, as before sizes were asked.
+    setPx(side > 0 ? Math.ceil(side * (window.devicePixelRatio || 1)) : 1e6);
+    return whenNear(el, () => setNear(true));
+  }, []);
+  const cut = base && box && px ? faceCoverUrl(base, uid, box, px) : null;
+  const [cutFailed, setCutFailed] = useState<string | null>(null);
+  const [cutShown, setCutShown] = useState<string | null>(null);
+  const usable = near && cut && cutFailed !== cut ? cut : null;
+  const ready = !!usable && cutShown === usable;
+  // The stand-in (the grid thumbnail cut to the face in the window) only for a cut that is
+  // slow to come, or that cannot be had: one kept from before arrives at once.
+  const [late, setLate] = useState<string | null>(null);
+  useEffect(() => {
+    if (!usable || ready) return;
+    const timer = setTimeout(() => setLate(usable), STAND_IN_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [usable, ready]);
+  const noCut = !box || (!!base && !!cut && cutFailed === cut) || base === null;
+  const standIn = near && (noCut || (!ready && late === usable));
+  // The same three places every time, so nothing under the cut is remounted as it arrives.
+  return (
+    <>
+      {standIn && <ThumbFaceCover key="thumb" thumb={thumb} box={box} />}
+      {usable && (
+        <img
+          key="cut"
+          src={usable}
+          alt=""
+          draggable={false}
+          style={ready ? undefined : { opacity: 0 }}
+          onLoad={() => setCutShown(usable)}
+          onError={() => setCutFailed(usable)}
+        />
+      )}
+      <span key="probe" ref={probe} aria-hidden style={{ position: "absolute", inset: 0, pointerEvents: "none" }} />
+    </>
+  );
+}
+
+/**
+ * The grid thumbnail cut to the face in the window: the picture is scaled and moved so the
+ * square the thumbnail server would cut (faceSquare) fills its square frame. For when the
+ * thumbnail server cannot cut it, and until its cut is in. Until the picture's own shape is
+ * known it is hidden, as the whole picture would show some other part of it.
+ */
+function ThumbFaceCover({ thumb, box }: { thumb: string; box: FaceBox | null }) {
+  // The shape of the picture it was measured on: a reused card given another picture waits
+  // for that one's.
+  const [measured, setMeasured] = useState<{ thumb: string; aspect: number } | null>(null);
+  const aspect = measured?.thumb === thumb ? measured.aspect : null;
+  const src = thumb;
   let style: CSSProperties | undefined;
   if (box && aspect) {
     const [l, top, r, b] = box;
-    // The square's side, as a share of the picture's width.
-    const side = Math.min(Math.max(r - l, (b - top) / aspect) * FACE_ZOOM_OUT, Math.min(1, 1 / aspect));
-    const width = 100 / side;
-    const height = width / aspect;
     const cx = (l + r) / 2;
     const cy = (top + b) / 2;
+    // The square's side, as a share of the picture's width: as the thumbnail server cuts it
+    // (faceSquare), zoomed in near an edge to keep the face centred, down to the face itself.
+    const face = Math.max(r - l, (b - top) / aspect);
+    const room = 2 * Math.min(cx, 1 - cx, cy / aspect, (1 - cy) / aspect);
+    const side = Math.min(Math.max(face * FACE_ZOOM_OUT_MIN, Math.min(face * FACE_ZOOM_OUT, room)), Math.min(1, 1 / aspect));
+    const width = 100 / Math.max(side, 1e-3);
+    const height = width / aspect;
     // Kept inside the picture, so no edge of the circle shows past it.
     const left = Math.min(0, Math.max(100 - width, 50 - cx * width));
     const topPct = Math.min(0, Math.max(100 - height, 50 - cy * height));
     style = { position: "absolute", width: `${width}%`, height: `${height}%`, left: `${left}%`, top: `${topPct}%`, objectFit: "fill" };
+  } else if (box) {
+    // Its shape not known yet, the whole picture would show some other part of it: kept
+    // hidden that moment, so the circle shows nothing rather than the wrong spot.
+    style = { opacity: 0 };
   }
   return (
+    // Lazy, as the cut over it is: a page of people mounts every card, and an eager picture
+    // here fetched and decoded every person's grid thumbnail, on screen or not (8000 in one
+    // visit to People in the profile).
     <img
       src={src}
       alt=""
       draggable={false}
+      loading="lazy"
       style={style}
       onLoad={(e) => {
         const img = e.currentTarget;
-        if (img.naturalWidth && img.naturalHeight) setAspect(img.naturalWidth / img.naturalHeight);
+        if (img.naturalWidth && img.naturalHeight) setMeasured({ thumb, aspect: img.naturalWidth / img.naturalHeight });
       }}
     />
   );
@@ -190,7 +312,7 @@ function EntryCard({
             <FaceCover uid={entry.cover} thumb={cover} box={entry.box} />
           </span>
         ) : (
-          <img className="lib-cardimg" src={cover} alt="" draggable={false} />
+          <img className="lib-cardimg" src={cover} alt="" draggable={false} loading="lazy" />
         )
       ) : null}
       <span className="lib-cardtext">
@@ -489,6 +611,9 @@ export function LocalPeoplePage({
  * The faces in no group worth naming, each on its own: picked a few at a time and named, put
  * with someone already named, or left out as not a person.
  */
+/** Faces in no group shown at once, and added each time more are asked for. */
+const LOOSE_PAGE = 120;
+
 function LooseFaces({
   loose,
   names,
@@ -502,15 +627,20 @@ function LooseFaces({
 }) {
   const t = useT();
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const thumbs = useThumbnails(useMemo(() => loose.faces.map((f) => f.uid), [loose]));
-  // Only faces still listed stay picked.
+  // A page at a time: the whole list drawn at once (600 faces) made scrolling People cost
+  // the window most of a core, for faces seldom looked at down there.
+  const [shown, setShown] = useState(LOOSE_PAGE);
+  const faces = useMemo(() => loose.faces.slice(0, shown), [loose, shown]);
+  const thumbs = useThumbnails(useMemo(() => faces.map((f) => f.uid), [faces]));
+  // Only faces still shown stay picked: one pushed below the page by new faces is not named
+  // unseen with the rest.
   useEffect(() => {
     setPicked((p) => {
-      const ids = new Set(loose.faces.map((f) => f.faceId));
+      const ids = new Set(faces.map((f) => f.faceId));
       const kept = [...p].filter((id) => ids.has(id));
       return kept.length === p.size ? p : new Set(kept);
     });
-  }, [loose]);
+  }, [faces]);
   const toggle = (id: string) =>
     setPicked((p) => {
       const next = new Set(p);
@@ -522,8 +652,8 @@ function LooseFaces({
     <section className="lib-section">
       <h2 className="lib-subhead">{t("faces.looseTitle")}</h2>
       <p className="lib-note scan">
-        {loose.total > loose.faces.length
-          ? t("faces.looseMore", { shown: loose.faces.length, total: loose.total })
+        {loose.total > faces.length
+          ? t("faces.looseMore", { shown: faces.length, total: loose.total })
           : t("faces.looseHint")}
       </p>
       {picked.size > 0 && (
@@ -544,7 +674,7 @@ function LooseFaces({
         </div>
       )}
       <div className="lib-loosegrid">
-        {loose.faces.map((f) => (
+        {faces.map((f) => (
           <button
             key={f.faceId}
             className={`lib-findcell${picked.has(f.faceId) ? " selected" : ""}`}
@@ -562,6 +692,11 @@ function LooseFaces({
           </button>
         ))}
       </div>
+      {loose.faces.length > shown && (
+        <button className="lib-seemore" onClick={() => setShown((n) => n + LOOSE_PAGE)}>
+          {t("faces.looseShowMore", { count: Math.min(LOOSE_PAGE, loose.faces.length - shown) })}
+        </button>
+      )}
     </section>
   );
 }

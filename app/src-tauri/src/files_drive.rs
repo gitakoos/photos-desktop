@@ -85,6 +85,9 @@ const UPLOADABLE: &[&str] = &[
 /// A listing older than this is rebuilt in the background when the file manager next
 /// looks, which is what picks up changes made on other devices.
 const STALE_AFTER: Duration = Duration::from_secs(5 * 60);
+/// How long the session's first listing waits for the window's timeline read before it
+/// reads the timeline for itself.
+const TIMELINE_WAIT: Duration = Duration::from_secs(120);
 /// How many downloaded files are kept for a following request, and for how long. A video
 /// player reads one file as a long run of ranged requests, and each would otherwise
 /// download it again.
@@ -886,6 +889,27 @@ fn build(d: &Drive) {
     // The first listing is what the file manager waits on, so the window says it is under
     // way; a later rebuild is a quiet check and names nothing.
     let _doing = first.then(|| crate::cloud_mount::Doing::new(&d.app, "fill", None, None));
+    // The listing from the top takes the timeline the window reads at unlock, once that
+    // read is done, instead of reading it from Proton a second time beside it, which held
+    // the background lane for half a minute on a large library. Waited for here, between
+    // quick asks, so nothing holds the lane meanwhile; given up after two minutes, when
+    // the listing reads for itself as before.
+    // Only the first listing of a session: a later one is there to catch what changed since,
+    // which the window's read from unlock would not show.
+    let waited_from = Instant::now();
+    while first && waited_from.elapsed() < TIMELINE_WAIT {
+        let ready = crate::sidecar_rpc(&d.app, "mountTimelineReady", serde_json::json!({}))
+            .ok()
+            .and_then(|v| v.get("ready").and_then(|r| r.as_bool()))
+            .unwrap_or(true);
+        if ready || d.session.load(Ordering::SeqCst) != session {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    if d.session.load(Ordering::SeqCst) != session {
+        return;
+    }
     let mut fresh = Index::default();
     let mut offset = 0u64;
     // Sized the way the Explorer folder's fill is: a cold page resolves every photo in it
@@ -896,7 +920,7 @@ fn build(d: &Drive) {
         let page = match crate::sidecar_rpc(
             &d.app,
             "listForMount",
-            serde_json::json!({ "offset": offset, "limit": size }),
+            serde_json::json!({ "offset": offset, "limit": size, "fromTimeline": first }),
         ) {
             Ok(p) => p,
             Err(e) => {

@@ -44,6 +44,7 @@ import {
 } from "./icons";
 import { isWindows } from "../lib/platform";
 import "../styles/WhatsNew.css";
+import { backdropClose } from "../lib/backdrop";
 
 /** Which "what's new" a reader has seen; a new one gets a new id. */
 export const WHATS_NEW_ID = "2026-11-faces";
@@ -96,7 +97,7 @@ export function WhatsNew({ onClose }: { onClose: () => void }) {
   ];
 
   return (
-    <div className="wn-backdrop" onClick={onClose}>
+    <div className="wn-backdrop" {...backdropClose(onClose, false)}>
       <div className="wn-card" role="dialog" aria-label={t("whatsNew.title")} onClick={(e) => e.stopPropagation()}>
         <h2 className="wn-title">{t("whatsNew.title")}</h2>
         {sections.map((section) => (

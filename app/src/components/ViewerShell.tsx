@@ -22,6 +22,7 @@
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import { setLightboxOpen } from "../lib/lightboxSignal";
 import { formatBytes } from "../lib/format";
 import { MIN_SCALE, PhotoViewer, ZOOM_STEP, type ZoomApi, type ZoomState } from "./PhotoViewer";
@@ -50,7 +51,7 @@ import "../styles/Lightbox.css";
 export type ViewerStage =
   | { kind: "image"; src?: string; loading?: boolean }
   /** `url` null means the video cannot play yet, and `note` says why. */
-  | { kind: "video"; url: string | null; poster?: string; note?: string | null }
+  | { kind: "video"; url: string | null; poster?: string; note?: string | null; startAt?: number }
   /** Nothing to draw, only something to say: the file would not open at all. */
   | { kind: "message"; text: string; detail?: string };
 
@@ -141,7 +142,10 @@ type Props = {
   onRename?: (name: string) => void | Promise<void>;
   /** Keys this shell did not claim, for the caller's own shortcuts. */
   onKey?: (e: KeyboardEvent) => void;
-  onVideoError?: () => void;
+  /** The video would not play; `at` is where it had got to (seconds). */
+  onVideoError?: (at: number) => void;
+  /** The video is playing. */
+  onVideoPlaying?: () => void;
   /** Right-click on the stage, so the caller can raise a context menu. Called with the
    *  native menu already prevented and the shell's own dead menu suppressed. */
   onContextMenu?: (e: MouseEvent) => void;
@@ -170,6 +174,37 @@ type Props = {
  */
 type SidePanel = "details" | "contents";
 
+/**
+ * One line in the app's log when the player gives up on a video: the player's error code,
+ * where it was, and how much it had loaded around there. Its message is cut to plain words,
+ * so no address or name in it reaches the log.
+ */
+function noteVideoError(video: HTMLVideoElement): void {
+  const err = video.error;
+  const at = video.currentTime || 0;
+  let ahead = 0;
+  for (let i = 0; i < video.buffered.length; i++) {
+    if (video.buffered.start(i) <= at && at <= video.buffered.end(i)) ahead = video.buffered.end(i) - at;
+  }
+  // Only whole plain words: an address, path or file name is one token with other characters
+  // in it, and goes whole.
+  const words = (err?.message ?? "")
+    .split(/\s+/)
+    .filter((w) => /^[A-Za-z]{1,20}[.,:;]?$/.test(w))
+    .join(" ")
+    .replace(/[^A-Za-z ]/g, "")
+    .slice(0, 80);
+  const waitedSince = Number(video.dataset.waiting || 0);
+  const end = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
+  const line =
+    `[video] error code=${err?.code ?? 0} at=${at.toFixed(1)} duration=${(video.duration || 0).toFixed(1)}` +
+    ` seeking=${+video.seeking} ahead=${ahead.toFixed(1)} end=${end.toFixed(1)}` +
+    ` waited=${waitedSince ? ((performance.now() - waitedSince) / 1000).toFixed(1) : "-"}` +
+    ` ready=${video.readyState} network=${video.networkState}` +
+    ` again=${/[?&]again=(\d+)/.exec(video.currentSrc)?.[1] ?? 0} msg=${words || "-"}`;
+  void invoke("log_note", { message: line }).catch(() => {});
+}
+
 export function ViewerShell({
   itemKey,
   name,
@@ -192,6 +227,7 @@ export function ViewerShell({
   onRename,
   onKey,
   onVideoError,
+  onVideoPlaying,
   onContextMenu,
   textSource,
   initialSide,
@@ -264,8 +300,15 @@ export function ViewerShell({
   // A click that dismisses the overflow menu lands on the backdrop the instant after, so
   // this brief window swallows it: the menu closing must never also close the viewer.
   const closeGuard = useRef(0);
-  const guardedClose = () => {
+  // A click on the backdrop closes the viewer only if the press began there too. Selecting
+  // text by dragging, say a person's name in the details panel, presses in the field and
+  // lets go outside it, and the browser reports that as a click on the element holding
+  // both, which is the backdrop: the viewer closed under the reader's hand.
+  const pressedOn = useRef<EventTarget | null>(null);
+  const guardedClose = (e: MouseEvent) => {
     if (Date.now() < closeGuard.current) return;
+    if (pressedOn.current !== e.target) return;
+    if ((window.getSelection()?.toString() ?? "") !== "") return;
     onClose();
   };
 
@@ -359,6 +402,7 @@ export function ViewerShell({
       className={`lbx${ownsWindow ? " owns-window" : ""}${strip ? " with-strip" : ""}${fullscreen ? " fullscreen" : ""}${
         aside || (showDetails && details) || (showContents && list) ? " with-aside" : ""
       }`}
+      onMouseDownCapture={(e) => (pressedOn.current = e.target)}
       onClick={guardedClose}
     >
       {/* The attribute has to sit on whatever the pointer actually lands on, which
@@ -491,23 +535,53 @@ export function ViewerShell({
             /* No `controls`: the bar below is the player, and it draws what the Android
                viewer draws rather than what this browser happens to. The two blocks that
                remain were always about the offers around that bar rather than the bar
-               itself. A photo from Drive plays from a blob, but a file opened from
-               Explorer plays from a real URL, and picture-in-picture and the video's own
+               itself. A video from Drive plays from the loopback server (or a blob), and
+               a file opened from Explorer plays from a real URL, and picture-in-picture and the video's own
                menu each led out of the app with a copy of a file already on the disk.
 
                The element is handed up as state rather than held in a ref, so the
                controls are given the real thing on the render after it mounts. */
             <>
+              {/* Started by hand once its metadata is in, on a fresh element for each video,
+                  and only the metadata loaded ahead: together, and only together, these keep
+                  WebKitGTK's player from saving the whole stream to a file under /var/tmp,
+                  which `autoplay`, any other preload, an early play(), or a reused element
+                  each bring back. The video is decrypted, so it must not reach the disk. */}
               <video
+                key={stage.url}
                 className="lbx-video"
                 ref={setVideoEl}
                 src={stage.url}
                 poster={stage.poster}
+                preload="metadata"
                 disablePictureInPicture
                 onContextMenu={(e) => e.preventDefault()}
-                autoPlay
+                onLoadedMetadata={(e) => {
+                  // Opened again after its stream failed: on from where it had got to.
+                  if (stage.startAt) e.currentTarget.currentTime = stage.startAt;
+                  void e.currentTarget.play().catch(() => {});
+                }}
                 onClick={(e) => e.stopPropagation()}
-                onError={onVideoError}
+                onError={(e) => {
+                  try {
+                    noteVideoError(e.currentTarget);
+                  } catch {
+                    /* the log line is no reason not to retry */
+                  }
+                  onVideoError?.(e.currentTarget.currentTime || 0);
+                }}
+                // When it began waiting for data, for the log line above: a wait the player
+                // gave up on reads differently from a failure at once.
+                onWaiting={(e) => {
+                  if (!e.currentTarget.dataset.waiting) e.currentTarget.dataset.waiting = String(performance.now());
+                }}
+                onStalled={(e) => {
+                  if (!e.currentTarget.dataset.waiting) e.currentTarget.dataset.waiting = String(performance.now());
+                }}
+                onPlaying={(e) => {
+                  delete e.currentTarget.dataset.waiting;
+                  onVideoPlaying?.();
+                }}
               />
               <VideoControls video={videoEl} />
             </>

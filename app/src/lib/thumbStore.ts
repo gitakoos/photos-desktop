@@ -23,6 +23,7 @@
 import { useSyncExternalStore } from "react";
 import { rpc } from "./rpc";
 import { isLightboxOpen } from "./lightboxSignal";
+import { dropTileImages } from "./tileImages";
 
 // ---- The sidecar's loopback thumbnail server ----
 //
@@ -35,6 +36,9 @@ let serverBase: string | null = null;
 const serverListeners = new Set<() => void>();
 
 function setServerBase(base: string | null): void {
+  // The pictures kept for tiles belong to the address they came from: a lock or a
+  // sign-out takes them with it, and a new token would never ask for them anyway.
+  if (base !== serverBase) dropTileImages();
   serverBase = base;
   for (const listener of serverListeners) listener();
 }
@@ -51,6 +55,14 @@ export async function connectThumbServer(): Promise<void> {
 /** Forgets the server's address, as the sidecar forgets its token at lock. */
 export function disconnectThumbServer(): void {
   setServerBase(null);
+}
+
+/**
+ * Where the server streams a video for the viewer to play, a byte range at a time, or
+ * null while there is no server to ask.
+ */
+export function videoStreamUrl(uid: string): string | null {
+  return serverBase ? serverBase + encodeURIComponent(uid) + "/v" : null;
 }
 
 /** A grid thumbnail's URL on the server, or null while there is no server to ask. */
