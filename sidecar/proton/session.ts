@@ -58,6 +58,8 @@ import {
   metaPut,
   readSealedOrDiscard,
   storeDir,
+  coverGet,
+  coverPut,
   sizedGet,
   sizedPut,
   thumbGet,
@@ -2014,12 +2016,17 @@ export class ProtonSession {
    * People's covers cut to their faces, from the HD preview (the grid thumbnail when a
    * photo has none, or the preview cannot be had), for the thumbnail server.
    */
-  private faceCovers = new FaceCovers(async (uid) => {
-    const preview = await this.previewBytes(uid).catch(() => null);
-    if (preview) return { bytes: preview, keep: true };
-    const thumb = thumbGet(uid, ThumbnailType.Type1);
-    return thumb ? { bytes: thumb, keep: false } : null;
-  });
+  private faceCovers = new FaceCovers(
+    async (uid) => {
+      const preview = await this.previewBytes(uid).catch(() => null);
+      if (preview) return { bytes: preview, keep: true };
+      const thumb = thumbGet(uid, ThumbnailType.Type1);
+      return thumb ? { bytes: thumb, keep: false } : null;
+    },
+    // A small circle is cut from the grid thumbnail, and every cut is kept sealed for the
+    // next run: a page of hundreds of faces no longer fetches a preview for each, each time.
+    { thumbnail: (uid, gone) => this.thumbnailFor(uid, gone), disk: { get: coverGet, put: coverPut } },
+  );
   /** The trash as last read, shared by the window and the drive's listing: see `TrashListing`. */
   private trash = new TrashListing();
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
@@ -2041,7 +2048,7 @@ export class ProtonSession {
           width
             ? this.smallThumbs.get(uid, width, () => this.thumbnailFor(uid, gone))
             : this.thumbnailFor(uid, gone),
-        (uid, box, gone) => this.faceCovers.get(uid, box, gone),
+        (uid, box, gone, width) => this.faceCovers.get(uid, box, gone, width),
         (uid) => this.videos.get(uid),
       ),
     };

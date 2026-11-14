@@ -589,6 +589,7 @@ export const en: Record<string, string> = {
   "faces.looseTitle": "Not grouped",
   "faces.looseHint": "Faces that are in no group. Pick some and say who they are.",
   "faces.looseMore": "Showing {shown} of {total}. Pick some and say who they are.",
+  "faces.looseShowMore": "Show {count} more",
   "faces.picked": "{count} picked",
   "faces.save": "Save",
   "faces.inPhoto": "People",

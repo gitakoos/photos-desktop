@@ -373,6 +373,31 @@ export function sizedPut(key: string, data: Buffer): void {
   }
 }
 
+/** A face cover cut before (see faceCover), sealed beside the thumbnails, by its key. */
+function coverPath(key: string): string {
+  return join(thumbDir(), `${createHash("sha256").update(`cover:${key}`).digest("hex")}.bin`);
+}
+
+export function coverGet(key: string): Buffer | null {
+  if (!isReady()) return null;
+  const path = coverPath(key);
+  if (!existsSync(path)) return null;
+  try {
+    return unseal(readFileSync(path));
+  } catch {
+    return null;
+  }
+}
+
+export function coverPut(key: string, data: Buffer): void {
+  if (!isReady()) return;
+  try {
+    writeFileSync(coverPath(key), seal(data));
+  } catch {
+    /* best-effort, as the thumbnails */
+  }
+}
+
 export function thumbPut(uid: string, type: number, data: Buffer): void {
   if (!isReady()) return;
   try {

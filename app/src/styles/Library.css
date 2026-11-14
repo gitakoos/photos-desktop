@@ -294,6 +294,9 @@
 .lib-suggestface {
   position: relative;
   display: block;
+  /* Never squeezed by a long name beside it: a narrower circle is an oval, and the square
+     face cut into it loses its sides. */
+  flex: none;
   width: 52px;
   height: 52px;
   overflow: hidden;
@@ -528,6 +531,21 @@
 }
 
 /* ---- Faces in no group, and naming one or a few ---- */
+.lib-seemore {
+  display: block;
+  margin: 14px auto 0;
+  padding: 8px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--line-06);
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.lib-seemore:hover {
+  background: var(--line);
+}
 .lib-loosegrid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));

@@ -38,6 +38,8 @@ export type FaceBox = [number, number, number, number];
 
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 export const FACE_ZOOM_OUT = 1.4;
+/** The least room around a face, as a multiple of its longer side, a zoom in near an edge keeps: in a circle, the face box's corners need about this much. */
+export const FACE_ZOOM_OUT_MIN = 1.2;
 
 /** The side of a cut cover, in pixels: sharp on a large card on a HiDPI screen. */
 export const COVER_SIZE = 320;
@@ -45,20 +47,38 @@ export const COVER_SIZE = 320;
 /** Cut covers kept in memory: at some 20 KB each, a few MB for a long page of people. */
 const KEPT = 400;
 
-/** How many covers are cut at once. Each may fetch a preview, so kept low. */
+/** How many covers are cut from previews at once. Each fetches one, so kept low. */
 const AT_ONCE = 2;
 
 /**
- * The square cut out of a `width` x `height` picture for `box`: FACE_ZOOM_OUT times the
- * face's longer side, centred on the face and moved (never shrunk below the picture's
- * shorter side) to stay inside the picture. The same square the window used to show.
+ * A cover is cut from the grid thumbnail, already here or fetched with others in one go,
+ * when the face's square in it has at least this share of the pixels the cover is shown
+ * at; only a face too small in it waits for the HD preview.
+ */
+const THUMB_ENOUGH = 0.8;
+
+/** How many covers are cut from thumbnails at once: each is quick, but a page asks for hundreds. */
+const THUMB_AT_ONCE = 3;
+
+/** Where cut covers are kept between runs (sealed, as the thumbnails are). */
+export type CoverDisk = { get(key: string): Buffer | null; put(key: string, cut: Buffer): void };
+
+/**
+ * The square cut out of a `width` x `height` picture for `box`, shown in a circle: FACE_ZOOM_OUT
+ * times the face's longer side, centred on the face. A face near an edge is zoomed in on (down
+ * to FACE_ZOOM_OUT_MIN times it) rather than moved off centre; only past that is the square
+ * moved to stay inside the picture. Moving it first, as before, put a face near an edge at the
+ * circle's side.
  */
 export function faceSquare(box: FaceBox, width: number, height: number): { left: number; top: number; size: number } {
   const [l, t, r, b] = box;
-  const wanted = Math.max((r - l) * width, (b - t) * height) * FACE_ZOOM_OUT;
-  const size = Math.max(1, Math.round(Math.min(wanted, width, height)));
+  const face = Math.max((r - l) * width, (b - t) * height);
   const cx = ((l + r) / 2) * width;
   const cy = ((t + b) / 2) * height;
+  // As large as fits around the centre, between FACE_ZOOM_OUT_MIN and FACE_ZOOM_OUT times the face.
+  const room = 2 * Math.min(cx, width - cx, cy, height - cy);
+  const wanted = Math.max(face * FACE_ZOOM_OUT_MIN, Math.min(face * FACE_ZOOM_OUT, room));
+  const size = Math.max(1, Math.round(Math.min(wanted, width, height)));
   const left = Math.round(Math.min(Math.max(cx - size / 2, 0), width - size));
   const top = Math.round(Math.min(Math.max(cy - size / 2, 0), height - size));
   return { left, top, size };
@@ -124,21 +144,38 @@ export class FaceCovers {
   /** Bumped by `clear`, so a cut finishing after a lock is not kept. */
   private epoch = 0;
 
-  constructor(private picture: CoverPicture) {}
+  constructor(
+    private picture: CoverPicture,
+    private more: {
+      /** The grid thumbnail, for a cover small enough to be cut from it. */
+      thumbnail?: (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
+      disk?: CoverDisk;
+    } = {},
+  ) {}
 
-  async get(uid: string, box: FaceBox, gone: AbortSignal): Promise<Buffer | null> {
-    const key = `${uid}|${box.join(",")}`;
+  /**
+   * The cover of `box` in `uid`, `want` pixels a side at most (COVER_SIZE when not said): a
+   * small circle needs no HD preview.
+   */
+  async get(uid: string, box: FaceBox, gone: AbortSignal, want = COVER_SIZE): Promise<Buffer | null> {
+    const side = Math.max(1, Math.min(COVER_SIZE, Math.round(want)));
+    const key = `${uid}|${box.join(",")}|${side}`;
     const hit = this.kept.get(key);
     if (hit) {
       this.kept.delete(key);
       this.kept.set(key, hit);
       return hit;
     }
+    const stored = this.more.disk?.get(key);
+    if (stored) {
+      this.keep(key, stored);
+      return stored;
+    }
     if (gone.aborted) return null;
     // A cut everyone left while it waited in line is on its way out with nothing, so it is
     // not joined; one already being made will still answer, so it is.
     const under = this.running.get(key);
-    const run = under && (under.started || !under.stop.signal.aborted) ? under : this.start(uid, box, key);
+    const run = under && (under.started || !under.stop.signal.aborted) ? under : this.start(uid, box, key, side);
     run.askers++;
     gone.addEventListener(
       "abort",
@@ -150,31 +187,104 @@ export class FaceCovers {
     return run.made;
   }
 
-  /** Begins one cut, in line behind those already being made. */
-  private start(uid: string, box: FaceBox, key: string) {
+  /**
+   * Begins one cut: from the grid thumbnail at once when it is enough, else in line behind
+   * the cuts from previews already being made.
+   */
+  private start(uid: string, box: FaceBox, key: string, side: number) {
     const stop = new AbortController();
     const epoch = this.epoch;
     const run = { made: Promise.resolve<Buffer | null>(null), askers: 0, stop, started: false };
-    run.made = this.turn(stop.signal).then(async (go) => {
-      if (!go) return null;
+    const kept = (cut: Buffer) => {
+      if (epoch !== this.epoch) return;
+      this.keep(key, cut);
+      this.more.disk?.put(key, cut);
+    };
+    const fromPreview = (go: boolean) => {
+      if (!go) return Promise.resolve(null);
       run.started = true;
-      try {
-        const picture = await this.picture(uid);
-        const cut = picture ? await cutFace(picture.bytes, box) : null;
-        if (cut && picture?.keep && epoch === this.epoch) this.keep(key, cut);
-        return cut;
-      } catch {
-        return null;
-      } finally {
-        this.release();
-      }
-    });
+      return (async () => {
+        try {
+          const picture = await this.picture(uid);
+          const cut = picture ? await cutFace(picture.bytes, box, side) : null;
+          if (cut && picture?.keep) kept(cut);
+          return cut;
+        } catch {
+          return null;
+        } finally {
+          this.release();
+        }
+      })();
+    };
+    run.made = this.more.thumbnail
+      ? this.fromThumbnail(uid, box, side, stop.signal)
+          .catch(() => null)
+          .then((small) => {
+            // Left while the thumbnail was tried: no preview is fetched for nobody.
+            if (!small) return stop.signal.aborted ? null : this.turn(stop.signal).then(fromPreview);
+            kept(small);
+            return small;
+          })
+      : // In line at once, as asked.
+        this.turn(stop.signal).then(fromPreview);
     this.running.set(key, run);
     void run.made.finally(() => {
       if (this.running.get(key) === run) this.running.delete(key);
     });
     return run;
   }
+
+  /** The cover cut from the grid thumbnail, when the face has pixels enough in it. */
+  private async fromThumbnail(uid: string, box: FaceBox, side: number, gone: AbortSignal): Promise<Buffer | null> {
+    // The largest cover (a big card, or no size asked) is cut from the HD preview, as before.
+    if (!this.more.thumbnail || side >= COVER_SIZE) return null;
+    const bytes = await this.more.thumbnail(uid, gone);
+    if (!bytes || gone.aborted) return null;
+    // A few at a time, in order, so a page of faces does not take every core at once.
+    if (!(await this.thumbSlot(gone))) return null;
+    try {
+      const meta = await sharp(bytes, { failOn: "none" }).metadata();
+      if (!meta.width || !meta.height) return null;
+      const turned = (meta.orientation ?? 1) >= 5;
+      const { size } = faceSquare(box, turned ? meta.height : meta.width, turned ? meta.width : meta.height);
+      if (size < side * THUMB_ENOUGH) return null;
+      return await cutFace(bytes, box, side);
+    } finally {
+      this.thumbFree();
+    }
+  }
+
+  /** A turn at cutting from a thumbnail: false if the ask is given up while it waits. */
+  private thumbSlot(gone: AbortSignal): Promise<boolean> {
+    if (gone.aborted) return Promise.resolve(false);
+    if (this.thumbBusy < THUMB_AT_ONCE) {
+      this.thumbBusy++;
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const waiter = { resolve };
+      this.thumbLine.push(waiter);
+      gone.addEventListener(
+        "abort",
+        () => {
+          const at = this.thumbLine.indexOf(waiter);
+          if (at < 0) return;
+          this.thumbLine.splice(at, 1);
+          resolve(false);
+        },
+        { once: true },
+      );
+    });
+  }
+
+  /** Hands the turn straight to the next in line, or frees it. */
+  private thumbFree(): void {
+    const next = this.thumbLine.shift();
+    if (next) next.resolve(true);
+    else this.thumbBusy--;
+  }
+  private thumbBusy = 0;
+  private thumbLine: { resolve: (go: boolean) => void }[] = [];
 
   /** Forget every cut cover: at lock, so nothing decrypted outlives the session. */
   clear(): void {
@@ -198,6 +308,7 @@ export class FaceCovers {
 
   /** Resolves true once this request may run, or false if it was given up first. */
   private turn(gone: AbortSignal): Promise<boolean> {
+    if (gone.aborted) return Promise.resolve(false);
     if (this.busy < AT_ONCE) {
       this.busy++;
       return Promise.resolve(true);

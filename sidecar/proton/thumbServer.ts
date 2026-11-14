@@ -75,7 +75,7 @@ function corsFor(origin: string | undefined): Record<string, string> {
 export type ThumbnailSource = (uid: string, gone: AbortSignal, width?: number) => Promise<Buffer | null>;
 
 /** A person's cover cut to the face in `box`, for `/t/<token>/<uid>/f/<l,t,r,b>`. */
-export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal) => Promise<Buffer | null>;
+export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal, width?: number) => Promise<Buffer | null>;
 
 /** A video to play, for `/t/<token>/<uid>/v`, read a byte range at a time. */
 export type VideoLookup = (uid: string) => Promise<VideoSource | null>;
@@ -174,7 +174,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   });
   if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
   try {
-    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal, width);
+    const bytes = box && faces ? await faces(uid, box, gone.signal, width) : await source(uid, gone.signal, width);
     if (gone.signal.aborted) return;
     if (!bytes) return refuse(404);
     res.writeHead(200, {
