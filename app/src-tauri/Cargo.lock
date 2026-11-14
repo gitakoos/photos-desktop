@@ -110,6 +110,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tiny_http",
+ "tokio",
  "webview2-com",
  "windows 0.58.0",
  "windows 0.61.3",
