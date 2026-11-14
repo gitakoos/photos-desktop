@@ -212,6 +212,8 @@ export const cs: Record<string, string> = {
   "settings.diagnosticsFailed": "Diagnostiku se nepodařilo vytvořit. Zkuste to znovu.",
   "settings.diagDetailed": "Podrobné protokolování",
   "settings.diagDetailedDesc": "Zaznamená i čas každého kroku u fotek a souborů, nejen pomalých. Zapněte ho, když zkoumáte něco pomalého.",
+  "settings.softwareVideo": "Dekódovat video softwarově",
+  "settings.softwareVideoDesc": "Zapněte, pokud se videa při přeskočení zastaví s chybou dekódování. Zatěžuje víc procesor než grafickou kartu. Projeví se po restartu.",
   "settings.myFiles": "Moje soubory",
   "settings.myFilesNav": "Přeneste fotky a videa ze složek Proton Drive",
   "settings.uploadQuality": "Kvalita nahrávání",

@@ -41,8 +41,12 @@ export type ViewerTextState =
   | { kind: "ready"; read: TextRead }
   | { kind: "message"; key: string };
 
-/** A photo looked at this long is read ahead; one flicked past is not. */
-const READ_AHEAD_MS = 300;
+/**
+ * A photo looked at this long is read ahead; one stepped past is not. A read fetches the
+ * photo's original and runs three networks over it, so a run through the viewer at a few
+ * photos a second must not start one per photo.
+ */
+const READ_AHEAD_MS = 1500;
 
 /** Whether Copy text is on in Settings. */
 async function copyTextOn(): Promise<boolean> {
@@ -85,14 +89,17 @@ export function useViewerText(source: TextSource | null, itemKey: string) {
   useEffect(() => {
     if (!source) return;
     const id = run.current;
+    // Let go of with the photo: a start or a poll still queued for the host is dropped
+    // there rather than sent once the viewer has moved on.
+    const gone = new AbortController();
     const timer = window.setTimeout(async () => {
       if (id !== run.current || !(await copyTextOn())) return;
       try {
-        const { id: job } = await rpc<{ id: number }>("ocrStart", source);
+        const { id: job } = await rpc<{ id: number }>("ocrStart", source, { signal: gone.signal });
         for (;;) {
           await new Promise((r) => setTimeout(r, 250));
           if (id !== run.current) return;
-          const r = await rpc<Job | null>("ocrResult", { id: job });
+          const r = await rpc<Job | null>("ocrResult", { id: job }, { signal: gone.signal });
           if (id !== run.current || !r || r.state === "failed" || r.state === "unavailable") return;
           if (r.state === "working") continue;
           if (r.result && r.result.blocks.length > 0) {
@@ -105,7 +112,10 @@ export function useViewerText(source: TextSource | null, itemKey: string) {
         /* nothing read ahead; the button still asks */
       }
     }, READ_AHEAD_MS);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      gone.abort();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source?.uid, source?.path, itemKey]);
 

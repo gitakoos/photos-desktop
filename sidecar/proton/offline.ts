@@ -57,6 +57,7 @@ import {
   unseal,
   writeSealedAtomic,
 } from "./store.ts";
+import { openDownloader } from "./downloadSlots.ts";
 
 /** What the UI polls while a batch runs, and reads to size the Settings panel. */
 export type OfflineStatus = {
@@ -214,8 +215,11 @@ async function fetchOne(photos: any, uid: string): Promise<boolean> {
       ...(size > 0 ? { size } : {}),
     });
 
-    const downloader = await photos.getFileDownloader(uid);
-    if (!held(uid)) return false;
+    const { downloader, unused } = await openDownloader(photos, uid);
+    if (!held(uid)) {
+      unused(); // unpinned while it was set up: its download slot goes back
+      return false;
+    }
     sealer = new OriginalSealer(uid);
     const writer = sealer;
     const stream = new WritableStream<Uint8Array>({

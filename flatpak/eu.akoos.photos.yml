@@ -31,6 +31,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
+  # Sound for video playback (PipeWire serves this socket too). The app never records.
+  - --socket=pulseaudio
   # The keystore that persists the signed-in session (gnome-keyring / kwallet).
   - --talk-name=org.freedesktop.secrets
   - --talk-name=org.freedesktop.Notifications
