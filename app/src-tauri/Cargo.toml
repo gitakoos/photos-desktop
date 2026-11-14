@@ -222,3 +222,9 @@ httpdate = "1"
 # Starting at sign-in through the XDG Background portal (autostart.rs). The crate the
 # keyring's Secret Service support already builds, so it adds nothing new.
 dbus = "0.9"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+# panic stays "unwind": a panic in a worker thread must not end the app.
