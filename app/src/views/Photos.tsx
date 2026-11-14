@@ -163,6 +163,7 @@ import { dropPreview, prefetchAfter } from "../lib/previewStore";
 import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
 import { bench, benchCount, benchSpan } from "../lib/benchProbe";
 import { maybeRunScrollBench } from "../lib/scrollBench";
+import { forgetNames } from "../lib/photoNames";
 import "../styles/Photos.css";
 
 /** Each category's mark in the filter menu, where there is one to draw. */
@@ -772,7 +773,11 @@ export function Photos({
   // token is asked for here and let go on the way out, which is a lock or a sign-out.
   useEffect(() => {
     void connectThumbServer();
-    return () => disconnectThumbServer();
+    return () => {
+      disconnectThumbServer();
+      // The photo names the viewer kept go with the session that showed them.
+      forgetNames();
+    };
   }, []);
 
   /** Photos and videos picked from this computer, uploaded straight into `album`. */

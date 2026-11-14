@@ -3088,6 +3088,21 @@ export class ProtonSession {
 
   // ---- Single-photo actions (SDK: getNode / renameNode / trashNodes / updatePhotos) ----
 
+  /**
+   * The names this computer already holds for these photos, from the sealed cache (the
+   * drive's listing and the search index fill it), with nothing fetched or decrypted: a
+   * photo with no cached name is left out. What lets the viewer put a photo's name in its
+   * title the moment it steps to it, instead of "…" until the details arrive.
+   */
+  cachedNames(uids: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const uid of uids) {
+      const name = metaGet(uid)?.name;
+      if (name) out[uid] = name;
+    }
+    return out;
+  }
+
   /** Everything the details panel shows. Size and hashes live on the revision. */
   async getNodeDetails(uid: string): Promise<Record<string, unknown>> {
     if (!this.photos && this.offlineOnly) {

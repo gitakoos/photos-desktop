@@ -300,8 +300,15 @@ export function ViewerShell({
   // A click that dismisses the overflow menu lands on the backdrop the instant after, so
   // this brief window swallows it: the menu closing must never also close the viewer.
   const closeGuard = useRef(0);
-  const guardedClose = () => {
+  // A click on the backdrop closes the viewer only if the press began there too. Selecting
+  // text by dragging, say a person's name in the details panel, presses in the field and
+  // lets go outside it, and the browser reports that as a click on the element holding
+  // both, which is the backdrop: the viewer closed under the reader's hand.
+  const pressedOn = useRef<EventTarget | null>(null);
+  const guardedClose = (e: MouseEvent) => {
     if (Date.now() < closeGuard.current) return;
+    if (pressedOn.current !== e.target) return;
+    if ((window.getSelection()?.toString() ?? "") !== "") return;
     onClose();
   };
 
@@ -395,6 +402,7 @@ export function ViewerShell({
       className={`lbx${ownsWindow ? " owns-window" : ""}${strip ? " with-strip" : ""}${fullscreen ? " fullscreen" : ""}${
         aside || (showDetails && details) || (showContents && list) ? " with-aside" : ""
       }`}
+      onMouseDownCapture={(e) => (pressedOn.current = e.target)}
       onClick={guardedClose}
     >
       {/* The attribute has to sit on whatever the pointer actually lands on, which

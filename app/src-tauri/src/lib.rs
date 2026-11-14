@@ -144,7 +144,7 @@ fn priority_for(method: &str) -> Priority {
 fn classified(method: &str) -> Option<Priority> {
     Some(match method {
         // The user is waiting on the answer.
-        "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile" | "startHydrate"
+        "getPreview" | "getVideo" | "getNodeDetails" | "cachedNames" | "hydrateFile" | "startHydrate"
         // Session lifecycle: must never sit behind a warm.
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
         | "localLockState" | "localLockCheck" | "localLockSet" | "localLockClear"
@@ -3233,6 +3233,7 @@ mod capability_tests {
             "core:window:allow-minimize",
             "core:window:allow-toggle-maximize",
             "core:window:allow-start-dragging",
+            "core:window:allow-start-resize-dragging",
             "core:window:allow-set-title",
         ] {
             assert!(granted.contains(&permission), "{permission} is not granted");

@@ -99,6 +99,7 @@ import {
   type ScanSpeed,
 } from "../lib/localFaces";
 import "../styles/Settings.css";
+import { backdropClose } from "../lib/backdrop";
 
 export type AppSettings = {
   /** Matches Android's "Hide photos in Drive albums". Off by default. */
@@ -1460,7 +1461,7 @@ export function Settings({
                     </button>
                     {langOpen && (
                       <>
-                        <div className="st-dropdown-scrim" onClick={() => setLangOpen(false)} />
+                        <div className="st-dropdown-scrim" {...backdropClose(() => setLangOpen(false), false)} />
                         <ul className="st-dropdown-menu" role="listbox">
                           {LANGS.map((l) => (
                             <li key={l.value}>

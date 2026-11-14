@@ -24,6 +24,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
 import { videoStreamUrl } from "../lib/thumbStore";
+import { knownName, learnNames, rememberName } from "../lib/photoNames";
 import { downloadPhotos, explorerMode } from "../lib/download";
 import { pinOffline, unpinOffline } from "../lib/offline";
 import { cachedPreview, dropPreview, loadPreview } from "../lib/previewStore";
@@ -210,6 +211,28 @@ export function Lightbox({
     "idle",
   );
   const [details, setDetails] = useState<Details | null>(null);
+  // The names of the open photo and those around it, asked of the sidecar's cache as the
+  // reader steps, so the title shows a photo's name the moment it opens rather than "…"
+  // until its details come back. Not let go of per step: the answer comes from a cache and
+  // is cheap, and one dropped at every step of a quick run would never land.
+  const [, setNamesLearned] = useState(0);
+  const namesGone = useRef<AbortController | null>(null);
+  useEffect(() => {
+    namesGone.current = new AbortController();
+    return () => namesGone.current?.abort();
+  }, []);
+  useEffect(() => {
+    const around = [uid];
+    if (items && index >= 0) {
+      for (let d = 1; d <= 3; d++) {
+        const next = items[index + d];
+        const prev = items[index - d];
+        if (next) around.push(next.uid);
+        if (prev) around.push(prev.uid);
+      }
+    }
+    void learnNames(around, namesGone.current?.signal, () => setNamesLearned((n) => n + 1));
+  }, [uid, index, items]);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [sharing, setSharing] = useState(false);
@@ -319,6 +342,7 @@ export function Lightbox({
       if (!(await settled)) return;
       try {
         const meta = await rpc<Details>("getNodeDetails", { uid });
+        if (meta?.name) rememberName(uid, meta.name);
         if (!cancelled) setDetails(meta);
       } catch (e) {
         if (!cancelled) setError(String(e));
@@ -438,6 +462,7 @@ export function Lightbox({
     setError("");
     try {
       const res = await rpc<{ uid: string; name: string }>("renamePhoto", { uid, name });
+      rememberName(uid, res.name);
       setDetails((d) => (d ? { ...d, name: res.name } : d));
       onRenamed(uid, res.name);
     } catch (e) {
@@ -653,7 +678,7 @@ export function Lightbox({
           />
         ) : undefined
       }
-      name={details?.name ?? ""}
+      name={details?.name ?? knownName(uid) ?? (items?.[index]?.uid === uid ? items[index].name : undefined) ?? ""}
       stage={stage}
       error={error}
       busy={busy}

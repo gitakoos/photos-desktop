@@ -29,6 +29,7 @@ import { useT } from "../lib/i18n";
 import "../styles/Confirm.css";
 import "../styles/AlbumDialogs.css";
 import { personNameKey } from "../lib/personName";
+import { backdropClose } from "../lib/backdrop";
 
 /** Name compare for the suggestions, case and accents aside. */
 const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase().trim();
@@ -265,10 +266,7 @@ export function PersonPicker({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onCancel();
-      }}
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel ad-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">

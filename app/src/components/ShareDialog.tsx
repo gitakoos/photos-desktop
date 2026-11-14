@@ -41,6 +41,7 @@ import { Confirm } from "./Confirm";
 import { CloseIcon, PersonAddIcon, ShareIcon } from "./icons";
 import "../styles/Confirm.css";
 import "../styles/ShareDialog.css";
+import { backdropClose } from "../lib/backdrop";
 
 type Role = "viewer" | "editor";
 
@@ -293,10 +294,7 @@ export function ShareDialog({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
+      {...backdropClose(onClose)}
     >
       <div className="cf-panel sh-panel" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="sh-head">
