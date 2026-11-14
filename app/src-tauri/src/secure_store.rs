@@ -151,8 +151,17 @@ fn keystore_get_or_create(
 }
 
 /// The AES data key, created on first use and sealed at rest by the platform keystore.
+///
+/// Unsealing it is a DPAPI call or a Secret Service round trip, and the store is read
+/// several times during startup alone, so the key is kept in memory once loaded. The
+/// lock also keeps two first callers from each creating a different key.
 fn data_key(app: &AppHandle) -> Result<Key<Aes256Gcm>, String> {
-    let raw = keystore_get_or_create(app, KEY_FILE, DPAPI_ENTROPY)?;
+    static KEY: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
+    let mut cached = KEY.lock().unwrap_or_else(|e| e.into_inner());
+    let raw = match *cached {
+        Some(raw) => raw,
+        None => *cached.insert(keystore_get_or_create(app, KEY_FILE, DPAPI_ENTROPY)?),
+    };
     Ok(*Key::<Aes256Gcm>::from_slice(&raw))
 }
 
