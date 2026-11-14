@@ -2196,7 +2196,7 @@ fn populate_extras(app: &tauri::AppHandle, root: &std::path::Path, favorites: &[
     made += populate_flat(app, root, "Trash", &photos_of(extras.get("trash")));
     made += populate_flat(app, root, "Shared", &photos_of(extras.get("shared")));
     let mut album_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for album in extras.get("sharedAlbums").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    for album in extras.get("sharedAlbums").and_then(|v| v.as_array()).into_iter().flatten() {
         let name = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
         let folder = unique_name(&sanitize_name(name), &mut album_names);
         made += populate_flat(app, root, &format!("Shared\\{folder}"), &photos_of(album.get("photos")));
@@ -2386,13 +2386,13 @@ fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
 
     loop {
         let asked = std::time::Instant::now();
-        let result = crate::sidecar_rpc(
+        let mut result = crate::sidecar_rpc(
             app,
             "listForMount",
             serde_json::json!({ "offset": offset, "limit": page }),
         )?;
         let took = asked.elapsed();
-        let items = result.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let items = result.get_mut("items").and_then(|v| v.as_array_mut()).map(std::mem::take).unwrap_or_default();
         let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
         fill_progress(app, (offset + items.len() as u64).min(total), total);
 
@@ -2541,7 +2541,7 @@ fn populate_albums(
     let mut offset = 0u64;
     // A page of albums at a time, each page a short call, with the count shown as it goes.
     loop {
-        let page = match crate::sidecar_rpc(
+        let mut page = match crate::sidecar_rpc(
             app,
             "listAlbumsForMount",
             serde_json::json!({ "offset": offset, "limit": ALBUM_PAGE }),
@@ -2553,7 +2553,7 @@ fn populate_albums(
             }
         };
         let total = page.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
-        let albums = page.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let albums = page.get_mut("items").and_then(|v| v.as_array_mut()).map(std::mem::take).unwrap_or_default();
         if total == 0 {
             album_index().lock().unwrap().clear();
             album_dirs().lock().unwrap().clear();
@@ -2570,7 +2570,7 @@ fn populate_albums(
         for album in &albums {
             let album_uid = album.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
             let name = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
-            let uids = album.get("uids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let uids: &[serde_json::Value] = album.get("uids").and_then(|v| v.as_array()).map_or(&[], Vec::as_slice);
             if uids.is_empty() {
                 continue;
             }
@@ -2588,7 +2588,7 @@ fn populate_albums(
             mark_not_indexed(&album_folder);
             let mut file_seen: HashSet<String> = HashSet::new();
             let mut members: Vec<String> = Vec::new();
-            for u in &uids {
+            for u in uids {
                 let Some(uid) = u.as_str() else { continue };
                 let Some((base, size, ft)) = meta.get(uid) else { continue };
                 let unique = unique_name(base, &mut file_seen);

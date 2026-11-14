@@ -1328,9 +1328,9 @@ pub(crate) fn sidecar_rpc(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let shared = app.state::<SharedSidecar>().inner().clone();
-    let resp = rpc_blocking(app, &shared, method.to_string(), params, None)?;
+    let mut resp = rpc_blocking(app, &shared, method.to_string(), params, None)?;
     if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        Ok(resp.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(resp.get_mut("result").map(serde_json::Value::take).unwrap_or(serde_json::Value::Null))
     } else {
         Err(resp
             .get("error")
