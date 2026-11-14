@@ -41,3 +41,6 @@ sdk/
 .idea/
 .DS_Store
 *.log
+
+# Python bytecode
+__pycache__/

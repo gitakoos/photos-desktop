@@ -760,6 +760,25 @@ function App() {
     { key: "moreSoon", label: t("menu.moreSoon"), disabled: true, onSelect: () => {} },
   ];
 
+  // The screens before the library, noted in the log as the library's own are (see Photos):
+  // a profile run then knows a slow start from a slow page.
+  const shellScreen = restoring
+    ? "restoring"
+    : locked
+      ? "lock"
+      : email && helloLocked
+        ? "app_lock"
+        : !email
+          ? "signin"
+          : legacy === null
+            ? "restoring"
+            : legacy
+              ? "move"
+              : null;
+  useEffect(() => {
+    if (shellScreen) void invoke("screen_note", { screen: shellScreen }).catch(() => {});
+  }, [shellScreen]);
+
   return (
     <div className="app-shell">
       <Titlebar />

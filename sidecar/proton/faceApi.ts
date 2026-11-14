@@ -38,6 +38,7 @@ import {
   renamePerson,
   setPersonCover,
 } from "./facePeople.ts";
+import { diag } from "./diag.ts";
 import { faceScanner } from "./faceScan.ts";
 import { applySplit, newPlanTicket, planSplit, splitStart, undoSplit } from "./faceSplit.ts";
 import { isScanSpeed } from "./scanPipeline.ts";
@@ -108,7 +109,13 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
     return faceScanner.getStatus();
   },
   faceSearchClear: () => faceScanner.clearSearch(),
-  facePeople: () => listPeople(store(), (link) => faceScanner.uidOfLink(link)),
+  facePeople: () => {
+    const started = performance.now();
+    const out = listPeople(store(), (link) => faceScanner.uidOfLink(link));
+    const ms = Math.round(performance.now() - started);
+    if (ms >= 20) diag.log("faces", "step", { step: "list_people", ms });
+    return out;
+  },
   facePersonRename: (p) => change(() => ({ id: renamePerson(store(), str(p?.id), str(p?.name, 100)) })),
   facePersonMerge: (p) => change(() => mergePeople(store(), str(p?.from), str(p?.into))),
   faceNameFaces: (p) => change(() => ({ id: nameFaces(store(), ids(p?.faceIds), str(p?.name, 100)) })),

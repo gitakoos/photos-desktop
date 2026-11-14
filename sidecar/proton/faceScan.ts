@@ -99,6 +99,23 @@ import {
   type StageTimes,
 } from "./scanPipeline.ts";
 
+/**
+ * Times one step of the face and search work for the log, when it takes a while: the step's
+ * name and how long, nothing else. What the profiler reads to say where a start's time goes.
+ */
+function timedStep<T>(step: string, work: () => T): T {
+  const started = performance.now();
+  const done = () => {
+    const ms = Math.round(performance.now() - started);
+    if (ms >= STEP_LOGGED_MS) diag.log("faces", "step", { step, ms });
+  };
+  const out = work();
+  if (out instanceof Promise) return out.finally(done) as T;
+  done();
+  return out;
+}
+const STEP_LOGGED_MS = 20;
+
 /** The phone's recognition model, pinned to the release's bytes. */
 export const EMBED_MODEL = {
   url: "https://github.com/gitakoos/face-models/releases/download/v2/ghostfacenet.onnx",
@@ -629,7 +646,7 @@ export class FaceScanner {
     this.phoneCopies = copies;
     if (!this.store.isLoaded() || copies.length === 0) return;
     if (!this.compared) {
-      const report = compareWithPhone(this.store, copies.filter(copyFits));
+      const report = timedStep("compare_phone", () => compareWithPhone(this.store, copies.filter(copyFits)));
       if (report.pairs > 0) {
         this.compared = true;
         process.stderr.write(`[faces] phone copy compared: ${describeComparison(report)}\n`);
@@ -638,7 +655,7 @@ export class FaceScanner {
     if (!this.sharing || !this.enabled) return;
     let changed = this.adoptPhoneScans() > 0;
     for (const copy of copies) {
-      const result = applyCopy(this.store, copy, this.readingBack);
+      const result = timedStep("take_in_copy", () => applyCopy(this.store, copy, this.readingBack));
       if (!result) continue;
       changed = true;
       // Counts only: what the copy brought, never a name or a photo.
@@ -1150,36 +1167,36 @@ export class FaceScanner {
     // What this run does is fixed at its start; a switch changed meanwhile starts the next one.
     const faces = this.enabled;
     const index = this.indexing;
-    if (!(await this.ensureModels(generation, faces, index))) return;
-    if (faces) this.store.load();
-    if (index) this.search.load();
+    if (!(await timedStep("models", () => this.ensureModels(generation, faces, index)))) return;
+    if (faces) timedStep("load_faces", () => this.store.load());
+    if (index) timedStep("load_search", () => this.search.load());
     const source = this.source!;
     this.status.state = "waiting";
-    const library = await source.listUids();
+    const library = await timedStep("list_library", () => source.listUids());
     if (!this.active(generation)) return;
     const present = new Set(library);
     this.uidByLink = new Map(library.map((uid) => [uid.slice(uid.indexOf("~") + 1), uid]));
     if (faces) {
       // A photo in the Drive trash can come back, with its faces and names; a trash that cannot be
       // read leaves every photo as it is this time.
-      const trashed = await source.listTrashed().catch(() => null);
+      const trashed = await timedStep("list_trash", () => source.listTrashed().catch(() => null));
       if (!this.active(generation)) return;
-      if (trashed && this.store.keepOnly(present, trashed) > 0) this.status.version++;
+      if (trashed && timedStep("keep_only", () => this.store.keepOnly(present, trashed)) > 0) this.status.version++;
     }
     const hidden = source.hiddenTest();
     if (index) {
-      this.search.keepOnly(present);
-      this.takeInSearch();
+      timedStep("search_keep_only", () => this.search.keepOnly(present));
+      timedStep("search_take_in", () => this.takeInSearch());
     }
     // The photos another device already scanned count as done here, with its faces.
-    if (faces && this.adoptPhoneScans() > 0) {
-      await placeNew(this.store);
+    if (faces && timedStep("adopt_phone_scans", () => this.adoptPhoneScans()) > 0) {
+      await timedStep("place_adopted", () => placeNew(this.store));
       if (this.autoMerging) this.mergeLikely();
       this.status.version++;
     }
     const needsFaces = (uid: string) => faces && !this.store.has(uid) && !hidden(uid);
     const needsVector = (uid: string) => index && !this.search.has(uid);
-    const todo = library.filter((uid) => needsFaces(uid) || needsVector(uid));
+    const todo = timedStep("todo", () => library.filter((uid) => needsFaces(uid) || needsVector(uid)));
     this.libraryCount = library.length;
     // The faces' own progress: a pass that only builds the search index leaves it where it is.
     this.status.total = library.length;
@@ -1290,7 +1307,7 @@ export class FaceScanner {
       if (faceCount <= FULL_REGROUP_MAX_FACES) {
         this.status.state = "grouping";
         this.releaseModels();
-        await regroupAll(this.store, () => this.active(generation));
+        await timedStep("regroup_all", () => regroupAll(this.store, () => this.active(generation)));
         // More groups than the regroup's own merge takes: folded on their directions, as the phone does.
         if (groupMergeOwed(this.store)) await mergeSplitGroups(this.store, () => this.active(generation));
         if (this.autoMerging) this.mergeLikely();

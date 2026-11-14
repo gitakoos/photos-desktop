@@ -653,6 +653,164 @@ struct SidecarGate {
     /// call let go of after it was written still reach the sidecar, as a `{"cancel": id}`
     /// line, so the work itself stops rather than only its answer being thrown away.
     sent: Mutex<std::collections::HashMap<CallId, (u64, u64)>>,
+    /// Every call from arriving to answering, for the watchdog: see `Flights`.
+    flights: Flights,
+}
+
+/// How long a call may wait or run before the watchdog names it.
+const STUCK_RPC_MS: u128 = 5_000;
+/// How often the watchdog looks.
+const WATCHDOG_EVERY: Duration = Duration::from_secs(5);
+/// The longest a stuck call goes unnamed again. It is named at 5 s, then each time its age
+/// has doubled, then at most this often: a long legitimate walk is named a handful of times,
+/// not every 5 s, so it cannot push earlier lines out of the size-capped log.
+const WATCHDOG_RENAME_MAX_MS: u128 = 60_000;
+/// Longest method name logged. The window names the method, so it is capped.
+const WATCHDOG_NAME_MAX: usize = 64;
+/// The most calls the watchdog names in one look; the rest are counted.
+const WATCHDOG_NAMES: usize = 8;
+
+/// One call between arriving and answering.
+struct Flight {
+    method: String,
+    background: bool,
+    since: Instant,
+    /// When it was let onto its lane, if it has been.
+    admitted: Option<Instant>,
+    /// The age at which the watchdog names it next.
+    next_note_ms: u128,
+}
+
+/// Every call from arriving to answering.
+///
+/// The slow-call log names a call only once it answers, so a call that never answers was
+/// never named: a video stuck on its loading note, and every call queued behind it on its
+/// lane, left no line at all. This is what lets the watchdog name them while they are stuck.
+struct Flights {
+    next: std::sync::atomic::AtomicU64,
+    open: Mutex<std::collections::HashMap<u64, Flight>>,
+}
+
+/// Keeps one call in `Flights` for exactly as long as it is outstanding, however it ends.
+struct FlightGuard<'a> {
+    flights: &'a Flights,
+    id: u64,
+}
+
+impl Flights {
+    fn new() -> Self {
+        Flights {
+            next: std::sync::atomic::AtomicU64::new(0),
+            open: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn start(&self, method: &str) -> FlightGuard<'_> {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let flight = Flight {
+            method: method.chars().take(WATCHDOG_NAME_MAX).collect(),
+            background: is_background(priority_for(method)),
+            since: Instant::now(),
+            admitted: None,
+            next_note_ms: STUCK_RPC_MS,
+        };
+        self.lock().insert(id, flight);
+        FlightGuard { flights: self, id }
+    }
+
+    /// The registry, whatever became of a thread that held it before: it holds only
+    /// bookkeeping, and a guard dropped while a panic unwinds must not abort the app.
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, Flight>> {
+        self.open.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The watchdog's lines at `now`: the calls due to be named (outstanding at least
+    /// `min_ms`, and named last at half their present age or a minute ago), the oldest
+    /// first, `WATCHDOG_NAMES` of them by name, and one line counting every call by lane
+    /// whenever any is named. Only the method name is logged, never params: it is not user
+    /// data.
+    fn stuck_report(&self, now: Instant, min_ms: u128) -> Vec<String> {
+        let mut open = self.lock();
+        let mut due: Vec<u64> = Vec::new();
+        let mut stuck = 0;
+        for (id, f) in open.iter() {
+            let age = now.saturating_duration_since(f.since).as_millis();
+            if age < min_ms {
+                continue;
+            }
+            stuck += 1;
+            if age >= f.next_note_ms.max(min_ms) {
+                due.push(*id);
+            }
+        }
+        if due.is_empty() {
+            return Vec::new();
+        }
+        for id in &due {
+            if let Some(f) = open.get_mut(id) {
+                let age = now.saturating_duration_since(f.since).as_millis();
+                f.next_note_ms = (age * 2).min(age + WATCHDOG_RENAME_MAX_MS);
+            }
+        }
+        let mut stuck_flights: Vec<&Flight> = due.iter().filter_map(|id| open.get(id)).collect();
+        stuck_flights.sort_by_key(|f| f.since);
+        let stuck_named = stuck_flights;
+        let mut lines: Vec<String> = stuck_named
+            .iter()
+            .take(WATCHDOG_NAMES)
+            .map(|f| {
+                let lane = if f.background { "bg" } else { "fg" };
+                let age = now.saturating_duration_since(f.since).as_millis();
+                match f.admitted {
+                    None => format!("[rpc] {} stuck lane={lane} waiting={age}", f.method),
+                    Some(at) => {
+                        let waited = at.saturating_duration_since(f.since).as_millis();
+                        let running = now.saturating_duration_since(at).as_millis();
+                        format!("[rpc] {} stuck lane={lane} running={running} waited={waited}", f.method)
+                    }
+                }
+            })
+            .collect();
+        let count = |bg: bool, admitted: bool| {
+            open.values().filter(|f| f.background == bg && f.admitted.is_some() == admitted).count()
+        };
+        lines.push(format!(
+            "[rpc] queue stuck={} fg_running={} fg_waiting={} bg_running={} bg_waiting={}",
+            stuck,
+            count(false, true),
+            count(false, false),
+            count(true, true),
+            count(true, false),
+        ));
+        lines
+    }
+}
+
+impl FlightGuard<'_> {
+    /// The call has been let onto its lane.
+    fn admitted(&self) {
+        if let Some(f) = self.flights.lock().get_mut(&self.id) {
+            f.admitted = Some(Instant::now());
+        }
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flights.lock().remove(&self.id);
+    }
+}
+
+/// Names every call stuck past `STUCK_RPC_MS`, every `WATCHDOG_EVERY`, in the app's log,
+/// for as long as the app runs.
+fn start_rpc_watchdog(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(WATCHDOG_EVERY);
+        let shared = app.state::<SharedSidecar>().inner().clone();
+        for line in shared.flights.stuck_report(Instant::now(), STUCK_RPC_MS) {
+            note(&app, &line);
+        }
+    });
 }
 
 /// Keeps one call in `pending` for exactly as long as it is outstanding. Tied to a drop
@@ -676,6 +834,7 @@ impl SidecarGate {
             generation: std::sync::atomic::AtomicU64::new(0),
             pending: Mutex::new(std::collections::HashMap::new()),
             sent: Mutex::new(std::collections::HashMap::new()),
+            flights: Flights::new(),
         }
     }
 
@@ -804,9 +963,13 @@ impl SidecarGate {
             Tracked { shared: self, id }
         });
 
+        let flight = self.flights.start(&method);
         let wait_start = Instant::now();
         let permit = self.admit(&method, call_id);
         let wait_ms = wait_start.elapsed().as_millis();
+        if permit.is_some() {
+            flight.admitted();
+        }
         self.run_admitted(app, method, params, call_id, wait_ms, permit)
     }
 
@@ -1725,6 +1888,8 @@ async fn rpc(
     // covers, a run through the viewer) queues as futures. A blocking-pool thread is
     // taken only once the call is admitted, for the write and the wait for its answer,
     // so at most one per lane is ever held, however long the queue.
+    // Followed from here until it answers, so the watchdog can name it while it is stuck.
+    let flight = shared.flights.start(&method);
     let wait_start = Instant::now();
     let permit = if bypasses_lanes(&method) {
         Some(None)
@@ -1735,6 +1900,9 @@ async fn rpc(
             .map(|p| Some(p.into_owned(shared.clone())))
     };
     let wait_ms = wait_start.elapsed().as_millis();
+    if permit.is_some() {
+        flight.admitted();
+    }
     let runner = shared.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         runner.run_admitted(&app, method, params, call_id, wait_ms, permit)
@@ -2396,6 +2564,21 @@ fn bench_line_ok(line: &str) -> bool {
 fn bench_note(app: AppHandle, line: String) {
     if scroll_bench_asked() && bench_line_ok(&line) {
         note(&app, &format!("[bench] {line}"));
+    }
+}
+
+/// Whether a screen's name may go into the log: a short word of lowercase letters, digits
+/// and `_`, as the window names its screens. Nothing a photo, album or person is called fits.
+fn screen_name_ok(screen: &str) -> bool {
+    !screen.is_empty() && screen.len() <= 40 && screen.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Which screen the window shows, written into the log as it changes, so a profile run can
+/// say on its own what the app was doing when it measured what it measured.
+#[tauri::command]
+fn screen_note(app: AppHandle, screen: String) {
+    if screen_name_ok(&screen) {
+        note(&app, &format!("[screen] {screen}"));
     }
 }
 
@@ -3464,6 +3647,7 @@ pub fn run() {
             log_note,
             scroll_bench,
             bench_note,
+            screen_note,
             video_software_decode,
             set_video_software_decode,
             launch_at_login,
@@ -3533,6 +3717,8 @@ pub fn run() {
             // An update installed while this app still ran set the files it held aside (`.pfp-old`); this
             // process no longer uses them, so they go now rather than at the next update.
             std::thread::spawn(sweep_update_leftovers);
+            // Names in the log any call stuck waiting for its lane or for its answer.
+            start_rpc_watchdog(app.handle().clone());
             // The file a cold launch was asked to open. The single-instance callback
             // above never runs for the first process, and this never runs for a second
             // one, so both are needed and neither is a duplicate of the other. This one
@@ -3678,7 +3864,7 @@ pub fn run() {
 mod gate_tests {
     // The gate is tested in isolation: `Gate` carries no `Sidecar`, so these exercise
     // the queueing and mutual-exclusion logic without spawning the Node process.
-    use super::{Gate, Priority};
+    use super::{screen_name_ok, Gate, Priority};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -3766,6 +3952,16 @@ mod gate_tests {
     }
 
     #[test]
+    fn a_screen_note_takes_only_a_screen_name() {
+        assert!(screen_name_ok("people"));
+        assert!(screen_name_ok("person_photos"));
+        let long = "a".repeat(41);
+        for bad in ["", "People", "a b", "x/y", "Violeta", long.as_str()] {
+            assert!(!screen_name_ok(bad), "{bad:?} was let through");
+        }
+    }
+
+    #[test]
     fn every_sidecar_method_has_its_lane_decided() {
         let methods = sidecar_methods();
         assert!(methods.len() > 100, "the handler tables were not read: {}", methods.len());
@@ -3777,6 +3973,52 @@ mod gate_tests {
     fn the_trash_read_ahead_never_holds_up_the_window() {
         assert!(super::is_background(super::priority_for("listTrashedAhead")));
         assert!(!super::is_background(super::priority_for("listTrashed")));
+    }
+
+    #[test]
+    fn the_watchdog_names_calls_stuck_waiting_or_running_and_counts_the_lanes() {
+        let flights = super::Flights::new();
+        let quick = flights.start("getPreview");
+        let waiting = flights.start("semanticSearch");
+        let running = flights.start("getVideo");
+        running.admitted();
+        let behind = flights.start("warmThumbnails");
+        let later = Instant::now() + Duration::from_secs(10);
+        // Nothing is stuck yet.
+        assert!(flights.stuck_report(Instant::now(), 5_000).is_empty());
+        drop(quick);
+        let report = flights.stuck_report(later, 5_000);
+        assert_eq!(report.len(), 4, "{report:?}");
+        assert!(report[0].starts_with("[rpc] semanticSearch stuck lane=fg waiting="), "{report:?}");
+        assert!(report[1].starts_with("[rpc] getVideo stuck lane=fg running="), "{report:?}");
+        assert!(report[2].starts_with("[rpc] warmThumbnails stuck lane=bg waiting="), "{report:?}");
+        assert_eq!(report[3], "[rpc] queue stuck=3 fg_running=1 fg_waiting=1 bg_running=0 bg_waiting=1");
+        drop((waiting, running, behind));
+        assert!(flights.stuck_report(later, 5_000).is_empty(), "every call left with its guard");
+    }
+
+    #[test]
+    fn the_watchdog_names_a_long_call_less_and_less_often() {
+        let flights = super::Flights::new();
+        let walk = flights.start("listExtrasForMount");
+        let start = Instant::now();
+        let named_at: Vec<u64> = (1..=60u64)
+            .map(|tick| tick * 5)
+            .filter(|s| !flights.stuck_report(start + Duration::from_secs(*s), 5_000).is_empty())
+            .collect();
+        // At 5 s, at each doubling of its age, then once a minute.
+        assert_eq!(named_at, vec![5, 10, 20, 40, 80, 140, 200, 260], "{named_at:?}");
+        drop(walk);
+    }
+
+    #[test]
+    fn the_watchdog_caps_a_method_name() {
+        let flights = super::Flights::new();
+        let long = "m".repeat(500);
+        let call = flights.start(&long);
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert!(report[0].len() < 120, "{}", report[0]);
+        drop(call);
     }
 
     #[test]
@@ -3797,6 +4039,17 @@ mod gate_tests {
         }
         assert!(!super::bench_line_ok(&"a".repeat(601)));
     }
+
+    #[test]
+    fn the_watchdog_names_only_so_many_and_counts_the_rest() {
+        let flights = super::Flights::new();
+        let guards: Vec<_> = (0..20).map(|_| flights.start("getPreview")).collect();
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert_eq!(report.len(), super::WATCHDOG_NAMES + 1);
+        assert!(report.last().unwrap().starts_with("[rpc] queue stuck=20 "));
+        drop(guards);
+    }
+
     /// A stand-in sidecar: a shell that writes every line it is sent to `out`.
     #[cfg(unix)]
     fn recording_sidecar(out: &std::path::Path, generation: u64) -> super::Sidecar {

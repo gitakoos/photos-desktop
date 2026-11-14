@@ -23,7 +23,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { request } from "node:http";
 
-import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { startThumbServer, stopThumbServer, takeServerStats } from "./thumbServer.ts";
 import { videoFromBytes, type VideoSource } from "./videoStream.ts";
 
 const PHOTO = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
@@ -262,6 +262,43 @@ describe("the loopback thumbnail server", () => {
       const at = read;
       await new Promise((r) => setTimeout(r, 50));
       expect(read - at).toBeLessThanOrEqual(1);
+    });
+  });
+
+  it("counts the answers open, and how the ended ones went", async () => {
+    takeServerStats();
+    let release!: () => void;
+    const base = await startThumbServer(async (uid) => {
+      if (uid === "slow~one") await new Promise<void>((r) => (release = r));
+      return uid === UID || uid === "slow~one" ? PHOTO : null;
+    });
+    await get(base + encodeURIComponent(UID));
+    await get(base + encodeURIComponent("unknown~uid"));
+    const first = takeServerStats();
+    expect([first.open, first.served, first.missing, first.failed, first.dropped]).toEqual([0, 1, 1, 0, 0]);
+    const pending = get(base + encodeURIComponent("slow~one"));
+    await vi.waitFor(() => expect(takeServerStats().open).toBe(1));
+    const s = takeServerStats();
+    expect(s.open).toBe(1);
+    expect(s.oldestMs).toBeGreaterThanOrEqual(0);
+    release();
+    await pending;
+    await vi.waitFor(() => expect(takeServerStats().open).toBe(0));
+  });
+
+  it("counts an answer the window stopped waiting for as dropped", async () => {
+    takeServerStats();
+    const base = await startThumbServer((_uid, gone) => new Promise((resolve) => gone.addEventListener("abort", () => resolve(null))));
+    const target = new URL(base + encodeURIComponent(UID));
+    const req = request({ hostname: target.hostname, port: target.port, path: target.pathname });
+    req.on("error", () => {});
+    req.end();
+    await vi.waitFor(() => expect(takeServerStats().open).toBe(1));
+    req.destroy();
+    let dropped = 0;
+    await vi.waitFor(() => {
+      dropped += takeServerStats().dropped;
+      expect(dropped).toBe(1);
     });
   });
 

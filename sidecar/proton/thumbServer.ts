@@ -83,6 +83,65 @@ export type VideoLookup = (uid: string) => Promise<VideoSource | null>;
 /** A node uid: base64url halves joined by a tilde. Anything else is refused unread. */
 const UID_SHAPE = /^[A-Za-z0-9_=~-]{1,256}$/;
 
+/**
+ * What the server is doing, for the app's log: the answers still open and since when, and
+ * how the ones that ended went. A thumbnail that never arrives was invisible: the window
+ * shows an empty tile, and nothing anywhere said whether the sidecar was still fetching it
+ * or had never been asked. Counts and ages only, never uids.
+ */
+export type ServerStats = {
+  open: number;
+  oldestMs: number;
+  served: number;
+  missing: number;
+  failed: number;
+  dropped: number;
+};
+const openSince = new Map<number, number>();
+let nextRequest = 0;
+const ended = { served: 0, missing: 0, failed: 0, dropped: 0 };
+
+/** The server's state now, and how the answers that ended since the last call went. */
+export function takeServerStats(now = Date.now()): ServerStats {
+  let oldest = now;
+  for (const since of openSince.values()) oldest = Math.min(oldest, since);
+  const out = { open: openSince.size, oldestMs: now - oldest, ...ended };
+  ended.served = ended.missing = ended.failed = ended.dropped = 0;
+  return out;
+}
+
+/** How often the server's line is written while it has anything to say. */
+const STATS_EVERY_MS = 5_000;
+let statsTimer: ReturnType<typeof setInterval> | null = null;
+
+/** "[HH:MM:SS]" in UTC, as the host stamps its own lines in the same log. */
+function stamp(now = new Date()): string {
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `[${two(now.getUTCHours())}:${two(now.getUTCMinutes())}:${two(now.getUTCSeconds())}]`;
+}
+
+/**
+ * Every few seconds while answers are open or have ended, one line in the app's log:
+ *   [HH:MM:SS] [sidecar] [thumbs] open=<n> oldest=<ms> served=<n> missing=<n> failed=<n> dropped=<n>
+ * `dropped` is answers the window stopped waiting for (a tile scrolled away).
+ */
+function watchServer(): void {
+  if (statsTimer) return;
+  statsTimer = setInterval(() => {
+    const s = takeServerStats();
+    if (s.open + s.served + s.missing + s.failed + s.dropped === 0) {
+      if (statsTimer) clearInterval(statsTimer);
+      statsTimer = null;
+      return;
+    }
+    process.stderr.write(
+      `${stamp()} [sidecar] [thumbs] open=${s.open} oldest=${s.oldestMs} served=${s.served} ` +
+        `missing=${s.missing} failed=${s.failed} dropped=${s.dropped}\n`,
+    );
+  }, STATS_EVERY_MS);
+  statsTimer.unref?.();
+}
+
 let server: Server | null = null;
 let port = 0;
 let token: Buffer | null = null;
@@ -169,14 +228,28 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   if (face && (!box || !faces)) return refuse(404);
 
   const gone = new AbortController();
+  // A video's answer stays open for as long as it plays: counted with the pictures, it
+  // would read as a stall in the server's line, so only pictures are counted.
+  const id = nextRequest++;
+  if (!video) {
+    openSince.set(id, Date.now());
+    watchServer();
+  }
   res.on("close", () => {
     if (!res.writableFinished) gone.abort();
+    if (video) return;
+    openSince.delete(id);
+    if (!res.writableFinished) ended.dropped++;
   });
   if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
   try {
     const bytes = box && faces ? await faces(uid, box, gone.signal, width) : await source(uid, gone.signal, width);
     if (gone.signal.aborted) return;
-    if (!bytes) return refuse(404);
+    if (!bytes) {
+      ended.missing++;
+      return refuse(404);
+    }
+    ended.served++;
     res.writeHead(200, {
       "Content-Type": "image/jpeg",
       "Content-Length": String(bytes.length),
@@ -186,6 +259,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
     });
     res.end(bytes);
   } catch {
+    ended.failed++;
     refuse(500);
   }
 }

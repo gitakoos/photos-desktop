@@ -1624,6 +1624,32 @@ export function Photos({
               ? "offline"
               : uidFilter.back
           : null;
+  // Which screen this is, in a word, written into the app's log as it changes: a profile run
+  // reads it to say what the app was showing when it measured what it measured. Only fixed
+  // screen names, never a person, album or photo.
+  const screen =
+    lightboxIdx !== null
+      ? "viewer"
+      : settingsOpen
+        ? "settings"
+        : splitOpen && view === "photos" && uidFilter?.personId
+          ? "person_split"
+        : view === "photos" && uidFilter
+          ? uidFilter.personId
+            ? "person_photos"
+            : uidFilter.favorites
+              ? "favorites"
+              : uidFilter.offline
+                ? "offline"
+                : "filtered_photos"
+          : view === "albums"
+            ? albumOpen
+              ? "album"
+              : (libraryPage ?? "albums")
+            : view;
+  useEffect(() => {
+    void invoke("screen_note", { screen }).catch(() => {});
+  }, [screen]);
   /** A library page, opened from any view: the sidebar's shortcuts sit beside every page,
    *  not only on the Albums tab the tiles live on. */
   const openLibrary = (page: LibraryPageKind) => {

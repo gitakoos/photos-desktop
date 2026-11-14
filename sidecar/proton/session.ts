@@ -370,6 +370,8 @@ const SCAN_WAITS_FOR_TIMELINE_MS = 3 * 60_000;
 const SCAN_WAITS_FOR_RUN_TO_START_MS = 15_000;
 /** How old a window's read may be (from its start) for a scan to take it. */
 const SCAN_REUSES_TIMELINE_FOR_MS = 10 * 60_000;
+/** Albums shared with this account listed at once for the Explorer folder. */
+const MOUNT_ALBUMS_AT_ONCE = 3;
 /** A copy's save that fails on the network is tried again after these pauses. */
 const UPLOAD_RETRY_MS = [2_000, 5_000];
 
@@ -2516,34 +2518,56 @@ export class ProtonSession {
   async listExtrasForMount(): Promise<MountExtras> {
     if (!this.photos) throw new Error("Not signed in");
     const isMedia = (t: string | null) => !!t && (t.startsWith("image/") || t.startsWith("video/"));
+    // Each part timed for the log (a step name and ms): the whole has held the background lane
+    // for half a minute, and which part did is what the profiler is to say.
+    const timed = async <T>(step: string, work: () => Promise<T>): Promise<T> => {
+      const started = performance.now();
+      try {
+        return await work();
+      } finally {
+        const ms = Math.round(performance.now() - started);
+        if (ms >= 20) diag.log("drive", "step", { step, ms });
+      }
+    };
 
     const photos = this.photos;
-    const trashed = (await this.trash.get(() => readTrash(photos))).filter((t) => t.type !== "album");
-    const shared = await this.getShared(true);
+    const trashed = (await timed("mount_trash", () => this.trash.get(() => readTrash(photos)))).filter(
+      (t) => t.type !== "album",
+    );
+    const shared = await timed("mount_shared", () => this.getShared(true));
     const sharedFiles = shared.filter((s) => s.type !== "album" && isMedia(s.mediaType));
-    const albums: { uid: string; name: string; items: { uid: string; captureTime: number }[] }[] = [];
-    for (const album of shared.filter((s) => s.type === "album")) {
-      const items: { uid: string; captureTime: number }[] = [];
-      try {
-        for await (const item of withStallGuard(
-          this.photos.iterateAlbum(album.uid),
-          SDK_STALL_MS,
-          "iterateAlbum",
-        )) {
-          const uid = (item as any).nodeUid;
-          if (uid) items.push({ uid, captureTime: toMillis((item as any).captureTime) });
+    // The albums shared with this account, a few listed at once rather than one after another.
+    const sharedAlbums = shared.filter((s) => s.type === "album");
+    const albums: { uid: string; name: string; items: { uid: string; captureTime: number }[] }[] = new Array(
+      sharedAlbums.length,
+    );
+    await timed("mount_albums", async () => {
+      let next = 0;
+      const lister = async () => {
+        for (let at = next++; at < sharedAlbums.length; at = next++) {
+          const album = sharedAlbums[at];
+          const items: { uid: string; captureTime: number }[] = [];
+          try {
+            for await (const item of withStallGuard(photos.iterateAlbum(album.uid), SDK_STALL_MS, "iterateAlbum")) {
+              const uid = (item as any).nodeUid;
+              if (uid) items.push({ uid, captureTime: toMillis((item as any).captureTime) });
+            }
+          } catch (e) {
+            process.stderr.write(`[mount] shared album skipped: ${(e as Error).message}\n`);
+          }
+          albums[at] = { uid: album.uid, name: album.name || "Album", items };
         }
-      } catch (e) {
-        process.stderr.write(`[mount] shared album skipped: ${(e as Error).message}\n`);
-      }
-      albums.push({ uid: album.uid, name: album.name || "Album", items });
-    }
+      };
+      await Promise.all(Array.from({ length: Math.min(MOUNT_ALBUMS_AT_ONCE, sharedAlbums.length) }, lister));
+    });
 
-    const meta = await resolveMountMetaBatch(this.photos, [
-      ...trashed.map((t) => t.uid),
-      ...sharedFiles.map((s) => s.uid),
-      ...albums.flatMap((a) => a.items.map((i) => i.uid)),
-    ]);
+    const meta = await timed("mount_meta", () =>
+      resolveMountMetaBatch(photos, [
+        ...trashed.map((t) => t.uid),
+        ...sharedFiles.map((s) => s.uid),
+        ...albums.flatMap((a) => a.items.map((i) => i.uid)),
+      ]),
+    );
     const photo = (uid: string, captureTime: number): MountPhoto[] => {
       const m = meta.get(uid);
       return m ? [{ uid, name: withMediaExtension(m.name, m.mediaType), size: m.size, captureTime }] : [];
