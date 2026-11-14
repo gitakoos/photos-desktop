@@ -53,10 +53,11 @@ import { activeRevisionOf, nodeDurationMs, nodeName, toMillis } from "./nodes.ts
 import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { decryptOriginalTo, metaGet, metaPut, originalGet, originalSize } from "./store.ts";
 import { guarded, writeChunk } from "./fileWrites.ts";
+import { openDownloader } from "./downloadSlots.ts";
 
 // Cap for in-memory video playback. A larger file would strain the sidecar heap
 // and the JSON-RPC channel, so past it the app offers a download instead.
-const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
+export const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
 
 /**
  * The size at which the viewer stops handing originals over the RPC channel and
@@ -248,9 +249,12 @@ export async function getVideo(photos: any, uid: string): Promise<VideoBytes> {
   }
   const node = await photos.getNode(uid);
   const mime = (node as any).mediaType || "video/mp4";
-  const downloader = await photos.getFileDownloader(uid);
+  const { downloader, unused } = await openDownloader(photos, uid);
   const claimed = downloader.getClaimedSizeInBytes?.() ?? 0;
-  if (claimed && claimed > MAX_INMEMORY_VIDEO) throw new Error("VIDEO_TOO_LARGE");
+  if (claimed && claimed > MAX_INMEMORY_VIDEO) {
+    unused(); // a downloader left unused would keep its download slot for good
+    throw new Error("VIDEO_TOO_LARGE");
+  }
 
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -280,7 +284,7 @@ async function saveOne(photos: any, uid: string, destDir: string): Promise<boole
       withMediaExtension(safeFileName(nodeName(node) || uid), (node as any).mediaType),
     );
     dest = join(destDir, name);
-    const downloader = await photos.getFileDownloader(uid);
+    const downloader = (await openDownloader(photos, uid)).downloader;
     file = guarded(createWriteStream(dest));
     const handle = file;
     const stream = new WritableStream<Uint8Array>({
@@ -670,7 +674,7 @@ export function startHydrate(photos: any, uid: string, dir?: string): { path: st
   const file = guarded(createWriteStream(dest, { fd: openSync(dest, "w", 0o600) }));
   void (async () => {
     try {
-      const downloader = await photos.getFileDownloader(uid);
+      const downloader = (await openDownloader(photos, uid)).downloader;
       const stream = new WritableStream<Uint8Array>({
         write(chunk) {
           // Refusing the next chunk is what stops a download nobody wants any more.
@@ -717,7 +721,7 @@ export async function hydrateFile(photos: any, uid: string, dir?: string): Promi
   const base = hydrateDir(dir);
   if (base !== tmpdir()) mkdirSync(base, { recursive: true, mode: 0o700 });
   const dest = join(base, `pfp-hyd-${randomUUID()}.bin`);
-  const downloader = await photos.getFileDownloader(uid);
+  const downloader = (await openDownloader(photos, uid)).downloader;
   const file = guarded(createWriteStream(dest));
   let total = 0;
   const stream = new WritableStream<Uint8Array>({
@@ -947,8 +951,13 @@ async function streamOriginal(
   let file: ReturnType<typeof createWriteStream> | null = null;
   let buffered: Buffer[] | null = null;
   try {
-    const downloader = await photos.getFileDownloader(entry.uid);
-    if (viewing !== entry) return; // moved on while the downloader was being set up
+    const { downloader, unused } = await openDownloader(photos, entry.uid);
+    if (viewing !== entry) {
+      // Moved on while the downloader was being set up. Its download slot goes back: left
+      // with it, stepping through the viewer used up every slot, and then every download.
+      unused();
+      return;
+    }
 
     const claimed = Number(downloader.getClaimedSizeInBytes?.() ?? 0);
     // Unknown size takes the file route: it is the one that cannot be caught out by

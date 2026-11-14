@@ -212,6 +212,8 @@ export const en: Record<string, string> = {
   "settings.diagnosticsFailed": "The diagnostics could not be made. Try again.",
   "settings.diagDetailed": "Detailed logging",
   "settings.diagDetailedDesc": "Also notes the time of every photo and file step, not only the slow ones. Turn it on while looking into something slow.",
+  "settings.softwareVideo": "Decode video in software",
+  "settings.softwareVideoDesc": "Turn on if videos stop with a decode error when you skip ahead. Uses more CPU than the graphics card. Takes effect after a restart.",
   "settings.myFiles": "My files",
   "settings.myFilesNav": "Bring photos and videos in from Proton Drive folders",
   "settings.uploadQuality": "Upload quality",

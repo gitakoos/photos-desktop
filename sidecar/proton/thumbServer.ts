@@ -21,7 +21,8 @@
  */
 
 /**
- * Grid thumbnails served to the window over loopback HTTP, the way a web page gets its
+ * Grid thumbnails (and, at `<uid>/v`, videos to play, a byte range at a time) served to
+ * the window over loopback HTTP, the way a web page gets its
  * images: the webview fetches several at once, decodes them off its main thread, and
  * never waits on the one request channel to the host. Before, each thumbnail crossed
  * that channel as base64 inside JSON, a batch at a time behind whatever else was queued,
@@ -41,6 +42,9 @@
 
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { parseFaceBox, type FaceBox } from "./faceCover.ts";
+import { parseRange, type VideoSource } from "./videoStream.ts";
+import { diag } from "./diag.ts";
 
 /**
  * The bytes of one grid thumbnail, or null when there is none to give. `gone` fires when
@@ -49,6 +53,12 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
  */
 export type ThumbnailSource = (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
 
+/** A person's cover cut to the face in `box`, for `/t/<token>/<uid>/f/<l,t,r,b>`. */
+export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal) => Promise<Buffer | null>;
+
+/** A video to play, for `/t/<token>/<uid>/v`, read a byte range at a time. */
+export type VideoLookup = (uid: string) => Promise<VideoSource | null>;
+
 /** A node uid: base64url halves joined by a tilde. Anything else is refused unread. */
 const UID_SHAPE = /^[A-Za-z0-9_=~-]{1,256}$/;
 
@@ -56,13 +66,21 @@ let server: Server | null = null;
 let port = 0;
 let token: Buffer | null = null;
 let source: ThumbnailSource | null = null;
+let faces: FaceSource | null = null;
+let videos: VideoLookup | null = null;
 
 /**
  * Starts serving (or keeps serving) and mints a fresh token, so a URL from before the
  * last lock is dead. Returns the base the window appends a uid to.
  */
-export async function startThumbServer(from: ThumbnailSource): Promise<string> {
+export async function startThumbServer(
+  from: ThumbnailSource,
+  faceFrom?: FaceSource,
+  videoFrom?: VideoLookup,
+): Promise<string> {
   source = from;
+  faces = faceFrom ?? null;
+  videos = videoFrom ?? null;
   token = randomBytes(32);
   if (!server) {
     const created = createServer((req, res) => void handle(req, res));
@@ -81,6 +99,8 @@ export async function startThumbServer(from: ThumbnailSource): Promise<string> {
 export async function stopThumbServer(): Promise<void> {
   token = null;
   source = null;
+  faces = null;
+  videos = null;
   const running = server;
   server = null;
   port = 0;
@@ -95,12 +115,18 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
     res.writeHead(code, { "Cache-Control": "no-store" });
     res.end();
   };
-  if (req.method !== "GET") return refuse(405);
+  const head = req.method === "HEAD";
+  if (req.method !== "GET" && !head) return refuse(405);
   if (req.headers.host !== `127.0.0.1:${port}`) return refuse(403);
 
-  // `/t/<token>/<uid>`, nothing else.
+  // `/t/<token>/<uid>`, `/t/<token>/<uid>/f/<l,t,r,b>` for a cover cut to a face, or
+  // `/t/<token>/<uid>/v` for a video to play.
   const parts = (req.url ?? "").split("?")[0].split("/");
-  if (parts.length !== 4 || parts[0] !== "" || parts[1] !== "t") return refuse(404);
+  const face = parts.length === 6 && parts[4] === "f";
+  const video = parts.length === 5 && parts[4] === "v";
+  if ((parts.length !== 4 && !face && !video) || parts[0] !== "" || parts[1] !== "t") return refuse(404);
+  // A player may ask what a video is before it asks for it; a thumbnail is only fetched.
+  if (head && !video) return refuse(405);
   const given = Buffer.from(parts[2], "base64url");
   const current = token;
   if (!current || given.length !== current.length || !timingSafeEqual(given, current)) {
@@ -113,13 +139,16 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
     return refuse(400);
   }
   if (!UID_SHAPE.test(uid) || !source) return refuse(404);
+  const box = face ? parseFaceBox(parts[5]) : null;
+  if (face && (!box || !faces)) return refuse(404);
 
   const gone = new AbortController();
   res.on("close", () => {
     if (!res.writableFinished) gone.abort();
   });
+  if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
   try {
-    const bytes = await source(uid, gone.signal);
+    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal);
     if (gone.signal.aborted) return;
     if (!bytes) return refuse(404);
     res.writeHead(200, {
@@ -131,5 +160,83 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
     res.end(bytes);
   } catch {
     refuse(500);
+  }
+}
+
+/**
+ * One range of a video, or all of it, as a player asks: `206 Partial Content` for a
+ * `Range`, written as it is decrypted and no faster than the player takes it, and stopped
+ * as soon as the player hangs up (it does, every time it seeks).
+ */
+async function serveVideo(
+  uid: string,
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  head: boolean,
+  gone: AbortSignal,
+  refuse: (code: number) => void,
+): Promise<void> {
+  const lookup = videos;
+  if (!lookup) return refuse(404);
+  let video: VideoSource | null;
+  try {
+    video = await lookup(uid);
+  } catch {
+    return refuse(500);
+  }
+  if (gone.aborted) return;
+  if (!video || video.size <= 0) return refuse(404);
+  const range = parseRange(req.headers.range, video.size);
+  if (range === "unsatisfiable") {
+    const asked = /^bytes=(\d+)/.exec(String(req.headers.range ?? ""));
+    diag.log("drive", "video_range_refused", { size: video.size, from: asked ? Number(asked[1]) : -1 });
+    res.writeHead(416, { "Content-Range": `bytes */${video.size}`, "Cache-Control": "no-store" });
+    res.end();
+    return;
+  }
+  const start = range?.start ?? 0;
+  const end = range?.end ?? video.size - 1;
+  res.writeHead(range ? 206 : 200, {
+    "Content-Type": video.mime,
+    "Content-Length": String(end - start + 1),
+    "Accept-Ranges": "bytes",
+    ...(range ? { "Content-Range": `bytes ${start}-${end}/${video.size}` } : {}),
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  if (head) {
+    res.end();
+    return;
+  }
+  const length = end - start + 1;
+  let sent = 0;
+  try {
+    for await (const piece of video.read(start, end, gone)) {
+      if (gone.aborted) break;
+      sent += piece.length;
+      if (!res.write(piece)) {
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            res.off("drain", done);
+            res.off("close", done);
+            resolve();
+          };
+          res.on("drain", done);
+          res.on("close", done);
+        });
+      }
+    }
+    if (gone.aborted) return;
+    // Fewer bytes than were promised: ending the answer normally would leave the player
+    // waiting for the rest for ever. Cutting the connection makes it give up, and the
+    // viewer falls back.
+    if (sent < length) {
+      diag.log("drive", "video_cut", { start, sent, length });
+      res.destroy();
+    } else res.end();
+  } catch {
+    // The headers are out: all that can be said now is that the answer stops short.
+    diag.log("drive", "video_cut", { start, sent, length, failed: 1 });
+    res.destroy();
   }
 }

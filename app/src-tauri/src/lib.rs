@@ -3279,7 +3279,82 @@ mod update_leftover_tests {
     }
 }
 
+/// GStreamer's GPU decoders for H.264 and HEVC (VA-API, the older VA-API plugin, NVDEC),
+/// ranked below the software ones (1, not off: still used where there is no software one).
+#[cfg(target_os = "linux")]
+const SOFTWARE_VIDEO_RANKS: &str = "vah264dec:1,vah265dec:1,vaapih264dec:1,vaapih265dec:1,\
+nvh264dec:1,nvh265dec:1,nvh264sldec:1,nvh265sldec:1";
+
+/// The file whose presence turns software video decoding on (Settings, Linux). A plain file
+/// rather than a setting: it is read before the window exists, before the keyring is open.
+const SOFTWARE_VIDEO_FLAG: &str = "video-software-decode";
+
+/// The app's data folder as Tauri resolves it on Linux, worked out before Tauri runs.
+#[cfg(target_os = "linux")]
+fn early_data_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("eu.akoos.photos.desktop"))
+}
+
+/// The ranks to run with, from those inherited: ours (with the switch on) and then any the
+/// person set themselves, which win; None for none at all. Ours are taken off what is
+/// inherited first: a restart from Settings starts the new process with this one's
+/// environment, which carried them even after the switch was turned off.
+#[cfg(target_os = "linux")]
+fn video_ranks(inherited: Option<&str>, on: bool) -> Option<String> {
+    let mut theirs = inherited.unwrap_or("");
+    while let Some(rest) = theirs.strip_prefix(SOFTWARE_VIDEO_RANKS) {
+        theirs = rest.strip_prefix(',').unwrap_or(rest);
+    }
+    let theirs = theirs.trim();
+    match (on, theirs.is_empty()) {
+        (true, true) => Some(SOFTWARE_VIDEO_RANKS.to_string()),
+        (true, false) => Some(format!("{SOFTWARE_VIDEO_RANKS},{theirs}")),
+        (false, true) => None,
+        (false, false) => Some(theirs.to_string()),
+    }
+}
+
+/// Whether video is decoded in software (Settings).
+#[tauri::command]
+fn video_software_decode(app: AppHandle) -> bool {
+    secure_store::app_dir(&app).map(|d| d.join(SOFTWARE_VIDEO_FLAG).exists()).unwrap_or(false)
+}
+
+/// Turns software video decoding on or off; it takes effect at the next start.
+#[tauri::command]
+fn set_video_software_decode(app: AppHandle, on: bool) -> Result<(), String> {
+    let path = secure_store::app_dir(&app)?.join(SOFTWARE_VIDEO_FLAG);
+    if on {
+        std::fs::write(&path, b"1").map_err(|e| e.to_string())
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
 pub fn run() {
+    // On Linux the window plays video through GStreamer. With some GPUs its hardware decoder
+    // fails to decode at the new place after a seek in 4K phone videos, which software
+    // decoding plays and seeks in. Settings has a switch for that: with it on, the GPU
+    // decoders rank below the software ones. Set before anything starts, so the web process
+    // inherits it.
+    #[cfg(target_os = "linux")]
+    {
+        let on = early_data_dir().is_some_and(|d| d.join(SOFTWARE_VIDEO_FLAG).exists());
+        let inherited = std::env::var("GST_PLUGIN_FEATURE_RANK").ok();
+        match video_ranks(inherited.as_deref(), on) {
+            Some(ranks) if inherited.as_deref() != Some(ranks.as_str()) => std::env::set_var("GST_PLUGIN_FEATURE_RANK", ranks),
+            None if inherited.is_some() => std::env::remove_var("GST_PLUGIN_FEATURE_RANK"),
+            _ => {}
+        }
+    }
+
     // Keep the WebView2 profile inside the app's own data folder so, on an
     // installed build, everything (session, caches, WebView data) lives under the
     // single install folder and the uninstaller wipes it all together.
@@ -3347,6 +3422,8 @@ pub fn run() {
             reveal_window,
             page_settled,
             log_note,
+            video_software_decode,
+            set_video_software_decode,
             launch_at_login,
             set_launch_at_login,
             hide_tray_popup,
@@ -3629,6 +3706,21 @@ mod gate_tests {
             }
         }
         out
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn software_video_ranks_leave_the_persons_own_last() {
+        use super::{video_ranks, SOFTWARE_VIDEO_RANKS as OURS};
+        assert_eq!(video_ranks(None, true).as_deref(), Some(OURS));
+        assert!(!OURS.contains(' ') && OURS.starts_with("vah264dec:1,"));
+        assert_eq!(video_ranks(Some("x:0"), true), Some(format!("{OURS},x:0")));
+        assert_eq!(video_ranks(None, false), None);
+        assert_eq!(video_ranks(Some("x:0"), false).as_deref(), Some("x:0"));
+        // Inherited across a restart from Settings: ours come off, and are not doubled.
+        assert_eq!(video_ranks(Some(OURS), false), None);
+        assert_eq!(video_ranks(Some(&format!("{OURS},x:0")), false).as_deref(), Some("x:0"));
+        assert_eq!(video_ranks(Some(&format!("{OURS},{OURS},x:0")), true), Some(format!("{OURS},x:0")));
     }
 
     #[test]

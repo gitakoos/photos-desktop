@@ -53,6 +53,7 @@ import {
   SESSION_FILE,
   isReady,
   originalGet,
+  originalSize,
   metaGet,
   metaPut,
   readSealedOrDiscard,
@@ -123,6 +124,9 @@ import { isTransient, withRetry } from "./transient.ts";
 import { activeRevisionOf, nodeDurationMs, nodeLocation, nodeName, toMillis } from "./nodes.ts";
 import { isStall, SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { FaceCovers } from "./faceCover.ts";
+import { OpenVideos, downloadVideo, seekVideo, videoFromBytes, type SeekableStream, type SeekingVideo, type VideoSource } from "./videoStream.ts";
+import { SDK_SLOTS, lendSlot, openDownloader, slotsInUse } from "./downloadSlots.ts";
 import { sameAccount } from "./accountSwitch.ts";
 import { hostNotice } from "./hostCall.ts";
 import {
@@ -150,6 +154,7 @@ import {
   type OriginalStatus,
   type SaveStatus,
   type VideoBytes,
+  MAX_INMEMORY_VIDEO,
 } from "./download.ts";
 import {
   cloudEditorSource as runCloudEditorSource,
@@ -333,6 +338,19 @@ const TIMELINE_CEILING = 1_000_000;
 const CRYPTO_CACHE_LIMIT = 20_000;
 /** How many photos' read text is kept, for going back to one of them. */
 const OCR_KEPT = 40;
+/**
+ * The largest video downloaded whole to play from the thumbnail server, held in the sidecar's
+ * memory while it plays (at most two at once, so 600 MB at most), its signature checked; a
+ * larger one is read from Proton range by range as it plays (see `SeekingVideo`), holding one
+ * of the SDK's download slots while it is open.
+ */
+const MAX_STREAMED_VIDEO = 300 * 1024 * 1024;
+/** How many streams a large video reads on at most, and how long one more may wait for a slot. */
+const VIDEO_LANES = 3;
+const LANE_WAIT_MS = 2_000;
+/** How often a large video's lanes are looked at, and how long unread before it sheds them. */
+const LANE_CHECK_MS = 5_000;
+const LANE_IDLE_MS = 15_000;
 /** A copy's save that fails on the network is tried again after these pauses. */
 const UPLOAD_RETRY_MS = [2_000, 5_000];
 
@@ -1143,6 +1161,8 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.faceCovers.clear();
+    this.videos.clear();
     lockVault();
     this.offlineResume = null;
     this.retried = null;
@@ -1244,6 +1264,8 @@ export class ProtonSession {
     faceScanner.setSource(null);
     duplicateFinder.setSource(null);
     this.thumbWaiting.clear();
+    this.faceCovers.clear();
+    this.videos.clear();
     this.timelineRun = null;
     this.session = null;
     this.photos = null;
@@ -1274,6 +1296,8 @@ export class ProtonSession {
     labelStore.unload();
     hiddenStore.unload();
     this.thumbWaiting.clear();
+    this.faceCovers.clear();
+    this.videos.clear();
     this.legacySignIn = false;
     lockVault();
     this.removeStoredAccount();
@@ -1763,9 +1787,12 @@ export class ProtonSession {
       const kept = originalGet(uid);
       if (kept) return kept;
       try {
-        const downloader = await photos.getFileDownloader(uid);
+        const { downloader, unused } = await openDownloader(photos, uid);
         const claimed = downloader.getClaimedSizeInBytes?.() ?? 0;
-        if (claimed > SCAN_ORIGINAL_MAX_BYTES) return null;
+        if (claimed > SCAN_ORIGINAL_MAX_BYTES) {
+          unused(); // too large to read: its download slot goes back unused
+          return null;
+        }
         const chunks: Uint8Array[] = [];
         let total = 0;
         const sink = new WritableStream<Uint8Array>({
@@ -1966,6 +1993,18 @@ export class ProtonSession {
 
   /** Uncached thumbnails asked for over the thumbnail server, gathered into one fetch. */
   private thumbWaiting = new Map<string, ((bytes: Buffer | null) => void)[]>();
+  /**
+   * People's covers cut to their faces, from the HD preview (the grid thumbnail when a
+   * photo has none, or the preview cannot be had), for the thumbnail server.
+   */
+  private faceCovers = new FaceCovers(async (uid) => {
+    const preview = await this.previewBytes(uid).catch(() => null);
+    if (preview) return { bytes: preview, keep: true };
+    const thumb = thumbGet(uid, ThumbnailType.Type1);
+    return thumb ? { bytes: thumb, keep: false } : null;
+  });
+  /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
+  private videos = new OpenVideos((uid) => this.videoSource(uid));
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
   private thumbFetching = 0;
 
@@ -1975,7 +2014,13 @@ export class ProtonSession {
    */
   async thumbServer(): Promise<{ base: string }> {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
-    return { base: await startThumbServer((uid, gone) => this.thumbnailFor(uid, gone)) };
+    return {
+      base: await startThumbServer(
+        (uid, gone) => this.thumbnailFor(uid, gone),
+        (uid, box, gone) => this.faceCovers.get(uid, box, gone),
+        (uid) => this.videos.get(uid),
+      ),
+    };
   }
 
   /**
@@ -2132,8 +2177,14 @@ export class ProtonSession {
   /** HD preview (Type2 thumbnail) for the image viewer / lightbox. */
   async getPreview(uid: string, signal?: AbortSignal): Promise<string | null> {
     if (!this.photos && !this.offlineOnly) throw new Error("Not signed in");
+    const bytes = await this.previewBytes(uid, signal);
+    return bytes ? toDataUrl(bytes) : null;
+  }
+
+  /** The HD preview's bytes: from the sealed cache, else fetched and sealed for next time. */
+  private async previewBytes(uid: string, signal?: AbortSignal): Promise<Buffer | null> {
     const cached = thumbGet(uid, ThumbnailType.Type2);
-    if (cached) return toDataUrl(cached);
+    if (cached) return cached;
     if (!this.photos) return null;
 
     // The same guard as the grid's thumbnails above, for the same reason: this is the
@@ -2147,7 +2198,7 @@ export class ProtonSession {
         if ((r as any).ok) {
           const bytes = Buffer.from((r as any).thumbnail);
           thumbPut(uid, ThumbnailType.Type2, bytes);
-          return toDataUrl(bytes);
+          return bytes;
         }
         return null;
       }
@@ -2159,6 +2210,94 @@ export class ProtonSession {
   }
 
   // ---- Download ----
+
+  /**
+   * A video for the window to play over the thumbnail server, a range at a time. A copy
+   * kept offline plays from the disk, with or without Proton, when it is small enough to
+   * hold (the sealed copy is decrypted whole); otherwise it is streamed from Proton. Null
+   * when neither can be had, or Proton does not say how large the video is, which ranges
+   * need: the window then falls back to `getVideo`.
+   */
+  private async videoSource(uid: string): Promise<VideoSource | null> {
+    const keptType = metaGet(uid)?.mediaType ?? "";
+    if (isOfflineReady(uid) && keptType.startsWith("video/")) {
+      const size = originalSize(uid);
+      if (size !== null && size <= MAX_INMEMORY_VIDEO) {
+        const stored = originalGet(uid);
+        if (stored) return videoFromBytes(stored, keptType);
+      }
+    }
+    if (!this.photos) return null;
+    const node = await this.photos.getNode(uid);
+    const mime = (node as any)?.mediaType || "video/mp4";
+    if (!String(mime).startsWith("video/")) return null;
+    // The downloader holds one of the SDK's few download slots from here until a download
+    // of it ends: every way out below either downloads (whose end gives it back) or gives
+    // it back without downloading.
+    const opened = await openDownloader(this.photos, uid);
+    const { downloader, unused, stop } = opened;
+    const size = downloader.getClaimedSizeInBytes?.() ?? 0;
+    if (!size) {
+      unused();
+      return null;
+    }
+    // Too large to hold whole while it plays: read from Proton range by range as it plays,
+    // on more than one stream when slots are free.
+    if (size > MAX_STREAMED_VIDEO) {
+      const video = seekVideo(downloader, size, mime, opened);
+      if (video) void this.moreLanes(uid, video);
+      return video;
+    }
+    return downloadVideo(downloader, size, mime, stop);
+  }
+
+  /**
+   * Gives a large video more streams to read ahead on, each its own downloader, while slots
+   * are free (one is always left for anything else). Each is lent: another download that
+   * needs its slot has it back.
+   */
+  private async moreLanes(uid: string, video: SeekingVideo): Promise<void> {
+    // Looked at again every so often while it is open: slots taken at the start may be free
+    // later, and a video not played for a while gives its extra lanes up for the one that is.
+    while (!video.done()) {
+      if (video.idleFor() > LANE_IDLE_MS) video.shed();
+      else await this.addLanes(uid, video);
+      await new Promise((resolve) => setTimeout(resolve, LANE_CHECK_MS).unref?.());
+    }
+  }
+
+  private async addLanes(uid: string, video: SeekingVideo): Promise<void> {
+    while (video.laneCount() < VIDEO_LANES) {
+      if (!this.photos || video.done() || slotsInUse().count >= SDK_SLOTS - 1) return;
+      let opened: Awaited<ReturnType<typeof openDownloader>>;
+      try {
+        opened = await openDownloader(this.photos, uid, LANE_WAIT_MS, { borrow: true });
+      } catch {
+        return;
+      }
+      // The same file as the first stream reads: a version uploaded since would serve other
+      // bytes for the same places.
+      if ((opened.downloader.getClaimedSizeInBytes?.() ?? 0) !== video.size) {
+        opened.unused();
+        return;
+      }
+      let stream: SeekableStream;
+      try {
+        stream = opened.downloader.getSeekableStream();
+      } catch {
+        opened.unused();
+        return;
+      }
+      let unlend = () => {};
+      const leave = video.addLane(stream, () => {
+        unlend();
+        opened.stop.abort();
+        opened.released();
+      });
+      if (!leave) return;
+      unlend = lendSlot(leave);
+    }
+  }
 
   async getVideo(uid: string): Promise<VideoBytes> {
     // A copy kept offline plays from the disk, with or without Proton.

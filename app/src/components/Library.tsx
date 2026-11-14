@@ -25,7 +25,8 @@ import { useThumbnails } from "../hooks/useThumbnails";
 import { CheckIcon, ChevronRightIcon } from "./icons";
 import { FaceNamer } from "./FaceNamer";
 import type { LooseFace } from "../lib/localFaces";
-import { cachedPreview, loadPreview } from "../lib/previewStore";
+import { useThumbServerBase } from "../lib/thumbStore";
+import { faceCoverUrl } from "../lib/faceCoverUrl";
 import { useT } from "../lib/i18n";
 import "../styles/Library.css";
 
@@ -90,26 +91,45 @@ export function LibraryTiles({ tiles }: { tiles: Tile[] }) {
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 const FACE_ZOOM_OUT = 1.4;
 
-/**
- * The cover cut to the face: the picture is scaled and moved so a square FACE_ZOOM_OUT times
- * the face fills its square frame, kept inside the picture. Until the picture's own shape is
- * known it is shown whole.
- */
+/** A person's cover cut to their face: a square FACE_ZOOM_OUT times the face. */
 export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
+  // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it.
+  // The thumbnail server cuts the face out of the HD preview and serves it card-sized, so
+  // the window decodes a small square rather than a 1920 px preview per person, and a
+  // cover off screen is never asked for (the image loads lazily).
+  const base = useThumbServerBase();
+  const cut = base && box ? faceCoverUrl(base, uid, box) : null;
+  const [cutFailed, setCutFailed] = useState<string | null>(null);
+  const [cutShown, setCutShown] = useState<string | null>(null);
+  if (!cut || cutFailed === cut) return <ThumbFaceCover thumb={thumb} box={box} />;
+  // The grid thumbnail, already in, is cut to the face at once and stays until the sharp
+  // cut has loaded over it, so a card is never blank while its cut is made.
+  const ready = cutShown === cut;
+  return (
+    <>
+      {!ready && <ThumbFaceCover thumb={thumb} box={box} />}
+      <img
+        src={cut}
+        alt=""
+        draggable={false}
+        loading="lazy"
+        style={ready ? undefined : { opacity: 0 }}
+        onLoad={() => setCutShown(cut)}
+        onError={() => setCutFailed(cut)}
+      />
+    </>
+  );
+}
+
+/**
+ * The grid thumbnail cut to the face in the window: the picture is scaled and moved so a
+ * square FACE_ZOOM_OUT times the face fills its square frame, kept inside the picture.
+ * For when the thumbnail server cannot cut it. Until the picture's own shape is known it
+ * is shown whole.
+ */
+function ThumbFaceCover({ thumb, box }: { thumb: string; box: FaceBox | null }) {
   const [aspect, setAspect] = useState<number | null>(null);
-  // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it:
-  // the larger preview takes its place once it is in.
-  const [preview, setPreview] = useState<string | null>(() => cachedPreview(uid) ?? null);
-  useEffect(() => {
-    let live = true;
-    void loadPreview(uid).then((url) => {
-      if (live && url) setPreview(url);
-    });
-    return () => {
-      live = false;
-    };
-  }, [uid]);
-  const src = preview ?? thumb;
+  const src = thumb;
   let style: CSSProperties | undefined;
   if (box && aspect) {
     const [l, top, r, b] = box;
@@ -125,10 +145,14 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
     style = { position: "absolute", width: `${width}%`, height: `${height}%`, left: `${left}%`, top: `${topPct}%`, objectFit: "fill" };
   }
   return (
+    // Lazy, as the cut over it is: a page of people mounts every card, and an eager picture
+    // here fetched and decoded every person's grid thumbnail, on screen or not (8000 in one
+    // visit to People in the profile).
     <img
       src={src}
       alt=""
       draggable={false}
+      loading="lazy"
       style={style}
       onLoad={(e) => {
         const img = e.currentTarget;
@@ -190,7 +214,7 @@ function EntryCard({
             <FaceCover uid={entry.cover} thumb={cover} box={entry.box} />
           </span>
         ) : (
-          <img className="lib-cardimg" src={cover} alt="" draggable={false} />
+          <img className="lib-cardimg" src={cover} alt="" draggable={false} loading="lazy" />
         )
       ) : null}
       <span className="lib-cardtext">
