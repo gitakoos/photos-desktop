@@ -1507,9 +1507,11 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         }
 
         // Stream the temp file into the placeholder. The OS requires each transfer to
-        // be 4KiB or to end exactly on the file size, so send full 4KiB chunks with a
-        // smaller final chunk, holding only one chunk in memory at a time.
-        const CHUNK: usize = 4096;
+        // be a multiple of 4KiB or to end exactly on the file size. Each chunk is one
+        // CfExecute call, so a large chunk keeps a big video from costing hundreds of
+        // thousands of them.
+        const CHUNK: usize = 1 << 20;
+        const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
         let transfer = (|| -> Result<(), CloudErrorKind> {
             let mut f = std::fs::File::open(&temp).map_err(|e| {
                 crate::note(&self.app, &format!("[cloud] hydrate open temp failed: {e:?}"));
@@ -1518,6 +1520,7 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
             let mut buf = vec![0u8; CHUNK];
             let mut offset = 0u64;
             let mut remaining = got;
+            let mut reported = std::time::Instant::now();
             while remaining > 0 {
                 let this = std::cmp::min(CHUNK as u64, remaining) as usize;
                 f.read_exact(&mut buf[..this]).map_err(|e| {
@@ -1530,7 +1533,10 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
                 })?;
                 offset += this as u64;
                 remaining -= this as u64;
-                let _ = ticket.report_progress(got, offset);
+                if remaining == 0 || reported.elapsed() >= PROGRESS_EVERY {
+                    let _ = ticket.report_progress(got, offset);
+                    reported = std::time::Instant::now();
+                }
             }
             Ok(())
         })();
