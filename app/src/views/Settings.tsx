@@ -3454,6 +3454,56 @@ function DiagnosticsRows({
           onChange={(e) => onChange({ ...settings, diagDetailed: e.currentTarget.checked })}
         />
       </label>
+      {!isWindows && <SoftwareVideoRow />}
+    </>
+  );
+}
+
+/**
+ * Video decoded in software rather than on the graphics card (Linux, where the window plays
+ * video through GStreamer). Some cards' decoders fail at the new place after a seek in 4K
+ * phone videos. The host reads it before the window starts, so it takes a restart.
+ */
+function SoftwareVideoRow() {
+  const t = useT();
+  const [on, setOn] = useState<boolean | null>(null);
+  const [changed, setChanged] = useState(false);
+  useEffect(() => {
+    invoke<boolean>("video_software_decode")
+      .then(setOn)
+      .catch(() => setOn(false));
+  }, []);
+  return (
+    <>
+      <label className="st-row">
+        <span className="st-row-ico" aria-hidden>
+          <PlayArrowIcon size={18} />
+        </span>
+        <div className="st-text">
+          <div className="st-label">{t("settings.softwareVideo")}</div>
+          <div className="st-desc">{t("settings.softwareVideoDesc")}</div>
+        </div>
+        <input
+          className="st-switch"
+          type="checkbox"
+          checked={!!on}
+          disabled={on === null}
+          onChange={(e) => {
+            const next = e.currentTarget.checked;
+            setOn(next);
+            setChanged(true);
+            invoke("set_video_software_decode", { on: next }).catch(() => setOn(!next));
+          }}
+        />
+      </label>
+      {changed && (
+        <div className="st-restart">
+          <span>{t("settings.restartNeeded")}</span>
+          <button className="st-restart-btn" onClick={() => void invoke("restart_app")}>
+            {t("settings.restartNow")}
+          </button>
+        </div>
+      )}
     </>
   );
 }

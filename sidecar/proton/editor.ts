@@ -42,6 +42,7 @@ import sharp from "sharp";
 
 import { activeRevisionOf, toMillis } from "./nodes.ts";
 import { mediaAttributes, thumbnailPair } from "./upload.ts";
+import { openDownloader } from "./downloadSlots.ts";
 
 /** The longest edge the editor works at, matching the local-file editor's working cap. */
 const EDIT_MAX_EDGE = 4096;
@@ -116,7 +117,7 @@ export function editedName(sourceName: string, when: Date): string {
 
 /** Download one node's decrypted original into a Buffer. */
 export async function downloadToBuffer(photos: any, uid: string): Promise<Buffer> {
-  const downloader = await photos.getFileDownloader(uid);
+  const downloader = (await openDownloader(photos, uid)).downloader;
   const chunks: Uint8Array[] = [];
   const stream = new WritableStream<Uint8Array>({
     write(chunk) {

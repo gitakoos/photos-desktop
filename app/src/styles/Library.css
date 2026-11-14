@@ -103,6 +103,10 @@
   background: var(--bg2);
   cursor: pointer;
   isolation: isolate;
+  /* A page of people mounts every card: one off screen is neither laid out nor painted,
+     and its lazy cover is not fetched. Its size stays its own, set by the column width
+     and the aspect ratio above, so the scrollbar does not move as cards come and go. */
+  content-visibility: auto;
 }
 .lib-card::after {
   content: "";
