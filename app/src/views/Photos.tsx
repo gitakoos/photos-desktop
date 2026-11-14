@@ -24,6 +24,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -131,11 +132,13 @@ import { ShareDialog } from "../components/ShareDialog";
 import { FilterPanel, type MediaType } from "../components/FilterPanel";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
 import { VirtualSections } from "../components/VirtualSections";
+import { CanvasSections } from "../components/CanvasSections";
 import {
   cachedThumbnail,
   connectThumbServer,
   disconnectThumbServer,
   thumbUrl,
+  useThumbServerBase,
 } from "../lib/thumbStore";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { DebugHud } from "../components/DebugHud";
@@ -143,6 +146,7 @@ import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
 import { useLocalFaces } from "../hooks/useLocalFaces";
 import { inTimelineOrder, isScanSpeed, scanBusy, statusLine, type PersonView } from "../lib/localFaces";
 import { PersonActions, PersonPicker } from "../components/PersonActions";
+import { PersonSplit } from "../components/PersonSplit";
 import { PersonFindPanel } from "../components/PersonFindPanel";
 import { DateEditPanel } from "../components/DateEditPanel";
 import { photoSpanLabel } from "../lib/albumSpan";
@@ -156,6 +160,9 @@ import { useLang, useT } from "../lib/i18n";
 import { isWindows } from "../lib/platform";
 import { onThisDay, seasons } from "../lib/memories";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
+import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
+import { bench, benchCount, benchSpan } from "../lib/benchProbe";
+import { maybeRunScrollBench } from "../lib/scrollBench";
 import "../styles/Photos.css";
 
 /** Each category's mark in the filter menu, where there is one to draw. */
@@ -289,6 +296,8 @@ export function Photos({
   offline?: boolean;
   onSignOut: () => void;
 }) {
+  // For the scroll measurement only (see `scrollBench`): when this draw of the view began.
+  const benchFrom = bench.on ? performance.now() : 0;
   const t = useT();
   const [allItems, setItems] = useState<TimelineItem[]>([]);
   // What is hidden stays out of every list below; only the Hidden page reads `allItems`.
@@ -472,8 +481,23 @@ export function Photos({
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The scroll measurement, in a run of the app started for one and in no other: the
+  // timeline scrolls itself and the log says what each second cost (see `scrollBench`).
+  useEffect(() => {
+    void maybeRunScrollBench(() => scrollRef.current);
+  }, []);
+  // And, while one runs, what each draw of this whole view costs: from its start to its
+  // changes being in the page. A draw of the view takes every list under it along.
+  useLayoutEffect(() => {
+    if (bench.on && benchFrom) {
+      benchCount("photos");
+      benchSpan("photos_ms", benchFrom);
+    }
+  });
   // Escape belongs to the lightbox while it is open.
   const sel = useSelection(scrollRef, lightboxIdx === null);
+  // Where the canvas timeline fetches its thumbnails; until it is known, the DOM grid shows.
+  const thumbBase = useThumbServerBase();
   const { selected } = sel;
   // Whether one of the selection's actions is still working, so the bar can stand
   // down instead of taking a second click on work already in flight. The ref is what
@@ -622,34 +646,49 @@ export function Photos({
   // Warm the whole thumbnail cache in the background so scrolling to any month is
   // instant instead of decrypting on demand. Gentle: small batches with a pause
   // between, and it stands aside whenever something more urgent needs the sidecar.
+  //
+  // The timeline arrives a page at a time, and each page starts this again. What was
+  // warmed is remembered across those restarts, so a new page carries on where the last
+  // pass stopped rather than going back through the whole library from the top, and the
+  // pass a new page replaces lets go of its request, so it is dropped from the host's
+  // queue instead of waiting there behind the mount listing for its turn.
+  const warmedRef = useRef(new Set<string>());
   useEffect(() => {
     if (items.length === 0) return;
-    let cancelled = false;
+    const stop = new AbortController();
     const uids = items.map((it) => it.uid);
     (async () => {
       // Kept small so one uninterruptible warm request is only ever a few
       // thumbnails: an interactive call waits at most one short batch, not twelve.
       const BATCH = 4;
-      for (let i = 0; i < uids.length && !cancelled; i += BATCH) {
+      for (const batch of unwarmedBatches(uids, warmedRef.current, BATCH)) {
+        if (stop.signal.aborted) break;
         // Stand aside while a photo is open, the mount is hydrating, or another
         // view is on screen and wants the channel for its own data.
         while (
-          !cancelled &&
+          !stop.signal.aborted &&
           (lightboxOpenRef.current || mountBusyRef.current || offTimelineRef.current)
         ) {
           await new Promise((r) => setTimeout(r, 300));
         }
-        if (cancelled) break;
+        if (stop.signal.aborted) break;
+        // The sidecar fetches only a couple of missing thumbnails per call and counts
+        // what the batch now has cached, so a batch is asked for again until all of it is
+        // ready, and remembered only then. One that stops getting further (a photo with
+        // no thumbnail, a stalled fetch) is left for a later pass to try again.
         try {
-          await rpc("warmThumbnails", { uids: uids.slice(i, i + BATCH) });
+          const whole = await warmWholeBatch(batch, (uids) =>
+            rpc<{ ready: number }>("warmThumbnails", { uids }, { signal: stop.signal }),
+          );
+          if (whole) for (const uid of batch) warmedRef.current.add(uid);
         } catch {
-          /* keep warming the rest */
+          /* keep warming the rest; a batch let go of is warmed by the next pass */
         }
         await new Promise((r) => setTimeout(r, 400)); // yield to on-screen requests
       }
     })();
     return () => {
-      cancelled = true;
+      stop.abort();
     };
   }, [items.length]);
 
@@ -1138,6 +1177,10 @@ export function Photos({
   const [peopleBusy, setPeopleBusy] = useState(false);
   // The side panel of photos that might be the person open on screen.
   const [findOpen, setFindOpen] = useState(false);
+  // The split of the person open on the page into two people (see PersonSplit).
+  const [splitOpen, setSplitOpen] = useState(false);
+  // A split belongs to the person it was opened on: another person's page starts without one.
+  useEffect(() => setSplitOpen(false), [uidFilter?.personId]);
   // The photos the date editor is open for, and the run it started, followed while it lasts.
   const [dateEditUids, setDateEditUids] = useState<string[] | null>(null);
   const [dateStatus, setDateStatus] = useState<DateEditStatus | null>(null);
@@ -2749,6 +2792,7 @@ export function Photos({
                 onReject={async () => {
                   await localFaces.act("facePersonReject", { id: uidFilter.personId });
                 }}
+                onSplit={() => setSplitOpen(true)}
                 findOpen={findOpen}
                 onFind={
                   localEntries.named.some((e) => e.personId === uidFilter.personId)
@@ -3505,7 +3549,33 @@ export function Photos({
               </div>
             )}
 
-            {hidingKnown && <VirtualSections
+            {hidingKnown && (thumbBase ? (
+              // The timeline drawn on a canvas: the DOM grid could not keep up with a wide
+              // window's hundreds of tiles (see CanvasSections). It needs the thumbnail server.
+              <CanvasSections
+                scrollRef={scrollRef}
+                sections={virtualSections}
+                cellSize={cellSize}
+                base={thumbBase}
+                header={timelineSort.by === "name" ? undefined : (s) => (
+                  <div className="g-monthhdr">
+                    <span className="g-monthtitle">{s.key}</span>
+                    <span className="g-monthcount">
+                      {t(s.items.length === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+                        count: s.items.length,
+                      })}
+                    </span>
+                  </div>
+                )}
+                selected={selected}
+                onToggle={sel.toggle}
+                onOpen={onCellClick}
+                onContext={onCellContext}
+                offlineUids={offlineUids}
+                localUids={localUids}
+                covered={settingsOpen || uploadOpen}
+              />
+            ) : <VirtualSections
               scrollRef={scrollRef}
               sections={virtualSections}
               cellSize={cellSize}
@@ -3531,7 +3601,7 @@ export function Photos({
                   localUids={localUids}
                 />
               )}
-            />}
+            />)}
           </>
         )}
         </div>
@@ -3548,6 +3618,16 @@ export function Photos({
           }}
           onClose={() => setDateEditUids(null)}
           top={scrollRef.current?.offsetTop ?? 0}
+        />
+      )}
+      {splitOpen && view === "photos" && uidFilter?.personId && settings.localFaces && (
+        <PersonSplit
+          key={uidFilter.personId}
+          personId={uidFilter.personId}
+          name={localEntries.named.some((e) => e.personId === uidFilter.personId) ? uidFilter.name : null}
+          names={localEntries.named.filter((e) => e.personId !== uidFilter.personId).map((e) => e.name)}
+          act={(method, params) => localFaces.act(method, params)}
+          onClose={() => setSplitOpen(false)}
         />
       )}
       {findOpen && view === "photos" && uidFilter?.personId && settings.localFaces && (

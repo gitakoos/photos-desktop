@@ -624,6 +624,18 @@ export function CallMergeIcon({ size = 16 }: Props) {
 }
 
 /** The same figure with a minus: taking a photo away from a person. */
+/** One path parting into two, the merge icon turned over: a person split in two. */
+export function CallSplitIcon({ size = 16 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M6 10V5h5" />
+      <path d="M18 10V5h-5" />
+      <path d="M12 21v-7.5a4 4 0 0 0 -1.2 -2.8L6 5.5" />
+      <path d="M12 13.5a4 4 0 0 1 1.2 -2.8L18 5.5" />
+    </svg>
+  );
+}
+
 export function PersonRemoveIcon({ size = 16 }: Props) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>

@@ -38,6 +38,7 @@
 // turns it into characters. The photo never leaves the computer.
 
 import { readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 
 import { cleanTextBlocks, looksReadable, type TextBlock } from "./ocrCleanup.ts";
 import { detectQuads, detectionLimitSide, detectorInputSize, type DetectedQuad } from "./ocrGeometry.ts";
@@ -126,14 +127,27 @@ function closeSessions(): void {
 }
 
 /**
- * On the processor, with every thread since the user is waiting: the three networks are small,
- * and the reader's input width changes with every run, which the graphics card path handles badly.
+ * Threads a read runs on. The three networks are small, so a few threads take nearly all of
+ * the gain; the runtime's default of one per core (58 threads and 14 cores busy on a 16-core
+ * machine) left the window and the sidecar's own work starved while a read ran.
+ */
+const OCR_THREADS = Math.max(2, Math.min(4, availableParallelism() - 1));
+
+/**
+ * On the processor: the reader's input width changes with every run, which the graphics card
+ * path handles badly.
  */
 async function openSessions(): Promise<Sessions> {
   if (sessions) return sessions;
   const ort = await import("onnxruntime-node");
   const open = (path: string) =>
-    ort.InferenceSession.create(path, { executionProviders: ["cpu"], graphOptimizationLevel: "basic", logSeverityLevel: 3 });
+    ort.InferenceSession.create(path, {
+      executionProviders: ["cpu"],
+      graphOptimizationLevel: "basic",
+      intraOpNumThreads: OCR_THREADS,
+      interOpNumThreads: 1,
+      logSeverityLevel: 3,
+    });
   const [det, cls, rec] = await Promise.all([open(models.det.path()), open(models.cls.path()), open(models.rec.path())]);
   const dictionary = buildCharacterDictionary(readFileSync(models.dict.path(), "utf8").split(/\r?\n/).filter((l, i, all) => l.length || i < all.length - 1));
   sessions = { det, cls, rec, dictionary };

@@ -212,6 +212,8 @@ export const pl: Record<string, string> = {
   "settings.diagnosticsFailed": "Nie udało się utworzyć diagnostyki. Spróbuj ponownie.",
   "settings.diagDetailed": "Szczegółowe logowanie",
   "settings.diagDetailedDesc": "Zapisuje też czas każdego kroku zdjęć i plików, nie tylko wolnych. Włącz, gdy badasz coś powolnego.",
+  "settings.softwareVideo": "Dekoduj wideo programowo",
+  "settings.softwareVideoDesc": "Włącz, jeśli filmy zatrzymują się z błędem dekodowania przy przewijaniu. Używa więcej procesora niż karta graficzna. Działa po ponownym uruchomieniu.",
   "settings.myFiles": "Moje pliki",
   "settings.myFilesNav": "Przenieś zdjęcia i filmy z folderów Proton Drive",
   "settings.uploadQuality": "Jakość przesyłania",

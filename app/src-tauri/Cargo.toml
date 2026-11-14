@@ -35,6 +35,9 @@ tauri-build = { version = "2", features = [] }
 #                   scope in tauri.conf.json, and nothing else.
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
 tauri-plugin-opener = "2"
+# `sync` - the Notify a frontend call waits on for its turn at the sidecar, so a call
+#          queued behind others holds no thread (already in the tree through tauri).
+tokio = { version = "1", features = ["sync"] }
 # Single-instance: a second launch focuses the running window instead of starting
 # a duplicate copy.
 tauri-plugin-single-instance = "2"
@@ -194,6 +197,11 @@ winreg = "0.52"
 # Seals the store's AES-256-GCM data key at rest with user-scope DPAPI. No entry is
 # created anywhere the system can enumerate (no credential store, no registry).
 windows-dpapi = "0.2"
+
+[dev-dependencies]
+# A single-threaded runtime for the gate's tests: many queued calls on one thread is what
+# shows that a call waiting for its turn holds no thread of its own.
+tokio = { version = "1", features = ["rt", "sync"] }
 
 # Non-Windows (Linux): seal the same store key through the OS keyring, which on a Linux
 # desktop is the Secret Service (gnome-keyring / kwallet) over D-Bus. Under Flatpak this

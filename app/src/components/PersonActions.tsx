@@ -23,7 +23,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Confirm } from "./Confirm";
 import { FaceCover, type LibraryEntry } from "./Library";
-import { CallMergeIcon, CloseIcon, FaceIcon, PencilIcon, SearchIcon } from "./icons";
+import { CallMergeIcon, CallSplitIcon, CloseIcon, FaceIcon, PencilIcon, SearchIcon } from "./icons";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { useT } from "../lib/i18n";
 import "../styles/Confirm.css";
@@ -47,6 +47,7 @@ export function PersonActions({
   onReject,
   onFind,
   findOpen,
+  onSplit,
 }: {
   /** The person's name, or null while unnamed. */
   name: string | null;
@@ -60,6 +61,8 @@ export function PersonActions({
   /** Opens or closes the side panel of photos that might be them; named people only. */
   onFind?: () => void;
   findOpen?: boolean;
+  /** Opens the split of this person in two, for two people grouped as one. */
+  onSplit?: () => void;
 }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
@@ -176,6 +179,12 @@ export function PersonActions({
         <button className="g-tool g-tooltext" onClick={() => setMerging(true)}>
           <CallMergeIcon size={15} />
           <span>{t("faces.merge")}</span>
+        </button>
+      )}
+      {onSplit && (
+        <button className="g-tool g-tooltext" onClick={onSplit}>
+          <CallSplitIcon size={15} />
+          <span>{t("faces.split")}</span>
         </button>
       )}
       <button className="g-tool g-tooltext" onClick={() => setConfirmReject(true)}>

@@ -20,6 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { PhotoTag } from "@protontech/drive-sdk";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -51,6 +52,7 @@ import {
   startSaveOriginals,
   withMediaExtension,
   type OriginalStatus,
+  listForMount,
 } from "./download.ts";
 import { nodeDurationMs } from "./nodes.ts";
 
@@ -919,5 +921,53 @@ describe("mountFates", () => {
   it("ignores an answer for a photo it did not ask about", async () => {
     const photos = photosWith([{ missingUid: "x" }, { uid: "a" }]);
     expect(await mountFates(photos, ["a"])).toEqual({ a: "present" });
+  });
+});
+
+describe("listForMount from the window's timeline", () => {
+  beforeEach(() => {
+    setDataKey(randomBytes(32));
+    initStore(mkdtempSync(join(tmpdir(), "pfp-mount-tl-")));
+    resetDownloadState();
+  });
+
+  const timeline = [
+    { uid: "uid-A", captureTime: 3000, tags: [] as number[] },
+    { uid: "uid-H", captureTime: 2000, tags: [] as number[] },
+    { uid: "uid-F", captureTime: 1000, tags: [PhotoTag.Favorites] },
+  ];
+  const photos = () => ({
+    ...countingPhotos((uid: string) => fakeNode(uid, `${uid}.jpg`, "image/jpeg", 10)),
+    iterateTimeline: async function* () {
+      throw new Error("the timeline must not be read again");
+    },
+  });
+
+  it("lists from the timeline it is given, without reading the timeline again", async () => {
+    const page = await listForMount(photos(), 0, 10, (uid) => uid === "uid-H", timeline);
+    expect(page.total).toBe(2);
+    expect(page.items.map((i) => [i.uid, i.captureTime, i.favorite])).toEqual([
+      ["uid-A", 3000, false],
+      ["uid-F", 1000, true],
+    ]);
+  });
+
+  it("pages on through what the first page took", async () => {
+    const p = photos();
+    await listForMount(p, 0, 1, () => false, timeline);
+    const second = await listForMount(p, 1, 1);
+    expect(second.items.map((i) => i.uid)).toEqual(["uid-H"]);
+    expect(second.total).toBe(3);
+  });
+
+  it("reads the timeline itself without one", async () => {
+    const p = {
+      ...countingPhotos((uid: string) => fakeNode(uid, `${uid}.jpg`, "image/jpeg", 10)),
+      iterateTimeline: async function* () {
+        yield { nodeUid: "uid-Z", captureTime: new Date(5000), tags: [] };
+      },
+    };
+    const page = await listForMount(p, 0, 10);
+    expect(page.items.map((i) => i.uid)).toEqual(["uid-Z"]);
   });
 });
