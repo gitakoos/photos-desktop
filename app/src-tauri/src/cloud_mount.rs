@@ -385,19 +385,28 @@ pub fn reap_temp_leftovers() {
     // the folder, so a copy an earlier run left behind is only a stray.
     let _ = std::fs::remove_dir_all(std::env::temp_dir().join("pfp-drop"));
 
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let ours = (name.starts_with("pfp-hyd-") && name.ends_with(".bin"))
-            || (name.starts_with("pfp-uninstall-old-") && name.ends_with(".exe"))
-            || (name.starts_with("pfp-cleanup-") && name.ends_with(".ps1"));
-        if ours {
-            let _ = std::fs::remove_file(entry.path());
+    // %TEMP% can hold tens of thousands of entries, so it is scanned off the startup path.
+    // A hydration of this run may already be staging there, so only older files go.
+    let started = std::time::SystemTime::now();
+    std::thread::spawn(move || {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let ours = (name.starts_with("pfp-hyd-") && name.ends_with(".bin"))
+                || (name.starts_with("pfp-uninstall-old-") && name.ends_with(".exe"))
+                || (name.starts_with("pfp-cleanup-") && name.ends_with(".ps1"));
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|modified| modified < started);
+            if ours && stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
-    }
+    });
 }
 
 #[cfg(not(windows))]
