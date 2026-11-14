@@ -271,6 +271,31 @@ export function writeSealedAtomic(path: string, plain: Buffer): void {
 }
 
 /**
+ * The trash's items as last read (see trash.ts), sealed among the node metadata so they go
+ * with it at a wipe: a trashed item never changes while it is in the trash, and decrypting
+ * every one again at each start took tens of seconds on a large trash.
+ */
+export function trashItemsGet(): Record<string, unknown> | null {
+  if (!isReady()) return null;
+  try {
+    const plain = readSealedOrDiscard(join(metaDir(), "trash-items.bin"));
+    return plain ? (JSON.parse(plain.toString("utf8")) as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function trashItemsPut(items: Record<string, unknown>): void {
+  if (!isReady()) return;
+  try {
+    mkdirSync(metaDir(), { recursive: true });
+    writeSealedAtomic(join(metaDir(), "trash-items.bin"), Buffer.from(JSON.stringify(items), "utf8"));
+  } catch {
+    /* best-effort, as the rest of the cache */
+  }
+}
+
+/**
  * Read a sealed file, discarding it if it will not open. Null covers both outcomes, so
  * a caller handles "nothing saved" once.
  *

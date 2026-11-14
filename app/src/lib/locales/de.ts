@@ -210,6 +210,8 @@ export const de: Record<string, string> = {
   "settings.diagnosticsFailed": "Die Diagnose konnte nicht erstellt werden. Versuch es erneut.",
   "settings.diagDetailed": "Ausführliche Protokollierung",
   "settings.diagDetailedDesc": "Notiert auch die Zeit jedes Foto- und Dateischritts, nicht nur der langsamen. Schalte sie ein, während du etwas Langsames untersuchst.",
+  "settings.softwareVideo": "Video per Software dekodieren",
+  "settings.softwareVideoDesc": "Einschalten, wenn Videos beim Vorspulen mit einem Dekodierfehler stehen bleiben. Braucht mehr CPU als die Grafikkarte. Wirkt nach einem Neustart.",
   "settings.myFiles": "Meine Dateien",
   "settings.myFilesNav": "Fotos und Videos aus Proton Drive-Ordnern übernehmen",
   "settings.uploadQuality": "Upload-Qualität",

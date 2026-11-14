@@ -156,6 +156,7 @@ import { useLang, useT } from "../lib/i18n";
 import { isWindows } from "../lib/platform";
 import { onThisDay, seasons } from "../lib/memories";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
+import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
 import "../styles/Photos.css";
 
 /** Each category's mark in the filter menu, where there is one to draw. */
@@ -622,34 +623,49 @@ export function Photos({
   // Warm the whole thumbnail cache in the background so scrolling to any month is
   // instant instead of decrypting on demand. Gentle: small batches with a pause
   // between, and it stands aside whenever something more urgent needs the sidecar.
+  //
+  // The timeline arrives a page at a time, and each page starts this again. What was
+  // warmed is remembered across those restarts, so a new page carries on where the last
+  // pass stopped rather than going back through the whole library from the top, and the
+  // pass a new page replaces lets go of its request, so it is dropped from the host's
+  // queue instead of waiting there behind the mount listing for its turn.
+  const warmedRef = useRef(new Set<string>());
   useEffect(() => {
     if (items.length === 0) return;
-    let cancelled = false;
+    const stop = new AbortController();
     const uids = items.map((it) => it.uid);
     (async () => {
       // Kept small so one uninterruptible warm request is only ever a few
       // thumbnails: an interactive call waits at most one short batch, not twelve.
       const BATCH = 4;
-      for (let i = 0; i < uids.length && !cancelled; i += BATCH) {
+      for (const batch of unwarmedBatches(uids, warmedRef.current, BATCH)) {
+        if (stop.signal.aborted) break;
         // Stand aside while a photo is open, the mount is hydrating, or another
         // view is on screen and wants the channel for its own data.
         while (
-          !cancelled &&
+          !stop.signal.aborted &&
           (lightboxOpenRef.current || mountBusyRef.current || offTimelineRef.current)
         ) {
           await new Promise((r) => setTimeout(r, 300));
         }
-        if (cancelled) break;
+        if (stop.signal.aborted) break;
+        // The sidecar fetches only a couple of missing thumbnails per call and counts
+        // what the batch now has cached, so a batch is asked for again until all of it is
+        // ready, and remembered only then. One that stops getting further (a photo with
+        // no thumbnail, a stalled fetch) is left for a later pass to try again.
         try {
-          await rpc("warmThumbnails", { uids: uids.slice(i, i + BATCH) });
+          const whole = await warmWholeBatch(batch, (uids) =>
+            rpc<{ ready: number }>("warmThumbnails", { uids }, { signal: stop.signal }),
+          );
+          if (whole) for (const uid of batch) warmedRef.current.add(uid);
         } catch {
-          /* keep warming the rest */
+          /* keep warming the rest; a batch let go of is warmed by the next pass */
         }
         await new Promise((r) => setTimeout(r, 400)); // yield to on-screen requests
       }
     })();
     return () => {
-      cancelled = true;
+      stop.abort();
     };
   }, [items.length]);
 

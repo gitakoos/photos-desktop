@@ -210,6 +210,8 @@ export const nl: Record<string, string> = {
   "settings.diagnosticsFailed": "De diagnose kon niet worden gemaakt. Probeer het opnieuw.",
   "settings.diagDetailed": "Uitgebreide logboekregistratie",
   "settings.diagDetailedDesc": "Noteert ook de tijd van elke foto- en bestandsstap, niet alleen de trage. Zet het aan terwijl je iets traags onderzoekt.",
+  "settings.softwareVideo": "Video in software decoderen",
+  "settings.softwareVideoDesc": "Zet aan als video’s stoppen met een decodeerfout wanneer je vooruitspoelt. Gebruikt meer CPU dan de videokaart. Werkt na een herstart.",
   "settings.myFiles": "Mijn bestanden",
   "settings.myFilesNav": "Foto's en video's uit Proton Drive-mappen overnemen",
   "settings.uploadQuality": "Uploadkwaliteit",
