@@ -203,7 +203,7 @@ fn classified(method: &str) -> Option<Priority> {
         // short, and wanted now.
         "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
         | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
-        | "facePeople" | "facePersonCandidates" | "labelsList" | "labelsOf" | "myFilesList"
+        | "facePeople" | "facePersonCandidates" | "faceSplitStart" | "faceSplitPlan" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
         | "duplicatesGroups" => Priority::UserAction,
 
@@ -235,6 +235,7 @@ fn classified(method: &str) -> Option<Priority> {
         | "faceSearchClear" | "faceNameFaces" | "faceRejectFaces" | "faceNotThisPerson" | "facePersonRename"
         | "facePersonMerge" | "facePersonReject" | "facePersonDecline" | "facePersonCover"
         | "facePersonAddFaces" | "facePersonRemovePhotos" | "faceSuggestionDismiss"
+        | "faceSplitApply" | "faceSplitUndo"
         | "faceSweepStart" | "faceSweepStop" | "labelsAdd" | "labelsRemove" | "labelsSet"
         | "labelCreate" | "labelRename" | "labelDelete" | "sharedBackupSet" | "sharedBackupNow"
         | "diagSave" | "diagSetDetailed" | "duplicatesStart" | "duplicatesTrash"

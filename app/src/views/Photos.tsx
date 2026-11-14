@@ -146,6 +146,7 @@ import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
 import { useLocalFaces } from "../hooks/useLocalFaces";
 import { inTimelineOrder, isScanSpeed, scanBusy, statusLine, type PersonView } from "../lib/localFaces";
 import { PersonActions, PersonPicker } from "../components/PersonActions";
+import { PersonSplit } from "../components/PersonSplit";
 import { PersonFindPanel } from "../components/PersonFindPanel";
 import { DateEditPanel } from "../components/DateEditPanel";
 import { photoSpanLabel } from "../lib/albumSpan";
@@ -1176,6 +1177,10 @@ export function Photos({
   const [peopleBusy, setPeopleBusy] = useState(false);
   // The side panel of photos that might be the person open on screen.
   const [findOpen, setFindOpen] = useState(false);
+  // The split of the person open on the page into two people (see PersonSplit).
+  const [splitOpen, setSplitOpen] = useState(false);
+  // A split belongs to the person it was opened on: another person's page starts without one.
+  useEffect(() => setSplitOpen(false), [uidFilter?.personId]);
   // The photos the date editor is open for, and the run it started, followed while it lasts.
   const [dateEditUids, setDateEditUids] = useState<string[] | null>(null);
   const [dateStatus, setDateStatus] = useState<DateEditStatus | null>(null);
@@ -2787,6 +2792,7 @@ export function Photos({
                 onReject={async () => {
                   await localFaces.act("facePersonReject", { id: uidFilter.personId });
                 }}
+                onSplit={() => setSplitOpen(true)}
                 findOpen={findOpen}
                 onFind={
                   localEntries.named.some((e) => e.personId === uidFilter.personId)
@@ -3612,6 +3618,16 @@ export function Photos({
           }}
           onClose={() => setDateEditUids(null)}
           top={scrollRef.current?.offsetTop ?? 0}
+        />
+      )}
+      {splitOpen && view === "photos" && uidFilter?.personId && settings.localFaces && (
+        <PersonSplit
+          key={uidFilter.personId}
+          personId={uidFilter.personId}
+          name={localEntries.named.some((e) => e.personId === uidFilter.personId) ? uidFilter.name : null}
+          names={localEntries.named.filter((e) => e.personId !== uidFilter.personId).map((e) => e.name)}
+          act={(method, params) => localFaces.act(method, params)}
+          onClose={() => setSplitOpen(false)}
         />
       )}
       {findOpen && view === "photos" && uidFilter?.personId && settings.localFaces && (
