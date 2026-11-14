@@ -23,6 +23,7 @@
 import { useSyncExternalStore } from "react";
 import { rpc } from "./rpc";
 import { isLightboxOpen } from "./lightboxSignal";
+import { dropTileImages } from "./tileImages";
 
 // ---- The sidecar's loopback thumbnail server ----
 //
@@ -35,6 +36,9 @@ let serverBase: string | null = null;
 const serverListeners = new Set<() => void>();
 
 function setServerBase(base: string | null): void {
+  // The pictures kept for tiles belong to the address they came from: a lock or a
+  // sign-out takes them with it, and a new token would never ask for them anyway.
+  if (base !== serverBase) dropTileImages();
   serverBase = base;
   for (const listener of serverListeners) listener();
 }

@@ -20,6 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { drawnGridIn } from "../lib/gridRegistry";
 import {
   useCallback,
   useEffect,
@@ -222,8 +223,16 @@ export function useSelection(containerRef: RefObject<HTMLElement | null>, escEna
     // press that turns out to be a plain click pays nothing. The timeline builds only the
     // months near the screen, so tiles keep appearing as the band scrolls: any not yet
     // measured are added as they come, and the ones already left behind keep their place.
-    const nodes = containerRef.current?.querySelectorAll<HTMLElement>("[data-uid]");
-    if (!drag.cells || (nodes && nodes.length !== drag.seen)) {
+    // A grid drawn on a canvas has no tile elements: it says where its tiles are, the ones
+    // between the band's top and bottom, which is all that is tested below.
+    const drawn = drawnGridIn(drag.scroller);
+    const nodes = drawn ? null : containerRef.current?.querySelectorAll<HTMLElement>("[data-uid]");
+    if (drawn) {
+      drag.cells = drawn.cells(
+        Math.min(drag.contentY, p.y + scrollTop),
+        Math.max(drag.contentY, p.y + scrollTop),
+      );
+    } else if (!drag.cells || (nodes && nodes.length !== drag.seen)) {
       const cells = drag.cells ?? [];
       const known = new Set(cells.map((c) => c.uid));
       nodes?.forEach((el) => {

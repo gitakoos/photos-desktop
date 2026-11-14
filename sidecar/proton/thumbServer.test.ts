@@ -31,7 +31,7 @@ const UID = "dm9sdW1l~bGluaw==";
 const source = async (uid: string) => (uid === UID ? PHOTO : null);
 
 /** A raw GET, so the method and the Host header can be anything a caller might send. */
-function get(url: string, options: { method?: string; host?: string; range?: string } = {}) {
+function get(url: string, options: { method?: string; host?: string; range?: string; origin?: string } = {}) {
   const target = new URL(url);
   return new Promise<{ status: number; headers: Record<string, unknown>; body: Buffer }>(
     (resolve, reject) => {
@@ -39,11 +39,12 @@ function get(url: string, options: { method?: string; host?: string; range?: str
         {
           hostname: target.hostname,
           port: target.port,
-          path: target.pathname,
+          path: target.pathname + target.search,
           method: options.method ?? "GET",
           headers: {
             ...(options.host ? { Host: options.host } : {}),
             ...(options.range ? { Range: options.range } : {}),
+            ...(options.origin ? { Origin: options.origin } : {}),
           },
         },
         (res) => {
@@ -76,6 +77,22 @@ describe("the loopback thumbnail server", () => {
     expect(res.headers["content-type"]).toBe("image/jpeg");
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("lets the app's own window read a thumbnail from a worker, and no other origin", async () => {
+    const base = await startThumbServer(source);
+    const url = base + encodeURIComponent(UID);
+
+    const app = await get(url, { origin: "tauri://localhost" });
+    expect(app.status).toBe(200);
+    expect(app.headers["access-control-allow-origin"]).toBe("tauri://localhost");
+    expect(app.headers["vary"]).toBe("Origin");
+    expect((await get(url, { origin: "http://tauri.localhost" })).headers["access-control-allow-origin"]).toBe("http://tauri.localhost");
+
+    for (const origin of ["https://example.com", "null", "tauri://localhost.example.com"]) {
+      const other = await get(url, { origin });
+      expect(other.headers["access-control-allow-origin"]).toBeUndefined();
+    }
   });
 
   it("refuses a wrong token, and one from before the last start", async () => {
@@ -246,6 +263,20 @@ describe("the loopback thumbnail server", () => {
       await new Promise((r) => setTimeout(r, 50));
       expect(read - at).toBeLessThanOrEqual(1);
     });
+  });
+
+  it("passes on the size a tile asks for, rounded up, and the full thumbnail without one", async () => {
+    const widths: (number | undefined)[] = [];
+    const base = await startThumbServer(async (_uid, _gone, width) => {
+      widths.push(width);
+      return PHOTO;
+    });
+    await get(base + encodeURIComponent(UID) + "?w=150");
+    await get(base + encodeURIComponent(UID) + "?w=150&a=2");
+    await get(base + encodeURIComponent(UID));
+    await get(base + encodeURIComponent(UID) + "?w=4000");
+    await get(base + encodeURIComponent(UID) + "?w=x");
+    expect(widths).toEqual([192, 192, undefined, undefined, undefined]);
   });
 
   it("stops answering at lock", async () => {

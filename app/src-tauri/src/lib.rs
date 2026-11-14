@@ -2368,6 +2368,36 @@ fn log_note(app: AppHandle, message: String) {
     note(&app, &format!("[ui] {short}"));
 }
 
+/// Whether this run of the app was started to measure scrolling: `PFP_SCROLL_BENCH` set to
+/// anything but nothing or `0`. Asked once by the window, which cannot read the environment
+/// itself; with it set, the timeline scrolls on its own and logs what that cost.
+fn scroll_bench_asked() -> bool {
+    std::env::var_os("PFP_SCROLL_BENCH").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+#[tauri::command]
+fn scroll_bench() -> bool {
+    scroll_bench_asked()
+}
+
+/// Whether a line of the scroll measurement may go into the log: a word and `name=number`
+/// fields, so lowercase letters, digits, `_`, `=`, `-` and spaces, and no longer than a
+/// line of it ever is. Nothing a photo is called, and no address, can be written in that.
+fn bench_line_ok(line: &str) -> bool {
+    !line.is_empty()
+        && line.len() <= 600
+        && line.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'=' | b'-' | b' '))
+}
+
+/// One line of the scroll measurement, from the window into the log. Taken only in a run
+/// started for a measurement, and only in the shape a measurement writes.
+#[tauri::command]
+fn bench_note(app: AppHandle, line: String) {
+    if scroll_bench_asked() && bench_line_ok(&line) {
+        note(&app, &format!("[bench] {line}"));
+    }
+}
+
 /// The current start-with-Windows preference, for the Settings toggle.
 #[tauri::command]
 fn launch_at_login() -> bool {
@@ -3430,6 +3460,8 @@ pub fn run() {
             reveal_window,
             page_settled,
             log_note,
+            scroll_bench,
+            bench_note,
             video_software_decode,
             set_video_software_decode,
             launch_at_login,
@@ -3745,6 +3777,24 @@ mod gate_tests {
         assert!(!super::is_background(super::priority_for("listTrashed")));
     }
 
+    #[test]
+    fn a_measurement_line_holds_counts_and_times_and_nothing_else() {
+        assert!(super::bench_line_ok("sec n=12 phase=down fr=31 p50=24 late_pct=88 top=120394"));
+        assert!(super::bench_line_ok("skip reason=no_grid waited=20000"));
+        // Nothing with the shape of a name, a path, an address or a uid gets through.
+        for bad in [
+            "",
+            "sec name=IMG_2041.JPG",
+            "sec url=http://127.0.0.1:4000/t/abc",
+            "sec uid=AbCd~EfGh",
+            "sec path=/home/user/photo",
+            "sec n=1\n[host] forged",
+            "sec note=caf\u{e9}",
+        ] {
+            assert!(!super::bench_line_ok(bad), "{bad:?}");
+        }
+        assert!(!super::bench_line_ok(&"a".repeat(601)));
+    }
     /// A stand-in sidecar: a shell that writes every line it is sent to `out`.
     #[cfg(unix)]
     fn recording_sidecar(out: &std::path::Path, generation: u64) -> super::Sidecar {

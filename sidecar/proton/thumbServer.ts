@@ -35,7 +35,8 @@
  *     browser cannot guess a URL;
  *   - the Host header must be this address exactly, so a hostname rebound to 127.0.0.1
  *     by a web page is refused;
- *   - no CORS header is sent, so no other origin can read a response;
+ *   - a CORS header is sent to the app's own window and nothing else (see APP_ORIGINS), so
+ *     no other origin can read a response;
  *   - responses carry `no-store`: the webview must not keep a decrypted thumbnail in its
  *     own disk cache, where the only copy on disk until now has been the sealed one.
  */
@@ -45,13 +46,33 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { parseFaceBox, type FaceBox } from "./faceCover.ts";
 import { parseRange, type VideoSource } from "./videoStream.ts";
 import { diag } from "./diag.ts";
+import { thumbWidthFor } from "./thumbSizes.ts";
+
+/**
+ * The origins the app's own window runs at: Tauri's on Linux and macOS, and on Windows. Not
+ * the dev server's: any other local server on that port could then read thumbnails, and in
+ * development the grid makes do with its page fallback. The canvas timeline fetches thumbnails from a worker (see the window's
+ * tileWorker) rather than through <img>, and a fetch across origins may read the answer only
+ * if the server says its origin may. Only these are told so; every other origin reads
+ * nothing, as before, and still needs the token to ask at all.
+ */
+export const APP_ORIGINS: ReadonlySet<string> = new Set([
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+]);
+
+/** The CORS headers for a request from `origin`: none unless it is the app's window. */
+function corsFor(origin: string | undefined): Record<string, string> {
+  return origin && APP_ORIGINS.has(origin) ? { "Access-Control-Allow-Origin": origin, Vary: "Origin" } : { Vary: "Origin" };
+}
 
 /**
  * The bytes of one grid thumbnail, or null when there is none to give. `gone` fires when
  * the webview stops waiting, as it does for a tile scrolled away, so the thumbnail is not
  * fetched ahead of the ones still on screen.
  */
-export type ThumbnailSource = (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
+export type ThumbnailSource = (uid: string, gone: AbortSignal, width?: number) => Promise<Buffer | null>;
 
 /** A person's cover cut to the face in `box`, for `/t/<token>/<uid>/f/<l,t,r,b>`. */
 export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal) => Promise<Buffer | null>;
@@ -111,8 +132,9 @@ export async function stopThumbServer(): Promise<void> {
 }
 
 async function handle(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) {
+  const cors = corsFor(req.headers.origin);
   const refuse = (code: number) => {
-    res.writeHead(code, { "Cache-Control": "no-store" });
+    res.writeHead(code, { "Cache-Control": "no-store", ...cors });
     res.end();
   };
   const head = req.method === "HEAD";
@@ -120,8 +142,12 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   if (req.headers.host !== `127.0.0.1:${port}`) return refuse(403);
 
   // `/t/<token>/<uid>`, `/t/<token>/<uid>/f/<l,t,r,b>` for a cover cut to a face, or
-  // `/t/<token>/<uid>/v` for a video to play.
-  const parts = (req.url ?? "").split("?")[0].split("/");
+  // `/t/<token>/<uid>/v` for a video to play. On a picture, `?w=<px>` asks for it cut down to
+  // a tile that size (see thumbSizes); anything else in the query only makes the webview
+  // load it anew.
+  const [path, query = ""] = (req.url ?? "").split("?", 2);
+  const parts = path.split("/");
+  const width = thumbWidthFor(Number(new URLSearchParams(query).get("w") ?? NaN)) ?? undefined;
   const face = parts.length === 6 && parts[4] === "f";
   const video = parts.length === 5 && parts[4] === "v";
   if ((parts.length !== 4 && !face && !video) || parts[0] !== "" || parts[1] !== "t") return refuse(404);
@@ -148,7 +174,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   });
   if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
   try {
-    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal);
+    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal, width);
     if (gone.signal.aborted) return;
     if (!bytes) return refuse(404);
     res.writeHead(200, {
@@ -156,6 +182,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
       "Content-Length": String(bytes.length),
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
+      ...cors,
     });
     res.end(bytes);
   } catch {

@@ -22,6 +22,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { translateNow } from "./i18n";
+import { bench, benchCount } from "./benchProbe";
 
 type RpcEnvelope = { ok: boolean; result?: unknown; error?: string };
 
@@ -145,6 +146,7 @@ export async function rpc<T = unknown>(
   options: RpcOptions = {},
 ): Promise<T> {
   const { signal } = options;
+  if (bench.on) benchCount("rpc");
   const timeoutMs = options.timeoutMs ?? TIMEOUT_MS[method] ?? DEFAULT_TIMEOUT_MS;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 2; attempt++) {
