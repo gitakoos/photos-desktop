@@ -29,6 +29,7 @@ import "../styles/Settings.css";
 import "../styles/AlbumDialogs.css";
 import "../styles/LabelPicker.css";
 import "../styles/MyFilesPicker.css";
+import { backdropClose } from "../lib/backdrop";
 
 type FileEntry = { uid: string; name: string; size: number; modifiedMs: number | null };
 type Listing = { uid: string; name: string; folders: { uid: string; name: string; holds?: boolean }[]; files: FileEntry[] };
@@ -170,10 +171,7 @@ export function MyFilesPicker({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
+      {...backdropClose(onClose)}
     >
       <div className="cf-panel ad-picker lp-picker mf-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">

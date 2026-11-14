@@ -211,6 +211,8 @@ export const fr: Record<string, string> = {
   "settings.diagnosticsFailed": "Le diagnostic n'a pas pu être créé. Réessayez.",
   "settings.diagDetailed": "Journal détaillé",
   "settings.diagDetailedDesc": "Note aussi la durée de chaque étape de photo et de fichier, pas seulement des lentes. Activez-le pendant que vous examinez une lenteur.",
+  "settings.softwareVideo": "Décoder la vidéo en logiciel",
+  "settings.softwareVideoDesc": "Activez-le si les vidéos s’arrêtent avec une erreur de décodage quand vous avancez. Utilise plus le processeur que la carte graphique. Prend effet après un redémarrage.",
   "settings.myFiles": "Mes fichiers",
   "settings.myFilesNav": "Importer photos et vidéos depuis des dossiers Proton Drive",
   "settings.uploadQuality": "Qualité d'envoi",

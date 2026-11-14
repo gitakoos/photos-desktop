@@ -636,3 +636,97 @@ describe("a hidden photo", () => {
     expect(written.manual).toEqual([]);
   });
 });
+
+describe("a face fixed by hand on one device", () => {
+  /** A photo here with one face, grouped here as Anna by the phone's automatic grouping. */
+  async function groupedAnna() {
+    const rand = seeded(131);
+    const a = direction(rand);
+    const store = new FaceStore();
+    store.load();
+    store.put("vol~p1", [local("vol~p1", 0, [0.1, 0.1, 0.3, 0.4], a)]);
+    await placeNew(store);
+    const face = phone("p1", 0, [0.1, 0.1, 0.3, 0.4], a);
+    applyCopy(store, { ...copy([{ ...face, person: "Anna" }]), createdAt: 5 });
+    expect(store.people.confirmed["vol~p1#0"]).toBeUndefined();
+    return { store, face };
+  }
+  const nameHere = (store: FaceStore) => store.people.people.find((x) => x.id === store.people.assign["vol~p1#0"])?.name;
+
+  it("keeps this computer's grouping over a name confirmed there, and keeps the face as a conflict", async () => {
+    // Naming a group there confirms every face in it: no proof of a hand decision, and taking
+    // it would undo this computer's grouping, or a split made here.
+    const { store, face } = await groupedAnna();
+    applyCopy(store, { ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]), createdAt: 10 });
+    expect(nameHere(store)).toBe("Anna");
+    expect(store.people.conflicts["vol~p1#0"]).toMatchObject({ there: "Bela", at: 10 });
+  });
+
+  it("follows the device a confirmation here came from, when it changes its mind there", async () => {
+    const rand = seeded(133);
+    const a = direction(rand);
+    const store = new FaceStore();
+    store.load();
+    store.put("vol~p1", [local("vol~p1", 0, [0.1, 0.1, 0.3, 0.4], a)]);
+    const face = phone("p1", 0, [0.1, 0.1, 0.3, 0.4], a);
+    applyCopy(store, { ...copy([{ ...face, person: "Anna", confirmed: "Anna" }]), createdAt: 5 });
+    expect(store.people.confirmedFrom["vol~p1#0"]).toBe(copy([]).deviceId);
+    applyCopy(store, { ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]), createdAt: 10 });
+    expect(nameHere(store)).toBe("Bela");
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Bela");
+  });
+
+  it("keeps a later hand decision here over an older mark from there", async () => {
+    const { store, face } = await groupedAnna();
+    const bela = { id: "pB", name: "Bela", isOther: false };
+    store.people.people.push(bela);
+    // Moved to Bela there at 100; moved back to Anna here, by hand, at 200.
+    addFacesToPerson(store, store.people.assign["vol~p1#0"], ["vol~p1#0"], 200);
+    applyCopy(store, {
+      ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]),
+      createdAt: 150,
+      notPerson: [{ name: "Anna", key: "p1", index: 0, at: 100 }],
+    });
+    expect(nameHere(store)).toBe("Anna");
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Anna");
+    expect(store.people.blocked["vol~p1#0"]).toBeUndefined();
+  });
+
+  it("keeps a name confirmed on both sides, and keeps the face as a conflict until both agree", async () => {
+    const { store, face } = await groupedAnna();
+    // Confirmed here by hand, as moving it to Anna does.
+    addFacesToPerson(store, store.people.assign["vol~p1#0"], ["vol~p1#0"], 6);
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Anna");
+    const result = applyCopy(store, { ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]), createdAt: 10 })!;
+    expect(result.conflicts).toBe(1);
+    expect(nameHere(store)).toBe("Anna");
+    expect(store.people.conflicts["vol~p1#0"]).toMatchObject({ there: "Bela", at: 10 });
+    applyCopy(store, { ...copy([{ ...face, person: "Anna", confirmed: "Anna" }]), createdAt: 20 });
+    expect(store.people.conflicts["vol~p1#0"]).toBeUndefined();
+  });
+
+  it("is said to be not the person it was moved off, with the time, so the other device moves it too", async () => {
+    const { store } = await groupedAnna();
+    const bela = { id: "pB", name: "Bela", isOther: false };
+    store.people.people.push(bela);
+    addFacesToPerson(store, bela.id, ["vol~p1#0"], 77);
+    expect(store.people.blocked["vol~p1#0"]).toEqual(["Anna"]);
+    expect(store.people.curation[curationKey(2, "Anna", "p1#0")]).toMatchObject({ removed: false, at: 77 });
+    const written = copyForDrive(store, "Desk", 100);
+    expect(written.notPerson).toContainEqual(expect.objectContaining({ name: "Anna", key: "p1", index: 0, at: 77 }));
+  });
+
+  it("moves here when the other device moved it, though it was confirmed here under the old name", async () => {
+    const { store, face } = await groupedAnna();
+    // Confirmed here by hand, as moving it to Anna does.
+    addFacesToPerson(store, store.people.assign["vol~p1#0"], ["vol~p1#0"], 6);
+    applyCopy(store, {
+      ...copy([{ ...face, person: "Bela", confirmed: "Bela" }]),
+      createdAt: 100,
+      notPerson: [{ name: "Anna", key: "p1", index: 0, at: 90 }],
+    });
+    expect(nameHere(store)).toBe("Bela");
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Bela");
+    expect(store.people.blocked["vol~p1#0"]).toEqual(["Anna"]);
+  });
+});

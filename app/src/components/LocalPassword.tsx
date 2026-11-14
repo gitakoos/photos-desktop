@@ -25,6 +25,7 @@ import { rpc } from "../lib/rpc";
 import { useT } from "../lib/i18n";
 import "../styles/Confirm.css";
 import "../styles/LocalPassword.css";
+import { backdropClose } from "../lib/backdrop";
 
 /**
  * What Hidden and the app lock ask for where no Windows Hello answers (Linux): the password the
@@ -190,10 +191,7 @@ export function LocalPasswordDialog({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onCancel();
-      }}
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel lp-panel" role="dialog" aria-label={title} onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">{title}</h3>

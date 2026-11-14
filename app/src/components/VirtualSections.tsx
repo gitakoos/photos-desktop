@@ -23,6 +23,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { flushSync } from "react-dom";
 import { GRID_GAP } from "./PhotoGrid";
+import { anchorAfterScroll, builtSpan, rowsInSpan } from "../lib/virtualWindow";
+import { bench, benchCount, benchRows, benchSpan } from "../lib/benchProbe";
 
 /** A tile's width over its height, as `.g-cell` draws it. */
 const CELL_ASPECT = 0.85;
@@ -89,6 +91,8 @@ export function VirtualSections<T>({
   grid: (section: VirtualSection<T>, items: T[]) => ReactNode;
   className?: string;
 }) {
+  // For the scroll measurement only (see `scrollBench`): when this draw began.
+  const benchFrom = bench.on ? performance.now() : 0;
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   // The tile size held while the list is being resized. The page answers a window drag in
@@ -99,7 +103,15 @@ export function VirtualSections<T>({
   // jump, and the tiles stretch to fill the row once the drag stops.
   const [held, setHeld] = useState<{ tile: number; cellSize: number } | null>(null);
   const liveLayout = useRef({ width: 0, columns: 1, tile: 0, cellSize: 0 });
+  // What the built rows are worked out from. `top` is not the scroll position: it is where
+  // the scroll area's window sat when the rows were last built, and it stays there until
+  // the window has moved far enough to need other rows (see `anchorAfterScroll`). Following
+  // the position itself drew the whole list again on every frame of a scroll, a few hundred
+  // tiles each time, which is what kept the window's one thread busy for the whole scroll
+  // and the tiles arriving late.
   const [view, setView] = useState({ top: 0, height: 0 });
+  /** Where the window really sits over the list, as of the last look. */
+  const liveTop = useRef(0);
   const [measuredHeader, setHeaderHeight] = useState(50);
   const headerHeight = header ? measuredHeader : 0;
   const readView = useRef<() => void>(() => {});
@@ -145,12 +157,17 @@ export function VirtualSections<T>({
     let frame = 0;
     const read = () => {
       frame = 0;
+      const t0 = bench.on ? performance.now() : 0;
       const top = scroller.getBoundingClientRect().top - wrap.getBoundingClientRect().top;
-      setView((prev) =>
-        Math.abs(prev.top - top) < 1 && prev.height === scroller.clientHeight
-          ? prev
-          : { top, height: scroller.clientHeight },
-      );
+      const height = scroller.clientHeight;
+      liveTop.current = top;
+      // The place a zoom step or a resize keeps is the real one, with or without a redraw.
+      if (lastLayout.current) lastLayout.current.viewTop = top;
+      setView((prev) => {
+        const anchor = anchorAfterScroll(prev.top, top, height);
+        return anchor === prev.top && prev.height === height ? prev : { top: anchor, height };
+      });
+      if (bench.on) benchSpan("read_ms", t0);
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(read);
@@ -241,13 +258,13 @@ export function VirtualSections<T>({
     };
   }
 
-  // Built: what is on screen and about a screen and a half either side, which the
-  // thumbnails' own look-ahead fits inside.
-  const screen = Math.max(view.height, 600);
-  const from = viewTop - screen * 1.5;
-  const to = viewTop + screen * 2.5;
+  // Built: what is on screen and two screens either side of where the window was when
+  // this was last worked out, so at least a screen and a half either side of where it is.
+  const span = builtSpan(viewTop, view.height);
+  const { from, to } = span;
 
   let at = 0;
+  let builtRows = 0;
   const out: ReactNode[] = [];
   for (const section of sections) {
     const rows = Math.ceil(section.items.length / columns);
@@ -260,11 +277,11 @@ export function VirtualSections<T>({
       continue;
     }
     const gridTop = top + headerHeight;
-    const firstRow = Math.max(0, Math.floor((from - gridTop) / pitch));
-    const lastRow = Math.min(rows, Math.ceil((to - gridTop) / pitch));
+    const { first: firstRow, last: lastRow } = rowsInSpan(span, gridTop, rows, pitch);
     const before = firstRow * pitch;
     const after = (rows - lastRow) * pitch;
     builtFrom.current.set(section.key, firstRow * columns);
+    builtRows += lastRow - firstRow;
     out.push(
       <section className="g-section live" key={section.key} data-vs={section.key}>
         {header && <MeasuredHeader onHeight={setHeaderHeight}>{header(section)}</MeasuredHeader>}
@@ -280,6 +297,12 @@ export function VirtualSections<T>({
   // from the two layouts rather than measured, so the whole move costs one style write a
   // tile and a single layout.
   useLayoutEffect(() => {
+    if (bench.on && benchFrom) {
+      // From this draw's start to its tiles being in the page: the list's whole cost.
+      benchCount("vs");
+      benchSpan("vs_ms", benchFrom);
+      benchRows(builtRows);
+    }
     const pending = change.current;
     change.current = null;
     const wrap = wrapRef.current;
@@ -289,6 +312,7 @@ export function VirtualSections<T>({
       settleGlide();
       const delta = pending.viewTop - pending.from.viewTop;
       if (Math.abs(delta) >= 1) scroller.scrollTop += delta;
+      liveTop.current = pending.viewTop;
       setView((v) => (Math.abs(v.top - pending.viewTop) < 1 ? v : { top: pending.viewTop, height: v.height }));
       if (pending.glide && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         glide(wrap, pending, {
@@ -311,7 +335,7 @@ export function VirtualSections<T>({
       headerHeight,
       cellSize,
       tops,
-      viewTop: pending ? pending.viewTop : view.top,
+      viewTop: pending ? pending.viewTop : liveTop.current,
     };
   });
 

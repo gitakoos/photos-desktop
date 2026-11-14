@@ -20,9 +20,11 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { createPortal } from "react-dom";
 import { useEffect } from "react";
 import { useT } from "../lib/i18n";
 import "../styles/Confirm.css";
+import { backdropClose } from "../lib/backdrop";
 
 type Props = {
   title: string;
@@ -73,14 +75,13 @@ export function Confirm({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onCancel, onConfirm, irreversible]);
 
-  return (
+  // Drawn at the page's top level: inside a panel with a transform (the viewer's info side),
+  // "fixed" is fixed to that panel, and the dialog was centred on it, half off the window.
+  return createPortal(
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        // Never let the click reach the lightbox or grid underneath.
-        e.stopPropagation();
-        onCancel();
-      }}
+      // Never lets the click reach the lightbox or grid underneath.
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel" role="alertdialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">{title}</h3>
@@ -103,6 +104,7 @@ export function Confirm({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

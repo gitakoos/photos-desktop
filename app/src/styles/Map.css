@@ -52,16 +52,21 @@
   overflow: hidden;
   background: var(--bg2);
 }
-.map-canvas {
+.map-canvas,
+.map-canvas.leaflet-container {
   position: absolute;
   inset: 0;
+  /* Leaflet's own grey would show between the tiles as they scale in a zoom: the page's own
+     background instead, whichever stylesheet loads last. */
   background: var(--bg2);
   font: inherit;
 }
 /* The dark theme reads the light OpenStreetMap tiles inverted and muted, as the Android
    app does, turned back round the colour wheel so water stays blue and parks green; only
-   the tiles, never the photos on the pins. */
-:root[data-theme="dark"] .map-canvas .leaflet-tile-pane {
+   the tiles, never the photos on the pins. On each tile rather than on the pane that holds
+   them: filtered as a whole, the pane was drawn again from scratch each time a zoom swapped
+   its levels, and the view from before the zoom came back for a frame or two. */
+:root[data-theme="dark"] .map-canvas .leaflet-tile {
   filter: invert(1) hue-rotate(180deg) saturate(0.55);
 }
 

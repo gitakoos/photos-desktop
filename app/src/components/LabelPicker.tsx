@@ -28,6 +28,7 @@ import type { LocalLabel } from "../hooks/useLocalLabels";
 import { CheckIcon, CloseIcon, LabelIcon, PlusIcon, SearchIcon } from "./icons";
 import "../styles/AlbumDialogs.css";
 import "../styles/LabelPicker.css";
+import { backdropClose } from "../lib/backdrop";
 
 /**
  * The labels of the selected photos, as the phone's label sheet has them: a search over every
@@ -129,10 +130,7 @@ export function LabelPicker({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
+      {...backdropClose(onClose)}
     >
       <div className="cf-panel ad-picker lp-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">
