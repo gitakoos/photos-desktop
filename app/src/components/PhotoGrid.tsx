@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
 import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
 import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
@@ -147,8 +147,13 @@ type CellProps = {
   renderOverlay?: (item: GridItem) => ReactNode;
 };
 
-/** One photo tile: thumbnail, hover select dot, corner badges, optional name. */
-export function PhotoCell({
+/**
+ * One photo tile: thumbnail, hover select dot, corner badges, optional name.
+ *
+ * Memoized: the grid re-renders on every scroll frame, but a tile's props only change when
+ * the page itself re-renders.
+ */
+export const PhotoCell = memo(function PhotoCell({
   item,
   thumb,
   selected,
@@ -410,7 +415,7 @@ export function PhotoCell({
       {showName && item.name && <div className="g-cell-name">{item.name}</div>}
     </div>
   );
-}
+});
 
 type GridProps = Omit<CellProps, "item" | "thumb" | "selected" | "tier" | "selectionMode"> & {
   items: GridItem[];
