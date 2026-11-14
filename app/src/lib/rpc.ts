@@ -83,16 +83,24 @@ const TIMEOUT_MS: Record<string, number> = {
   // Opening the account: the saved session, then the account keys. Giving up early here
   // costs the user their password a second time, so it is the most generous of the lot.
   unlock: 5 * MINUTE,
+  // Waited out in full: the host always carries these out, and the window must not show the
+  // lock screen, or the signed-out one, while the call is still on its way.
+  lock: 5 * MINUTE,
+  signOut: 5 * MINUTE,
 
   // Reads every chosen photo's node for the date editor; a big selection takes a while.
   dateEditInfo: 10 * MINUTE,
 };
 
 /** Rejects if `work` has not settled within `ms`, and never leaves a timer behind. */
-function withTimeout<T>(work: Promise<T>, ms: number, method: string): Promise<T> {
+/** `work`, or a rejection after `ms`, calling `onExpiry` first so the call is let go of too. */
+function withTimeout<T>(work: Promise<T>, ms: number, method: string, onExpiry: () => void = () => {}): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expiry = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${method} timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => {
+      onExpiry();
+      reject(new Error(`${method} timed out after ${ms}ms`));
+    }, ms);
   });
   return Promise.race([work, expiry]).finally(() => clearTimeout(timer));
 }
@@ -103,7 +111,9 @@ function withTimeout<T>(work: Promise<T>, ms: number, method: string): Promise<T
  * Ordinary within one run of the app; nothing persists it and nothing outside the host's
  * own pending table ever sees it.
  */
-let nextCallId = 1;
+// A page's call numbers start at a random point, so a reloaded page never reuses the numbers
+// of calls its previous load still has out. Kept below 2^53, as the host expects.
+let nextCallId = Math.floor(Math.random() * 2 ** 31) * 2 ** 20 + 1;
 
 export type RpcOptions = {
   /**
@@ -140,20 +150,25 @@ export async function rpc<T = unknown>(
     // nothing, not even a place in the queue.
     if (signal?.aborted) throw new Error(`${method} abandoned`);
 
-    // Only a call that can be abandoned gets an id, so nothing else is followed by the
-    // host and nothing else can be cancelled by anyone.
-    const callId = signal ? nextCallId++ : undefined;
-    const letGo = () => void invoke("cancel_rpc", { callId }).catch(() => {});
+    // Every call can be let go of, not only those a caller passed a signal for: a call
+    // given up on for taking too long is cancelled too, so it stops queueing on the host
+    // and, once sent, stops in the sidecar, rather than running on for nobody.
+    const callId = nextCallId++;
+    const local = new AbortController();
+    const letGo = () => {
+      if (local.signal.aborted) return;
+      local.abort();
+      void invoke("cancel_rpc", { callId }).catch(() => {});
+    };
     signal?.addEventListener("abort", letGo, { once: true });
     try {
       // Each attempt gets the full budget: the retry below only follows a connection
       // error, which fails at once rather than eating into the next one's time.
       const resp = (await withTimeout(
-        // Explicitly null rather than absent for an uncancellable call, so the host
-        // reads "no id" the same way however the arguments cross.
-        invoke("rpc", { method, params, callId: callId ?? null }),
+        invoke("rpc", { method, params, callId }),
         timeoutMs,
         method,
+        letGo,
       )) as RpcEnvelope;
       if (!resp || typeof resp !== "object") throw new Error("Empty sidecar response");
       // A call that needs Proton while only the photos kept offline are open.
