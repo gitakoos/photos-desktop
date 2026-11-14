@@ -198,7 +198,9 @@ import {
 import {
   deletePhotosForever as runDeleteForever,
   emptyTrash as runEmptyTrash,
+  forgetTrashItems,
   listTrashed as readTrash,
+  TrashListing,
   restorePhotos as runRestore,
   type TrashItem,
   type TrashResult,
@@ -338,6 +340,12 @@ const TIMELINE_CEILING = 1_000_000;
 const CRYPTO_CACHE_LIMIT = 20_000;
 /** How many photos' read text is kept, for going back to one of them. */
 const OCR_KEPT = 40;
+/** A read waits this long for a newer one to start before it fetches its photo. */
+const OCR_SETTLE_MS = 250;
+/** Photo fetches for reads at once: the newest never waits on a single stale one. */
+const OCR_FETCHES_AT_ONCE = 2;
+/** A read's fetch that has not answered in this long is given up. */
+const OCR_FETCH_GIVE_UP_MS = 3 * 60 * 1000;
 /**
  * The largest video downloaded whole to play from the thumbnail server, held in the sidecar's
  * memory while it plays (at most two at once, so 600 MB at most), its signature checked; a
@@ -1162,6 +1170,7 @@ export class ProtonSession {
     hiddenStore.unload();
     this.thumbWaiting.clear();
     this.faceCovers.clear();
+    this.trash.changed();
     this.videos.clear();
     lockVault();
     this.offlineResume = null;
@@ -1265,6 +1274,7 @@ export class ProtonSession {
     duplicateFinder.setSource(null);
     this.thumbWaiting.clear();
     this.faceCovers.clear();
+    this.trash.changed();
     this.videos.clear();
     this.timelineRun = null;
     this.session = null;
@@ -1297,6 +1307,7 @@ export class ProtonSession {
     hiddenStore.unload();
     this.thumbWaiting.clear();
     this.faceCovers.clear();
+    this.trash.changed();
     this.videos.clear();
     this.legacySignIn = false;
     lockVault();
@@ -2003,6 +2014,8 @@ export class ProtonSession {
     const thumb = thumbGet(uid, ThumbnailType.Type1);
     return thumb ? { bytes: thumb, keep: false } : null;
   });
+  /** The trash as last read, shared by the window and the drive's listing: see `TrashListing`. */
+  private trash = new TrashListing();
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid) => this.videoSource(uid));
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
@@ -2171,7 +2184,9 @@ export class ProtonSession {
    */
   async warmThumbnails(uids: string[], signal?: AbortSignal): Promise<{ ready: number }> {
     const rows = await this.getThumbnails(uids, THUMBNAIL_WARM_PER_CALL, signal);
-    return { ready: rows.length };
+    // Only what is now cached: a fetch that failed, or a uid this call did not get to, is
+    // not ready, so the window asks for it again rather than counting it warm.
+    return { ready: rows.filter((r) => r.dataUrl !== null).length };
   }
 
   /** HD preview (Type2 thumbnail) for the image viewer / lightbox. */
@@ -2329,9 +2344,25 @@ export class ProtonSession {
     return readSaveStatus();
   }
 
-  async listForMount(offset: number, limit: number): Promise<MountPage> {
+  async listForMount(offset: number, limit: number, fromTimeline = false): Promise<MountPage> {
     if (!this.photos) throw new Error("Not signed in");
-    return readMountPage(this.photos, offset, limit, hiddenStore.hiddenPhotoTest());
+    // The session's first listing (`fromTimeline`) takes the timeline the window has read at
+    // unlock, when it has read it all and without error, rather than reading it from Proton a
+    // second time. A later listing is there to catch what changed since, so it reads afresh.
+    const run = this.timelineRun;
+    const timeline = fromTimeline && offset === 0 && run && run.done && !run.error ? run.items : undefined;
+    return readMountPage(this.photos, offset, limit, hiddenStore.hiddenPhotoTest(), timeline);
+  }
+
+  /**
+   * Whether a listing from the top can take the window's timeline now: false while the
+   * window's read is still under way, so the drive waits for it (off the request lane)
+   * instead of reading the whole timeline again beside it. True when there is no read to
+   * wait for, and the listing reads for itself. Host-only.
+   */
+  mountTimelineReady(): { ready: boolean } {
+    const run = this.timelineRun;
+    return { ready: !run || run.done };
   }
 
   /** What became of photos the Explorer folder kept copies of: see `mountFates`. Host-only. */
@@ -2390,7 +2421,8 @@ export class ProtonSession {
     if (!this.photos) throw new Error("Not signed in");
     const isMedia = (t: string | null) => !!t && (t.startsWith("image/") || t.startsWith("video/"));
 
-    const trashed = (await readTrash(this.photos)).filter((t) => t.type !== "album");
+    const photos = this.photos;
+    const trashed = (await this.trash.get(() => readTrash(photos))).filter((t) => t.type !== "album");
     const shared = await this.getShared(true);
     const sharedFiles = shared.filter((s) => s.type !== "album" && isMedia(s.mediaType));
     const albums: { uid: string; name: string; items: { uid: string; captureTime: number }[] }[] = [];
@@ -2586,7 +2618,12 @@ export class ProtonSession {
     options: { force?: boolean; saveToTimeline?: boolean },
   ): Promise<DeleteAlbumOutcome> {
     if (!this.photos) throw new Error("Not signed in");
-    return runDeleteAlbum(this.photos, uid, options);
+    try {
+      return await runDeleteAlbum(this.photos, uid, options);
+    } finally {
+      // A deleted album goes to the trash, and may take its photos with it.
+      this.trash.changed();
+    }
   }
 
   async addPhotosToAlbum(albumUid: string, uids: string[]): Promise<AlbumResult[]> {
@@ -3005,14 +3042,20 @@ export class ProtonSession {
   /** Moves photos to the trash. The SDK reports per-node results. */
   async trashPhotos(uids: string[]): Promise<{ uid: string; ok: boolean; error?: string }[]> {
     if (!this.photos) throw new Error("Not signed in");
+    // Read afresh in the trash: kept from an earlier stay there, they may have changed since.
+    forgetTrashItems(uids);
     const out: { uid: string; ok: boolean; error?: string }[] = [];
-    for await (const r of withStallGuard(this.photos.trashNodes(uids), SDK_STALL_MS, "trashNodes")) {
-      const result = r as any;
-      out.push(
-        result.ok
-          ? { uid: result.uid, ok: true }
-          : { uid: result.uid, ok: false, error: String(result.error?.message ?? result.error) },
-      );
+    try {
+      for await (const r of withStallGuard(this.photos.trashNodes(uids), SDK_STALL_MS, "trashNodes")) {
+        const result = r as any;
+        out.push(
+          result.ok
+            ? { uid: result.uid, ok: true }
+            : { uid: result.uid, ok: false, error: String(result.error?.message ?? result.error) },
+        );
+      }
+    } finally {
+      this.trash.changed();
     }
     duplicateFinder.removed(out.filter((r) => r.ok).map((r) => r.uid));
     return out;
@@ -3064,6 +3107,20 @@ export class ProtonSession {
   private ocrNext = 0;
   /** The last photos read, by what was read, so going back to one shows its text at once. */
   private ocrRead = new Map<string, OcrJob["result"]>();
+  /**
+   * The photo fetches of reads. Stepping through the viewer used to start a download per
+   * photo, all at once, and hold every original in memory together. Now a read waits a
+   * moment and fetches only if no newer read has started by then, at most
+   * OCR_FETCHES_AT_ONCE fetch at once, and a read of a photo already being fetched shares
+   * that fetch.
+   */
+  private ocrFetchesRunning = 0;
+  private ocrFetchWaiters: (() => void)[] = [];
+  private ocrFetchesByKey = new Map<string, Promise<Buffer | null>>();
+  /** How long a read waits for a newer one before it fetches (tests shorten it). */
+  ocrSettleMs = OCR_SETTLE_MS;
+  /** How long a fetch may hold its place before the next read is let past it. */
+  ocrFetchGiveUpMs = OCR_FETCH_GIVE_UP_MS;
 
   /**
    * Starts reading the text in a photo of the library (its full-resolution original, or its
@@ -3087,19 +3144,16 @@ export class ProtonSession {
       return { id };
     }
     const started = Date.now();
+    // Only the newest read is worth anything: the reader stops an older one at its next
+    // step anyway, so one still waiting to fetch its photo gives up before it does.
+    const superseded = () => id !== this.ocrNext;
     void (async () => {
-      let bytes: Buffer | null = null;
-      if (source.path) bytes = await readPictureFile(source.path);
-      else if (source.uid && this.photos) {
-        // The original the viewer is showing is read as it is, not fetched a second time.
-        bytes = await viewedOriginal(source.uid);
-        if (!bytes) for await (const got of this.scanPictures(this.photos, [source.uid])) bytes = got.bytes;
-      }
-      if (!bytes) {
+      const bytes = await this.ocrFetch(key, source, superseded);
+      if (!bytes || superseded()) {
         job.state = "failed";
         return;
       }
-      const fetched = Date.now();
+      const fetchedAt = Date.now();
       const result = await readText(bytes, (stage) => (job.stage = stage));
       job.result = result;
       job.state = result ? "done" : "failed";
@@ -3111,12 +3165,72 @@ export class ProtonSession {
           this.ocrRead.delete(old);
         }
       }
-      diag.log("ocr", "read", { ms: Date.now() - started, fetch_ms: fetched - started, blocks: result?.blocks.length ?? -1 });
+      diag.log("ocr", "read", { ms: Date.now() - started, fetch_ms: fetchedAt - started, blocks: result?.blocks.length ?? -1 });
     })().catch((e) => {
       job.state = "failed";
       process.stderr.write(`[ocr] read failed: ${(e as Error)?.name ?? "error"}\n`);
     });
     return { id };
+  }
+
+  /**
+   * The bytes for a read, or null when a newer read passed it before it fetched or its
+   * fetch gave up. A fetch of the same photo under way is shared rather than repeated.
+   */
+  private async ocrFetch(
+    key: string,
+    source: { uid?: string; path?: string },
+    superseded: () => boolean,
+  ): Promise<Buffer | null> {
+    const sharing = this.ocrFetchesByKey.get(key);
+    if (sharing) return sharing;
+    await new Promise((r) => setTimeout(r, this.ocrSettleMs));
+    if (superseded()) return null;
+    while (this.ocrFetchesRunning >= OCR_FETCHES_AT_ONCE) {
+      await new Promise<void>((r) => this.ocrFetchWaiters.push(r));
+      if (superseded()) return null;
+    }
+    const shared = this.ocrFetchesByKey.get(key);
+    if (shared) return shared;
+
+    this.ocrFetchesRunning++;
+    let freed = false;
+    const free = () => {
+      if (freed) return;
+      freed = true;
+      this.ocrFetchesRunning--;
+      for (const wake of this.ocrFetchWaiters.splice(0)) wake();
+    };
+    const fetching = this.ocrBytes(source).catch(() => null);
+    this.ocrFetchesByKey.set(key, fetching);
+    // A download that never settles must not hold its place for good: past the give-up
+    // time the next read is let through, and this one answers nothing.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const gaveUp = new Promise<null>((r) => {
+      timer = setTimeout(() => {
+        free();
+        if (this.ocrFetchesByKey.get(key) === fetching) this.ocrFetchesByKey.delete(key);
+        r(null);
+      }, this.ocrFetchGiveUpMs);
+    });
+    void fetching.finally(() => {
+      clearTimeout(timer);
+      free();
+      if (this.ocrFetchesByKey.get(key) === fetching) this.ocrFetchesByKey.delete(key);
+    });
+    return Promise.race([fetching, gaveUp]);
+  }
+
+  /** The bytes a read is made from: a picture file, or the photo's original. */
+  private async ocrBytes(source: { uid?: string; path?: string }): Promise<Buffer | null> {
+    let bytes: Buffer | null = null;
+    if (source.path) bytes = await readPictureFile(source.path);
+    else if (source.uid && this.photos) {
+      // The original the viewer is showing is read as it is, not fetched a second time.
+      bytes = await viewedOriginal(source.uid);
+      if (!bytes) for await (const got of this.scanPictures(this.photos, [source.uid])) bytes = got.bytes;
+    }
+    return bytes;
   }
 
   ocrResult(id: number): OcrJob | null {
@@ -3171,26 +3285,44 @@ export class ProtonSession {
 
   // ---- Trash (SDK: iterateTrashedNodeUids / restoreNodes / deleteNodes / emptyTrash) ----
 
-  async listTrashed(): Promise<TrashItem[]> {
+  /**
+   * The trash. `ahead` is the window reading it before Trash is opened, which may take a
+   * read a few seconds old; without it the read is the trash as it is now (one still under
+   * way is shared, as it started after anything this app changed).
+   */
+  async listTrashed(ahead = false): Promise<TrashItem[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return readTrash(this.photos);
+    const photos = this.photos;
+    return this.trash.get(() => readTrash(photos), !ahead);
   }
 
   async restorePhotos(uids: string[]): Promise<TrashResult[]> {
     if (!this.photos) throw new Error("Not signed in");
-    const results = await runRestore(this.photos, uids);
-    duplicateFinder.restored(results.filter((r) => r.ok).map((r) => r.uid));
-    return results;
+    try {
+      const results = await runRestore(this.photos, uids);
+      duplicateFinder.restored(results.filter((r) => r.ok).map((r) => r.uid));
+      return results;
+    } finally {
+      this.trash.changed();
+    }
   }
 
   async deletePhotosForever(uids: string[]): Promise<TrashResult[]> {
     if (!this.photos) throw new Error("Not signed in");
-    return runDeleteForever(this.photos, uids);
+    try {
+      return await runDeleteForever(this.photos, uids);
+    } finally {
+      this.trash.changed();
+    }
   }
 
   async emptyTrash(): Promise<{ emptied: boolean }> {
     if (!this.photos) throw new Error("Not signed in");
-    return runEmptyTrash(this.photos);
+    try {
+      return await runEmptyTrash(this.photos);
+    } finally {
+      this.trash.changed();
+    }
   }
 
   /**

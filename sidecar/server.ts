@@ -191,7 +191,8 @@ const handlers: Record<string, (params: any, ctx: CallContext) => Promise<unknow
   getVideo: (p) => session.getVideo(p.uid),
   startSaveOriginals: (p) => session.startSaveOriginals(p.uids, p.destDir),
   saveStatus: () => session.saveStatus(),
-  listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50),
+  listForMount: (p) => session.listForMount(p.offset ?? 0, p.limit ?? 50, p.fromTimeline === true),
+  mountTimelineReady: () => session.mountTimelineReady(),
   hydrateFile: (p) => session.hydrateFile(p.uid, typeof p.dir === "string" ? p.dir : undefined),
   // The same download for the "keep every photo" pass, on a lane that yields to the window.
   hydrateFileBg: (p) => session.hydrateFile(p.uid, typeof p.dir === "string" ? p.dir : undefined),
@@ -327,6 +328,9 @@ const handlers: Record<string, (params: any, ctx: CallContext) => Promise<unknow
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
+  // The same listing, read ahead for a Trash view not yet open: its own name so the host
+  // runs it in the background lane rather than in front of what the window is waiting on.
+  listTrashedAhead: () => session.listTrashed(true),
   hiddenState: () => session.hiddenState(),
   hiddenSet: (p) =>
     session.hiddenSet(p?.kind === "albums" ? "albums" : "photos", uidList(p?.uids), p?.hidden !== false),

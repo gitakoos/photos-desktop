@@ -185,7 +185,14 @@ fn classified(method: &str) -> Option<Priority> {
         | "hiddenRefresh"
         // Keeping every photo on this PC: a whole-library download that yields to the window,
         // and the lookups that decide what it keeps.
-        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden" => Priority::Background,
+        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden"
+        // The trash read ahead for a view not yet open. It lists and decrypts every
+        // trashed photo: tens of seconds on a large trash, which on the foreground lane
+        // held up every call the window made behind it. Opening Trash reads it as
+        // `listTrashed`, in the foreground, and the sidecar shares the one read.
+        | "listTrashedAhead"
+        // Whether the drive's listing can take the window's timeline yet: a flag, instant.
+        | "mountTimelineReady" => Priority::Background,
 
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
@@ -1489,7 +1496,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "listTrashedAhead" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,
@@ -1634,6 +1641,7 @@ fn host_only(method: &str) -> bool {
                 | "cancelHydrate"
                 | "readOriginalBytes"
                 | "listForMount"
+                | "mountTimelineReady"
                 | "listAlbumsForMount"
                 | "listExtrasForMount"
                 | "startDropUpload"
@@ -3731,6 +3739,12 @@ mod gate_tests {
         assert!(open.is_empty(), "name these in `classified`: {open:?}");
     }
 
+    #[test]
+    fn the_trash_read_ahead_never_holds_up_the_window() {
+        assert!(super::is_background(super::priority_for("listTrashedAhead")));
+        assert!(!super::is_background(super::priority_for("listTrashed")));
+    }
+
     /// A stand-in sidecar: a shell that writes every line it is sent to `out`.
     #[cfg(unix)]
     fn recording_sidecar(out: &std::path::Path, generation: u64) -> super::Sidecar {
@@ -4268,6 +4282,8 @@ mod log_tests {
         // The whole-library sweeps come in by priority tier, not by a second list.
         assert_eq!(priority_for("listForMount"), Priority::Enumerate);
         assert_eq!(deadline_for("listForMount"), long);
+        assert_eq!(deadline_for("listTrashed"), long, "a large trash must not cost the session");
+        assert_eq!(deadline_for("listTrashedAhead"), long, "nor the same walk read ahead");
         assert!(deadline_for("getPreview") < long);
         assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
     }

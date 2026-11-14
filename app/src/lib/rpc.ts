@@ -59,6 +59,8 @@ const TIMEOUT_MS: Record<string, number> = {
   getAlbumPhotos: 5 * MINUTE,
   getAlbumPhotoUids: 5 * MINUTE,
   listTrashed: 5 * MINUTE,
+  // The same, behind the background lane's sweeps.
+  listTrashedAhead: 10 * MINUTE,
   getShared: 5 * MINUTE,
   // A batch of decrypts admitted below everything else, so the wait for the channel
   // can dwarf the work itself.

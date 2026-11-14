@@ -557,8 +557,20 @@ export async function listForMount(
   offset: number,
   limit: number,
   hidden: (uid: string) => boolean = () => false,
+  timeline?: readonly { uid: string; captureTime: number; tags: number[] }[],
 ): Promise<MountPage> {
-  if (offset === 0 || !mountUids) {
+  if ((offset === 0 || !mountUids) && timeline) {
+    // The timeline the window has just read, whole: the same items a pass of our own would
+    // fetch again from Proton, which held the background lane for half a minute on a large
+    // library while the window's own read fetched the very same pages beside it.
+    mountUids = timeline
+      .filter((item) => item.uid && !hidden(item.uid))
+      .map((item) => ({
+        uid: item.uid,
+        captureTime: item.captureTime,
+        favorite: item.tags.includes(PhotoTag.Favorites),
+      }));
+  } else if (offset === 0 || !mountUids) {
     const picks: { uid: string; captureTime: number; favorite: boolean }[] = [];
     for await (const item of withStallGuard(
       photos.iterateTimeline(),
