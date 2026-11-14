@@ -1350,7 +1350,11 @@ pub(crate) fn hydrate_to_temp(app: &AppHandle, uid: &str) -> Result<(std::path::
     // The pass that keeps every photo on this PC downloads on the background lane, so a
     // photo the user opens is never queued behind a whole file of it.
     #[cfg(windows)]
-    let method = if keep_all::in_pass(uid) { "hydrateFileBg" } else { "hydrateFile" };
+    if !keep_all::in_pass(uid) {
+        return hydrate_streamed(app, uid);
+    }
+    #[cfg(windows)]
+    let method = "hydrateFileBg";
     #[cfg(not(windows))]
     let method = "hydrateFile";
     let result = sidecar_rpc(app, method, serde_json::json!({ "uid": uid }))?;
@@ -1360,6 +1364,41 @@ pub(crate) fn hydrate_to_temp(app: &AppHandle, uid: &str) -> Result<(std::path::
         .ok_or("hydrateFile returned no path")?;
     let size = result.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
     Ok((std::path::PathBuf::from(path), size))
+}
+
+/// A file the user opened, downloaded without holding the foreground lane for its whole
+/// length: `hydrateFile` would keep every thumbnail and view of the window waiting
+/// behind a large video. The download is started, then polled with short calls.
+#[cfg(windows)]
+fn hydrate_streamed(app: &AppHandle, uid: &str) -> Result<(std::path::PathBuf, u64), String> {
+    use std::time::{Duration, Instant};
+    let started = sidecar_rpc(app, "startHydrate", serde_json::json!({ "uid": uid }))?;
+    let path = started
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("startHydrate returned no path")?
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(60 * 60);
+    let mut wait = Duration::from_millis(50);
+    loop {
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_millis(250));
+        let failed = match sidecar_rpc(app, "hydrateProgress", serde_json::json!({ "path": path })) {
+            Ok(v) if v.get("done").and_then(|d| d.as_bool()) == Some(true) => {
+                let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+                return Ok((std::path::PathBuf::from(path), size));
+            }
+            Ok(v) => match v.get("error").and_then(|e| e.as_str()) {
+                // The sidecar deletes a failed download itself.
+                Some(e) => return Err(e.to_string()),
+                None if Instant::now() < deadline => continue,
+                None => "hydration timed out".to_string(),
+            },
+            Err(e) => e,
+        };
+        let _ = sidecar_rpc(app, "cancelHydrate", serde_json::json!({ "path": path }));
+        return Err(failed);
+    }
 }
 
 /// The sidecar methods only the host may call. Each one either takes a path or hands out
