@@ -144,7 +144,7 @@ fn priority_for(method: &str) -> Priority {
 fn classified(method: &str) -> Option<Priority> {
     Some(match method {
         // The user is waiting on the answer.
-        "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile" | "startHydrate"
+        "getPreview" | "getVideo" | "getNodeDetails" | "cachedNames" | "hydrateFile" | "startHydrate"
         // Session lifecycle: must never sit behind a warm.
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
         | "localLockState" | "localLockCheck" | "localLockSet" | "localLockClear"
@@ -185,7 +185,14 @@ fn classified(method: &str) -> Option<Priority> {
         | "hiddenRefresh"
         // Keeping every photo on this PC: a whole-library download that yields to the window,
         // and the lookups that decide what it keeps.
-        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden" => Priority::Background,
+        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden"
+        // The trash read ahead for a view not yet open. It lists and decrypts every
+        // trashed photo: tens of seconds on a large trash, which on the foreground lane
+        // held up every call the window made behind it. Opening Trash reads it as
+        // `listTrashed`, in the foreground, and the sidecar shares the one read.
+        | "listTrashedAhead"
+        // Whether the drive's listing can take the window's timeline yet: a flag, instant.
+        | "mountTimelineReady" => Priority::Background,
 
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
@@ -196,7 +203,7 @@ fn classified(method: &str) -> Option<Priority> {
         // short, and wanted now.
         "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
         | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
-        | "facePeople" | "facePersonCandidates" | "labelsList" | "labelsOf" | "myFilesList"
+        | "facePeople" | "facePersonCandidates" | "faceSplitStart" | "faceSplitPlan" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
         | "duplicatesGroups" => Priority::UserAction,
 
@@ -228,6 +235,7 @@ fn classified(method: &str) -> Option<Priority> {
         | "faceSearchClear" | "faceNameFaces" | "faceRejectFaces" | "faceNotThisPerson" | "facePersonRename"
         | "facePersonMerge" | "facePersonReject" | "facePersonDecline" | "facePersonCover"
         | "facePersonAddFaces" | "facePersonRemovePhotos" | "faceSuggestionDismiss"
+        | "faceSplitApply" | "faceSplitUndo"
         | "faceSweepStart" | "faceSweepStop" | "labelsAdd" | "labelsRemove" | "labelsSet"
         | "labelCreate" | "labelRename" | "labelDelete" | "sharedBackupSet" | "sharedBackupNow"
         | "diagSave" | "diagSetDetailed" | "duplicatesStart" | "duplicatesTrash"
@@ -265,9 +273,70 @@ impl PartialOrd for Ticket {
 
 /// The id a cancellable call is known by, minted by the frontend.
 ///
-/// Only a call the frontend explicitly marks this way can ever be dropped: everything
-/// else, every mutation included, reaches the sidecar exactly as before.
+/// The window gives every call one, so any of its calls can be let go of: dropped while it
+/// queues, or, once sent, cancelled in the sidecar. A change let go of only on the window's
+/// timeout is then not carried out after the window has reported it failed. The host's own
+/// calls (`sidecar_rpc`) carry none and always run.
 type CallId = u64;
+
+/// Calls that must run once asked for, whatever the window does meanwhile: locking and
+/// signing out (a lock screen shown over a session that stayed open is the one thing worse
+/// than a slow lock), and the calls that stop or release something. The window's
+/// cancel, or its own timeout, never drops one of these from the queue or stops it.
+///
+/// Unlocking is deliberately not one: an unlock given up on is safer dropped (it is simply
+/// asked again) than carried out later, behind a lock screen.
+fn never_drop(method: &str) -> bool {
+    matches!(
+        method,
+        "lock"
+            | "signOut"
+            | "localLockSet"
+            | "localLockClear"
+            | "protectSession"
+            | "cancelBrowserLogin"
+            | "cancelUpload"
+            | "releaseOriginal"
+            | "stopDateEdit"
+            | "faceSweepStop"
+            | "faceScanSetPaused"
+            | "faceScanSetEnabled"
+            // What the window shows as wiped once asked: the privacy wipes and removals.
+            | "faceScanClear"
+            | "faceClearHere"
+            | "faceClearEverywhere"
+            | "faceSearchClear"
+            | "unpinAllOffline"
+            | "semanticModelRemove"
+            | "ocrModelRemove"
+    )
+}
+
+/// Calls sent to the sidecar at once, past the lanes: locking and signing out, and the lock
+/// status the window reads first. The window shows the lock screen once these answer, and
+/// queued behind a long call on the lane (a whole video, a file the drive is fetching) that
+/// was minutes with the photos still on screen. The channel carries many calls at a time and
+/// locking does not depend on what else is running, so they need no place in the line.
+fn bypasses_lanes(method: &str) -> bool {
+    matches!(method, "lock" | "signOut" | "lockStatus")
+}
+
+/// A window's call id made unique across the app's windows. Each window (the main one, the
+/// viewer, the tray's popup) numbers its own calls, so the same number names a call in each;
+/// keyed by number alone, one window's cancel could drop or stop another's call. The window
+/// is given a small index the first time it calls, kept in the top bits; a page's numbers
+/// stay below 2^53, as a JavaScript number does.
+fn window_call_key(label: &str, call_id: u64) -> CallId {
+    static WINDOWS: std::sync::OnceLock<Mutex<std::collections::HashMap<String, u64>>> =
+        std::sync::OnceLock::new();
+    let mut windows = WINDOWS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let next = windows.len() as u64 + 1;
+    let index = *windows.entry(label.to_string()).or_insert(next);
+    (index << 53) | (call_id & ((1u64 << 53) - 1))
+}
 
 /// What a call the frontend let go of answers with. It is not a failure and no caller
 /// reports it: the one thing that asks for a cancellable call already treats a missing
@@ -313,6 +382,10 @@ struct GateState {
 struct Gate {
     state: Mutex<GateState>,
     admit: Condvar,
+    /// The same wake as `admit`, for a caller that waits as a task rather than on a
+    /// thread: the window's calls, which would otherwise each park a blocking-pool
+    /// thread for as long as they queue (580 of them at once, in one profile).
+    admit_task: tokio::sync::Notify,
 }
 
 /// Proof of admission from `acquire`. Releasing the lane is tied to dropping this, so
@@ -325,17 +398,56 @@ struct GatePermit<'a> {
 
 impl Drop for GatePermit<'_> {
     fn drop(&mut self) {
+        self.gate.release(self.background);
+    }
+}
+
+impl GatePermit<'_> {
+    /// Hand the lane on to an owner that is not tied to the gate's lifetime (a call that
+    /// is admitted on a task and run on a blocking thread). The lane stays held: it is
+    /// released when the `OwnedPermit` is dropped instead of this.
+    fn into_owned(self, shared: SharedSidecar) -> OwnedPermit {
+        let background = self.background;
+        std::mem::forget(self);
+        OwnedPermit { shared, background }
+    }
+}
+
+/// A `GatePermit` that owns its gate, so it can move to the thread that runs the call.
+struct OwnedPermit {
+    shared: SharedSidecar,
+    background: bool,
+}
+
+impl Drop for OwnedPermit {
+    fn drop(&mut self) {
+        self.shared.gate.release(self.background);
+    }
+}
+
+/// A task's place in a lane's queue, taken out again if the task stops waiting (its
+/// future dropped, or the call let go of): a ticket left behind would sit at the head of
+/// its lane for ever and hold up everyone after it.
+struct QueuedTicket<'a> {
+    gate: &'a Gate,
+    me: Ticket,
+    background: bool,
+    armed: bool,
+}
+
+impl Drop for QueuedTicket<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let mut st = self.gate.state.lock().unwrap();
         if self.background {
-            st.bg_busy = false;
+            st.bg_waiters.retain(|t| *t != self.me);
         } else {
-            st.fg_busy = false;
+            st.fg_waiters.retain(|t| *t != self.me);
         }
-        // notify_all, not notify_one: a single wake could land on a waiter that is not
-        // the head of its lane, which would then re-check, see it is not first in line,
-        // and go back to sleep while the true head keeps sleeping — a stall. Waking all
-        // lets each lane's head win and the rest re-queue.
-        self.gate.admit.notify_all();
+        drop(st);
+        self.gate.wake();
     }
 }
 
@@ -350,6 +462,89 @@ impl Gate {
                 bg_waiters: BinaryHeap::new(),
             }),
             admit: Condvar::new(),
+            admit_task: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Free a lane and let its next waiter in.
+    fn release(&self, background: bool) {
+        let mut st = self.state.lock().unwrap();
+        if background {
+            st.bg_busy = false;
+        } else {
+            st.fg_busy = false;
+        }
+        drop(st);
+        self.wake();
+    }
+
+    /// Every waiter re-checks whether it is now the head of a free lane: threads on the
+    /// condvar and tasks on the notify alike.
+    ///
+    /// notify_all, not notify_one: a single wake could land on a waiter that is not the
+    /// head of its lane, which would then re-check, see it is not first in line, and go
+    /// back to sleep while the true head keeps sleeping — a stall. Waking all lets each
+    /// lane's head win and the rest re-queue. For a task a wake is a poll of a future,
+    /// not a thread switch, so the cost of waking all of them stays small.
+    fn wake(&self) {
+        self.admit.notify_all();
+        self.admit_task.notify_waiters();
+    }
+
+    /// `acquire_unless`, waited for as a task: a queued call holds no thread.
+    ///
+    /// The wait is the same predicate loop. The notification is registered before the
+    /// predicate is read, under the gate's mutex, so a release between the read and the
+    /// await still wakes this task: `notify_waiters` reaches every `Notified` that was
+    /// enabled before it was called.
+    async fn acquire_unless_async(
+        &self,
+        prio: Priority,
+        abandoned: &(dyn Fn() -> bool + Sync),
+    ) -> Option<GatePermit<'_>> {
+        let background = is_background(prio);
+        let mut queued = {
+            let mut st = self.state.lock().unwrap();
+            let seq = st.next_seq;
+            st.next_seq = st.next_seq.wrapping_add(1);
+            let me = Ticket { prio, seq };
+            if background {
+                st.bg_waiters.push(me);
+            } else {
+                st.fg_waiters.push(me);
+            }
+            QueuedTicket { gate: self, me, background, armed: true }
+        };
+        loop {
+            let notified = self.admit_task.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut st = self.state.lock().unwrap();
+                let me = queued.me;
+                let ready = if background {
+                    !st.bg_busy && st.bg_waiters.peek() == Some(&me)
+                } else {
+                    !st.fg_busy && st.fg_waiters.peek() == Some(&me)
+                };
+                if ready {
+                    if background {
+                        st.bg_waiters.pop();
+                        st.bg_busy = true;
+                    } else {
+                        st.fg_waiters.pop();
+                        st.fg_busy = true;
+                    }
+                    queued.armed = false;
+                    return Some(GatePermit { gate: self, background });
+                }
+                if abandoned() {
+                    // `queued` takes the ticket out as it drops, after this lock is let go.
+                    drop(st);
+                    return None;
+                }
+            }
+            notified.await;
         }
     }
 
@@ -402,7 +597,7 @@ impl Gate {
                 drop(st);
                 // Leaving cannot promote anyone who was not already admissible, so this
                 // is belt-and-braces rather than load-bearing.
-                self.admit.notify_all();
+                self.wake();
                 return None;
             }
             st = self.admit.wait(st).unwrap();
@@ -422,7 +617,7 @@ impl Gate {
     /// between reading its predicate and sleeping on it while it holds that mutex.
     fn wake_all(&self) {
         let _held = self.state.lock().unwrap();
-        self.admit.notify_all();
+        self.wake();
     }
 
     /// The number of callers currently queued, across both lanes. Test-only: lets a test
@@ -453,6 +648,169 @@ struct SidecarGate {
     /// it can never hold more than the calls actually outstanding, however many cancels
     /// arrive late.
     pending: Mutex<std::collections::HashMap<CallId, bool>>,
+    /// Every cancellable call that has been written to the sidecar and not yet answered:
+    /// the sidecar it went to (by generation) and the request id it went as. What lets a
+    /// call let go of after it was written still reach the sidecar, as a `{"cancel": id}`
+    /// line, so the work itself stops rather than only its answer being thrown away.
+    sent: Mutex<std::collections::HashMap<CallId, (u64, u64)>>,
+    /// Every call from arriving to answering, for the watchdog: see `Flights`.
+    flights: Flights,
+}
+
+/// How long a call may wait or run before the watchdog names it.
+const STUCK_RPC_MS: u128 = 5_000;
+/// How often the watchdog looks.
+const WATCHDOG_EVERY: Duration = Duration::from_secs(5);
+/// The longest a stuck call goes unnamed again. It is named at 5 s, then each time its age
+/// has doubled, then at most this often: a long legitimate walk is named a handful of times,
+/// not every 5 s, so it cannot push earlier lines out of the size-capped log.
+const WATCHDOG_RENAME_MAX_MS: u128 = 60_000;
+/// Longest method name logged. The window names the method, so it is capped.
+const WATCHDOG_NAME_MAX: usize = 64;
+/// The most calls the watchdog names in one look; the rest are counted.
+const WATCHDOG_NAMES: usize = 8;
+
+/// One call between arriving and answering.
+struct Flight {
+    method: String,
+    background: bool,
+    since: Instant,
+    /// When it was let onto its lane, if it has been.
+    admitted: Option<Instant>,
+    /// The age at which the watchdog names it next.
+    next_note_ms: u128,
+}
+
+/// Every call from arriving to answering.
+///
+/// The slow-call log names a call only once it answers, so a call that never answers was
+/// never named: a video stuck on its loading note, and every call queued behind it on its
+/// lane, left no line at all. This is what lets the watchdog name them while they are stuck.
+struct Flights {
+    next: std::sync::atomic::AtomicU64,
+    open: Mutex<std::collections::HashMap<u64, Flight>>,
+}
+
+/// Keeps one call in `Flights` for exactly as long as it is outstanding, however it ends.
+struct FlightGuard<'a> {
+    flights: &'a Flights,
+    id: u64,
+}
+
+impl Flights {
+    fn new() -> Self {
+        Flights {
+            next: std::sync::atomic::AtomicU64::new(0),
+            open: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn start(&self, method: &str) -> FlightGuard<'_> {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let flight = Flight {
+            method: method.chars().take(WATCHDOG_NAME_MAX).collect(),
+            background: is_background(priority_for(method)),
+            since: Instant::now(),
+            admitted: None,
+            next_note_ms: STUCK_RPC_MS,
+        };
+        self.lock().insert(id, flight);
+        FlightGuard { flights: self, id }
+    }
+
+    /// The registry, whatever became of a thread that held it before: it holds only
+    /// bookkeeping, and a guard dropped while a panic unwinds must not abort the app.
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, Flight>> {
+        self.open.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The watchdog's lines at `now`: the calls due to be named (outstanding at least
+    /// `min_ms`, and named last at half their present age or a minute ago), the oldest
+    /// first, `WATCHDOG_NAMES` of them by name, and one line counting every call by lane
+    /// whenever any is named. Only the method name is logged, never params: it is not user
+    /// data.
+    fn stuck_report(&self, now: Instant, min_ms: u128) -> Vec<String> {
+        let mut open = self.lock();
+        let mut due: Vec<u64> = Vec::new();
+        let mut stuck = 0;
+        for (id, f) in open.iter() {
+            let age = now.saturating_duration_since(f.since).as_millis();
+            if age < min_ms {
+                continue;
+            }
+            stuck += 1;
+            if age >= f.next_note_ms.max(min_ms) {
+                due.push(*id);
+            }
+        }
+        if due.is_empty() {
+            return Vec::new();
+        }
+        for id in &due {
+            if let Some(f) = open.get_mut(id) {
+                let age = now.saturating_duration_since(f.since).as_millis();
+                f.next_note_ms = (age * 2).min(age + WATCHDOG_RENAME_MAX_MS);
+            }
+        }
+        let mut stuck_flights: Vec<&Flight> = due.iter().filter_map(|id| open.get(id)).collect();
+        stuck_flights.sort_by_key(|f| f.since);
+        let stuck_named = stuck_flights;
+        let mut lines: Vec<String> = stuck_named
+            .iter()
+            .take(WATCHDOG_NAMES)
+            .map(|f| {
+                let lane = if f.background { "bg" } else { "fg" };
+                let age = now.saturating_duration_since(f.since).as_millis();
+                match f.admitted {
+                    None => format!("[rpc] {} stuck lane={lane} waiting={age}", f.method),
+                    Some(at) => {
+                        let waited = at.saturating_duration_since(f.since).as_millis();
+                        let running = now.saturating_duration_since(at).as_millis();
+                        format!("[rpc] {} stuck lane={lane} running={running} waited={waited}", f.method)
+                    }
+                }
+            })
+            .collect();
+        let count = |bg: bool, admitted: bool| {
+            open.values().filter(|f| f.background == bg && f.admitted.is_some() == admitted).count()
+        };
+        lines.push(format!(
+            "[rpc] queue stuck={} fg_running={} fg_waiting={} bg_running={} bg_waiting={}",
+            stuck,
+            count(false, true),
+            count(false, false),
+            count(true, true),
+            count(true, false),
+        ));
+        lines
+    }
+}
+
+impl FlightGuard<'_> {
+    /// The call has been let onto its lane.
+    fn admitted(&self) {
+        if let Some(f) = self.flights.lock().get_mut(&self.id) {
+            f.admitted = Some(Instant::now());
+        }
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flights.lock().remove(&self.id);
+    }
+}
+
+/// Names every call stuck past `STUCK_RPC_MS`, every `WATCHDOG_EVERY`, in the app's log,
+/// for as long as the app runs.
+fn start_rpc_watchdog(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(WATCHDOG_EVERY);
+        let shared = app.state::<SharedSidecar>().inner().clone();
+        for line in shared.flights.stuck_report(Instant::now(), STUCK_RPC_MS) {
+            note(&app, &line);
+        }
+    });
 }
 
 /// Keeps one call in `pending` for exactly as long as it is outstanding. Tied to a drop
@@ -475,6 +833,8 @@ impl SidecarGate {
             sidecar: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
             pending: Mutex::new(std::collections::HashMap::new()),
+            sent: Mutex::new(std::collections::HashMap::new()),
+            flights: Flights::new(),
         }
     }
 
@@ -485,9 +845,8 @@ impl SidecarGate {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Start following a cancellable call. Idempotent, and deliberately so: the call is
-    /// registered on the way in from the frontend AND again once it reaches a pool
-    /// thread, and the second must not wipe a cancel that landed between the two.
+    /// Start following a cancellable call. Idempotent, and deliberately so: registering a
+    /// call twice must never wipe a cancel that landed in between.
     fn track(&self, id: CallId) {
         self.pending.lock().unwrap().entry(id).or_insert(false);
     }
@@ -510,6 +869,18 @@ impl SidecarGate {
         // here too is what keeps the two from ever being taken in opposite orders.
         if found {
             self.gate.wake_all();
+            // Already written to the sidecar: tell it, so the work stops there too.
+            self.send_cancel(id);
+        }
+    }
+
+    /// Writes `{"cancel": <request id>}` to the sidecar a call was sent to, if it was sent
+    /// and has not answered. The `sent` lock is let go before the sidecar's is taken, the
+    /// reverse of nothing: `io` takes them one after the other, never one inside the other.
+    fn send_cancel(&self, id: CallId) {
+        let target = self.sent.lock().unwrap().get(&id).copied();
+        if let Some((generation, request)) = target {
+            self.post(generation, &format!("{{\"cancel\":{request}}}\n"));
         }
     }
 
@@ -553,6 +924,23 @@ impl SidecarGate {
         Some(permit)
     }
 
+    /// `admit`, waited for as a task. The same checks in the same places: on the way in,
+    /// throughout the wait, and once more on admission.
+    async fn admit_async(&self, method: &str, call_id: Option<CallId>) -> Option<GatePermit<'_>> {
+        let prio = priority_for(method);
+        let Some(id) = call_id else {
+            return self.gate.acquire_unless_async(prio, &|| false).await;
+        };
+        if self.is_abandoned(id) {
+            return None;
+        }
+        let permit = self.gate.acquire_unless_async(prio, &|| self.is_abandoned(id)).await?;
+        if self.is_abandoned(id) {
+            return None; // dropping the permit hands the channel straight on
+        }
+        Some(permit)
+    }
+
     /// Run one RPC end to end: queue by the method's priority and, once admitted, hold
     /// the channel exclusively while writing the request and reading its response.
     /// A call that waited to be admitted or held the channel long enough to be felt
@@ -575,10 +963,27 @@ impl SidecarGate {
             Tracked { shared: self, id }
         });
 
+        let flight = self.flights.start(&method);
         let wait_start = Instant::now();
         let permit = self.admit(&method, call_id);
         let wait_ms = wait_start.elapsed().as_millis();
+        if permit.is_some() {
+            flight.admitted();
+        }
+        self.run_admitted(app, method, params, call_id, wait_ms, permit)
+    }
 
+    /// The rest of a call once its wait is over: answer a call given up on while it
+    /// queued, or hold the lane (`permit`, whichever kind) for the request and its answer.
+    fn run_admitted<P>(
+        &self,
+        app: &AppHandle,
+        method: String,
+        params: serde_json::Value,
+        call_id: Option<CallId>,
+        wait_ms: u128,
+        permit: Option<P>,
+    ) -> Result<serde_json::Value, String> {
         let Some(permit) = permit else {
             // Nothing was written and the channel was never held, so there is no hold to
             // report: the wait is the whole of what this call cost.
@@ -589,7 +994,7 @@ impl SidecarGate {
         };
 
         let hold_start = Instant::now();
-        let result = self.io(app, &method, params);
+        let result = self.io(app, &method, params, call_id);
         let hold_ms = hold_start.elapsed().as_millis();
 
         // Release the channel BEFORE logging, so the log write never extends the hold
@@ -612,9 +1017,10 @@ impl SidecarGate {
         app: &AppHandle,
         method: &str,
         params: serde_json::Value,
+        call_id: Option<CallId>,
     ) -> Result<serde_json::Value, String> {
         // Send, under the lock: spawn if needed, register the waiter, write the line.
-        let (generation, rx) = {
+        let (generation, request, rx) = {
             let mut guard = self
                 .sidecar
                 .lock()
@@ -635,7 +1041,7 @@ impl SidecarGate {
             let sc = guard.as_mut().unwrap();
             let generation = sc.generation;
             match send_request(sc, method, params) {
-                Ok(rx) => (generation, rx),
+                Ok((request, rx)) => (generation, request, rx),
                 Err(e) => {
                     // The write failed, so this sidecar is suspect: drop it while the lock
                     // is already held and let the next call spawn a fresh one.
@@ -644,6 +1050,24 @@ impl SidecarGate {
                 }
             }
         };
+
+        // A cancellable call is followed while it is out, so a cancel can still reach the
+        // sidecar; and one let go of while it was being written is cancelled straight away.
+        struct Sent<'a>(&'a SidecarGate, Option<CallId>);
+        impl Drop for Sent<'_> {
+            fn drop(&mut self) {
+                if let Some(id) = self.1 {
+                    self.0.sent.lock().unwrap().remove(&id);
+                }
+            }
+        }
+        let _sent = Sent(self, call_id);
+        if let Some(id) = call_id {
+            self.sent.lock().unwrap().insert(id, (generation, request));
+            if self.is_abandoned(id) {
+                self.send_cancel(id);
+            }
+        }
 
         // Wait, with no lock held, so the other lane's call is free to run alongside this.
         let deadline = Instant::now() + deadline_for(method);
@@ -1199,7 +1623,7 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     // keep its (vault-encrypted) caches and session. This one round trip is synchronous:
     // it runs before the sidecar is reachable by any other caller.
     let init = secure_store::sidecar_init_params(app)?;
-    let rx = send_request(&mut sc, "__init", init)?;
+    let (_, rx) = send_request(&mut sc, "__init", init)?;
     recv_response(&rx, Instant::now() + deadline_for("__init"), "__init")?;
     Ok(sc)
 }
@@ -1236,7 +1660,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "listTrashedAhead" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,
@@ -1252,7 +1676,7 @@ fn send_request(
     sc: &mut Sidecar,
     method: &str,
     params: serde_json::Value,
-) -> Result<Receiver<serde_json::Value>, String> {
+) -> Result<(u64, Receiver<serde_json::Value>), String> {
     let id = sc.next_id;
     sc.next_id += 1;
     // A one-slot channel: exactly one response ever arrives for an id.
@@ -1278,7 +1702,7 @@ fn send_request(
         sc.router.lock().unwrap().remove(&id);
         return Err(format!("flush to sidecar failed: {e}"));
     }
-    Ok(rx)
+    Ok((id, rx))
 }
 
 /// Wait for one request's response, up to its deadline. The reader matches on id and drops
@@ -1381,6 +1805,7 @@ fn host_only(method: &str) -> bool {
                 | "cancelHydrate"
                 | "readOriginalBytes"
                 | "listForMount"
+                | "mountTimelineReady"
                 | "listAlbumsForMount"
                 | "listExtrasForMount"
                 | "startDropUpload"
@@ -1422,6 +1847,7 @@ mod account_switch_tests {
 #[tauri::command]
 async fn rpc(
     app: AppHandle,
+    window: tauri::Window,
     state: State<'_, SharedSidecar>,
     method: String,
     params: serde_json::Value,
@@ -1430,6 +1856,13 @@ async fn rpc(
     if host_only(&method) {
         return Err(format!("{method} is not available here"));
     }
+    // Known by its window as well as its number; and a call that must run is not followed
+    // at all, so nothing can drop or stop it.
+    let call_id = if never_drop(&method) {
+        None
+    } else {
+        call_id.map(|id| window_call_key(window.label(), id))
+    };
     if method == "diagSave" && !diag_file_was_picked(&params) {
         return Err("choose the file to save to first".into());
     }
@@ -1443,16 +1876,36 @@ async fn rpc(
         files_drive::session_ended();
     }
     let shared = state.inner().clone();
-    // Registered here rather than inside the task below, so a cancel arriving while the
-    // task is still waiting for a thread from the blocking pool already finds the call
-    // to mark. Registering twice is harmless: `track` never clears an existing entry.
-    if let Some(id) = call_id {
+    // Followed from here until it answers, so a cancel finds the call whether it is still
+    // queued or already running.
+    let _tracked = call_id.map(|id| {
         shared.track(id);
-    }
+        Tracked { shared: &shared, id }
+    });
     let called = method.clone();
     let app_after = app.clone();
+    // The wait for the channel is a task, not a thread: a burst of calls (a page of
+    // covers, a run through the viewer) queues as futures. A blocking-pool thread is
+    // taken only once the call is admitted, for the write and the wait for its answer,
+    // so at most one per lane is ever held, however long the queue.
+    // Followed from here until it answers, so the watchdog can name it while it is stuck.
+    let flight = shared.flights.start(&method);
+    let wait_start = Instant::now();
+    let permit = if bypasses_lanes(&method) {
+        Some(None)
+    } else {
+        shared
+            .admit_async(&method, call_id)
+            .await
+            .map(|p| Some(p.into_owned(shared.clone())))
+    };
+    let wait_ms = wait_start.elapsed().as_millis();
+    if permit.is_some() {
+        flight.admitted();
+    }
+    let runner = shared.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        rpc_blocking(&app, &shared, method, params, call_id)
+        runner.run_admitted(&app, method, params, call_id, wait_ms, permit)
     })
     .await
     .map_err(|e| format!("sidecar task failed: {e}"))?;
@@ -1840,8 +2293,12 @@ async fn set_files_drive(app: AppHandle, enabled: bool) -> Result<serde_json::Va
 /// A call this reaches before it is admitted never touches the sidecar at all; one it
 /// misses answers normally and the frontend discards the result, exactly as before.
 #[tauri::command]
-fn cancel_rpc(state: State<'_, SharedSidecar>, call_id: CallId) {
-    state.inner().abandon(call_id);
+fn cancel_rpc(window: tauri::Window, state: State<'_, SharedSidecar>, call_id: CallId) {
+    let key = window_call_key(window.label(), call_id);
+    let shared = state.inner().clone();
+    // On a thread of its own: a cancel for a call already sent writes to the sidecar, and
+    // that write can wait behind another one; the window's command thread must not.
+    std::thread::spawn(move || shared.abandon(key));
 }
 
 // ---- The viewer's in-memory original ----
@@ -2078,6 +2535,51 @@ fn page_settled(app: AppHandle) {
 fn log_note(app: AppHandle, message: String) {
     let short: String = message.chars().take(400).collect();
     note(&app, &format!("[ui] {short}"));
+}
+
+/// Whether this run of the app was started to measure scrolling: `PFP_SCROLL_BENCH` set to
+/// anything but nothing or `0`. Asked once by the window, which cannot read the environment
+/// itself; with it set, the timeline scrolls on its own and logs what that cost.
+fn scroll_bench_asked() -> bool {
+    std::env::var_os("PFP_SCROLL_BENCH").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+#[tauri::command]
+fn scroll_bench() -> bool {
+    scroll_bench_asked()
+}
+
+/// Whether a line of the scroll measurement may go into the log: a word and `name=number`
+/// fields, so lowercase letters, digits, `_`, `=`, `-` and spaces, and no longer than a
+/// line of it ever is. Nothing a photo is called, and no address, can be written in that.
+fn bench_line_ok(line: &str) -> bool {
+    !line.is_empty()
+        && line.len() <= 600
+        && line.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'=' | b'-' | b' '))
+}
+
+/// One line of the scroll measurement, from the window into the log. Taken only in a run
+/// started for a measurement, and only in the shape a measurement writes.
+#[tauri::command]
+fn bench_note(app: AppHandle, line: String) {
+    if scroll_bench_asked() && bench_line_ok(&line) {
+        note(&app, &format!("[bench] {line}"));
+    }
+}
+
+/// Whether a screen's name may go into the log: a short word of lowercase letters, digits
+/// and `_`, as the window names its screens. Nothing a photo, album or person is called fits.
+fn screen_name_ok(screen: &str) -> bool {
+    !screen.is_empty() && screen.len() <= 40 && screen.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Which screen the window shows, written into the log as it changes, so a profile run can
+/// say on its own what the app was doing when it measured what it measured.
+#[tauri::command]
+fn screen_note(app: AppHandle, screen: String) {
+    if screen_name_ok(&screen) {
+        note(&app, &format!("[screen] {screen}"));
+    }
 }
 
 /// The current start-with-Windows preference, for the Settings toggle.
@@ -2914,6 +3416,7 @@ mod capability_tests {
             "core:window:allow-minimize",
             "core:window:allow-toggle-maximize",
             "core:window:allow-start-dragging",
+            "core:window:allow-start-resize-dragging",
             "core:window:allow-set-title",
         ] {
             assert!(granted.contains(&permission), "{permission} is not granted");
@@ -2999,7 +3502,82 @@ mod update_leftover_tests {
     }
 }
 
+/// GStreamer's GPU decoders for H.264 and HEVC (VA-API, the older VA-API plugin, NVDEC),
+/// ranked below the software ones (1, not off: still used where there is no software one).
+#[cfg(target_os = "linux")]
+const SOFTWARE_VIDEO_RANKS: &str = "vah264dec:1,vah265dec:1,vaapih264dec:1,vaapih265dec:1,\
+nvh264dec:1,nvh265dec:1,nvh264sldec:1,nvh265sldec:1";
+
+/// The file whose presence turns software video decoding on (Settings, Linux). A plain file
+/// rather than a setting: it is read before the window exists, before the keyring is open.
+const SOFTWARE_VIDEO_FLAG: &str = "video-software-decode";
+
+/// The app's data folder as Tauri resolves it on Linux, worked out before Tauri runs.
+#[cfg(target_os = "linux")]
+fn early_data_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+    Some(base.join("eu.akoos.photos.desktop"))
+}
+
+/// The ranks to run with, from those inherited: ours (with the switch on) and then any the
+/// person set themselves, which win; None for none at all. Ours are taken off what is
+/// inherited first: a restart from Settings starts the new process with this one's
+/// environment, which carried them even after the switch was turned off.
+#[cfg(target_os = "linux")]
+fn video_ranks(inherited: Option<&str>, on: bool) -> Option<String> {
+    let mut theirs = inherited.unwrap_or("");
+    while let Some(rest) = theirs.strip_prefix(SOFTWARE_VIDEO_RANKS) {
+        theirs = rest.strip_prefix(',').unwrap_or(rest);
+    }
+    let theirs = theirs.trim();
+    match (on, theirs.is_empty()) {
+        (true, true) => Some(SOFTWARE_VIDEO_RANKS.to_string()),
+        (true, false) => Some(format!("{SOFTWARE_VIDEO_RANKS},{theirs}")),
+        (false, true) => None,
+        (false, false) => Some(theirs.to_string()),
+    }
+}
+
+/// Whether video is decoded in software (Settings).
+#[tauri::command]
+fn video_software_decode(app: AppHandle) -> bool {
+    secure_store::app_dir(&app).map(|d| d.join(SOFTWARE_VIDEO_FLAG).exists()).unwrap_or(false)
+}
+
+/// Turns software video decoding on or off; it takes effect at the next start.
+#[tauri::command]
+fn set_video_software_decode(app: AppHandle, on: bool) -> Result<(), String> {
+    let path = secure_store::app_dir(&app)?.join(SOFTWARE_VIDEO_FLAG);
+    if on {
+        std::fs::write(&path, b"1").map_err(|e| e.to_string())
+    } else {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+            _ => Ok(()),
+        }
+    }
+}
+
 pub fn run() {
+    // On Linux the window plays video through GStreamer. With some GPUs its hardware decoder
+    // fails to decode at the new place after a seek in 4K phone videos, which software
+    // decoding plays and seeks in. Settings has a switch for that: with it on, the GPU
+    // decoders rank below the software ones. Set before anything starts, so the web process
+    // inherits it.
+    #[cfg(target_os = "linux")]
+    {
+        let on = early_data_dir().is_some_and(|d| d.join(SOFTWARE_VIDEO_FLAG).exists());
+        let inherited = std::env::var("GST_PLUGIN_FEATURE_RANK").ok();
+        match video_ranks(inherited.as_deref(), on) {
+            Some(ranks) if inherited.as_deref() != Some(ranks.as_str()) => std::env::set_var("GST_PLUGIN_FEATURE_RANK", ranks),
+            None if inherited.is_some() => std::env::remove_var("GST_PLUGIN_FEATURE_RANK"),
+            _ => {}
+        }
+    }
+
     // Keep the WebView2 profile inside the app's own data folder so, on an
     // installed build, everything (session, caches, WebView data) lives under the
     // single install folder and the uninstaller wipes it all together.
@@ -3067,6 +3645,11 @@ pub fn run() {
             reveal_window,
             page_settled,
             log_note,
+            scroll_bench,
+            bench_note,
+            screen_note,
+            video_software_decode,
+            set_video_software_decode,
             launch_at_login,
             set_launch_at_login,
             hide_tray_popup,
@@ -3134,6 +3717,8 @@ pub fn run() {
             // An update installed while this app still ran set the files it held aside (`.pfp-old`); this
             // process no longer uses them, so they go now rather than at the next update.
             std::thread::spawn(sweep_update_leftovers);
+            // Names in the log any call stuck waiting for its lane or for its answer.
+            start_rpc_watchdog(app.handle().clone());
             // The file a cold launch was asked to open. The single-instance callback
             // above never runs for the first process, and this never runs for a second
             // one, so both are needed and neither is a duplicate of the other. This one
@@ -3279,7 +3864,7 @@ pub fn run() {
 mod gate_tests {
     // The gate is tested in isolation: `Gate` carries no `Sidecar`, so these exercise
     // the queueing and mutual-exclusion logic without spawning the Node process.
-    use super::{Gate, Priority};
+    use super::{screen_name_ok, Gate, Priority};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -3351,12 +3936,213 @@ mod gate_tests {
         out
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn software_video_ranks_leave_the_persons_own_last() {
+        use super::{video_ranks, SOFTWARE_VIDEO_RANKS as OURS};
+        assert_eq!(video_ranks(None, true).as_deref(), Some(OURS));
+        assert!(!OURS.contains(' ') && OURS.starts_with("vah264dec:1,"));
+        assert_eq!(video_ranks(Some("x:0"), true), Some(format!("{OURS},x:0")));
+        assert_eq!(video_ranks(None, false), None);
+        assert_eq!(video_ranks(Some("x:0"), false).as_deref(), Some("x:0"));
+        // Inherited across a restart from Settings: ours come off, and are not doubled.
+        assert_eq!(video_ranks(Some(OURS), false), None);
+        assert_eq!(video_ranks(Some(&format!("{OURS},x:0")), false).as_deref(), Some("x:0"));
+        assert_eq!(video_ranks(Some(&format!("{OURS},{OURS},x:0")), true), Some(format!("{OURS},x:0")));
+    }
+
+    #[test]
+    fn a_screen_note_takes_only_a_screen_name() {
+        assert!(screen_name_ok("people"));
+        assert!(screen_name_ok("person_photos"));
+        let long = "a".repeat(41);
+        for bad in ["", "People", "a b", "x/y", "Violeta", long.as_str()] {
+            assert!(!screen_name_ok(bad), "{bad:?} was let through");
+        }
+    }
+
     #[test]
     fn every_sidecar_method_has_its_lane_decided() {
         let methods = sidecar_methods();
         assert!(methods.len() > 100, "the handler tables were not read: {}", methods.len());
         let open: Vec<&String> = methods.iter().filter(|m| super::classified(m).is_none()).collect();
         assert!(open.is_empty(), "name these in `classified`: {open:?}");
+    }
+
+    #[test]
+    fn the_trash_read_ahead_never_holds_up_the_window() {
+        assert!(super::is_background(super::priority_for("listTrashedAhead")));
+        assert!(!super::is_background(super::priority_for("listTrashed")));
+    }
+
+    #[test]
+    fn the_watchdog_names_calls_stuck_waiting_or_running_and_counts_the_lanes() {
+        let flights = super::Flights::new();
+        let quick = flights.start("getPreview");
+        let waiting = flights.start("semanticSearch");
+        let running = flights.start("getVideo");
+        running.admitted();
+        let behind = flights.start("warmThumbnails");
+        let later = Instant::now() + Duration::from_secs(10);
+        // Nothing is stuck yet.
+        assert!(flights.stuck_report(Instant::now(), 5_000).is_empty());
+        drop(quick);
+        let report = flights.stuck_report(later, 5_000);
+        assert_eq!(report.len(), 4, "{report:?}");
+        assert!(report[0].starts_with("[rpc] semanticSearch stuck lane=fg waiting="), "{report:?}");
+        assert!(report[1].starts_with("[rpc] getVideo stuck lane=fg running="), "{report:?}");
+        assert!(report[2].starts_with("[rpc] warmThumbnails stuck lane=bg waiting="), "{report:?}");
+        assert_eq!(report[3], "[rpc] queue stuck=3 fg_running=1 fg_waiting=1 bg_running=0 bg_waiting=1");
+        drop((waiting, running, behind));
+        assert!(flights.stuck_report(later, 5_000).is_empty(), "every call left with its guard");
+    }
+
+    #[test]
+    fn the_watchdog_names_a_long_call_less_and_less_often() {
+        let flights = super::Flights::new();
+        let walk = flights.start("listExtrasForMount");
+        let start = Instant::now();
+        let named_at: Vec<u64> = (1..=60u64)
+            .map(|tick| tick * 5)
+            .filter(|s| !flights.stuck_report(start + Duration::from_secs(*s), 5_000).is_empty())
+            .collect();
+        // At 5 s, at each doubling of its age, then once a minute.
+        assert_eq!(named_at, vec![5, 10, 20, 40, 80, 140, 200, 260], "{named_at:?}");
+        drop(walk);
+    }
+
+    #[test]
+    fn the_watchdog_caps_a_method_name() {
+        let flights = super::Flights::new();
+        let long = "m".repeat(500);
+        let call = flights.start(&long);
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert!(report[0].len() < 120, "{}", report[0]);
+        drop(call);
+    }
+
+    #[test]
+    fn a_measurement_line_holds_counts_and_times_and_nothing_else() {
+        assert!(super::bench_line_ok("sec n=12 phase=down fr=31 p50=24 late_pct=88 top=120394"));
+        assert!(super::bench_line_ok("skip reason=no_grid waited=20000"));
+        // Nothing with the shape of a name, a path, an address or a uid gets through.
+        for bad in [
+            "",
+            "sec name=IMG_2041.JPG",
+            "sec url=http://127.0.0.1:4000/t/abc",
+            "sec uid=AbCd~EfGh",
+            "sec path=/home/user/photo",
+            "sec n=1\n[host] forged",
+            "sec note=caf\u{e9}",
+        ] {
+            assert!(!super::bench_line_ok(bad), "{bad:?}");
+        }
+        assert!(!super::bench_line_ok(&"a".repeat(601)));
+    }
+
+    #[test]
+    fn the_watchdog_names_only_so_many_and_counts_the_rest() {
+        let flights = super::Flights::new();
+        let guards: Vec<_> = (0..20).map(|_| flights.start("getPreview")).collect();
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert_eq!(report.len(), super::WATCHDOG_NAMES + 1);
+        assert!(report.last().unwrap().starts_with("[rpc] queue stuck=20 "));
+        drop(guards);
+    }
+
+    /// A stand-in sidecar: a shell that writes every line it is sent to `out`.
+    #[cfg(unix)]
+    fn recording_sidecar(out: &std::path::Path, generation: u64) -> super::Sidecar {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("cat > '{}'", out.display()))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        super::Sidecar {
+            child,
+            stdin,
+            next_id: 7,
+            router: Default::default(),
+            generation,
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_for_text(path: &std::path::Path, want: &str) -> String {
+        for _ in 0..200 {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            if text.contains(want) {
+                return text;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    // A call let go of after it was written reaches the sidecar as a cancel naming the
+    // request id it went as, so the work stops there and not only its answer is dropped.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancel_after_sending_reaches_the_sidecar() {
+        let dir = std::env::temp_dir().join(format!("pfp-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("lines");
+        let shared = super::SidecarGate::new();
+        *shared.sidecar.lock().unwrap() = Some(recording_sidecar(&out, 3));
+        let (request, _rx) = {
+            let mut guard = shared.sidecar.lock().unwrap();
+            super::send_request(guard.as_mut().unwrap(), "getPreview", serde_json::json!({})).unwrap()
+        };
+        shared.track(42);
+        shared.sent.lock().unwrap().insert(42, (3, request));
+        shared.abandon(42);
+        let text = wait_for_text(&out, "cancel");
+        assert!(text.contains(&format!("{{\"cancel\":{request}}}")), "{text}");
+        // A call that was never sent, or has answered, sends nothing.
+        shared.sent.lock().unwrap().remove(&42);
+        shared.track(43);
+        shared.abandon(43);
+        thread::sleep(Duration::from_millis(50));
+        let after = std::fs::read_to_string(&out).unwrap_or_default();
+        assert_eq!(after.matches("cancel").count(), 1, "{after}");
+        // Nor to a sidecar replaced since: the cancel names a request of the old one.
+        shared.track(44);
+        shared.sent.lock().unwrap().insert(44, (2, 99));
+        shared.abandon(44);
+        thread::sleep(Duration::from_millis(50));
+        assert!(!std::fs::read_to_string(&out).unwrap_or_default().contains("99"));
+        drop(shared);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn calls_from_different_windows_never_share_a_key() {
+        let main = super::window_call_key("main-test", 5);
+        let viewer = super::window_call_key("viewer-test", 5);
+        assert_ne!(main, viewer);
+        assert_eq!(main, super::window_call_key("main-test", 5), "a window keeps its index");
+        assert_ne!(main, super::window_call_key("main-test", 6));
+        // The largest number a page can send keeps to its own window's range.
+        let top = (1u64 << 53) - 1;
+        assert_ne!(super::window_call_key("main-test", top), super::window_call_key("viewer-test", top));
+    }
+
+    #[test]
+    fn locking_and_signing_out_are_never_dropped() {
+        for method in ["lock", "signOut", "releaseOriginal", "cancelUpload", "faceClearEverywhere"] {
+            assert!(super::never_drop(method), "{method}");
+        }
+        // An unlock given up on is dropped rather than carried out behind a lock screen.
+        for method in ["unlock", "unlockDevice", "getPreview", "warmThumbnails", "createAlbum"] {
+            assert!(!super::never_drop(method), "{method}");
+        }
+        // Locking does not wait behind a long call on the lane.
+        for method in ["lock", "signOut", "lockStatus"] {
+            assert!(super::bypasses_lanes(method), "{method}");
+        }
+        assert!(!super::bypasses_lanes("getVideo"));
     }
 
     #[test]
@@ -3405,6 +4191,133 @@ mod gate_tests {
 
             // Interactive first (3 before 4), then UserAction (1 before 2).
             assert_eq!(*order.lock().unwrap(), vec![3, 4, 1, 2]);
+        });
+    }
+
+    // Calls waited for as tasks queue without a thread each: 200 of them wait on ONE
+    // thread here, and still come through by priority, then in order of arrival.
+    #[test]
+    fn queued_tasks_hold_no_thread_and_keep_the_order() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let order = Arc::new(Mutex::new(Vec::<u32>::new()));
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let local = Arc::clone(&gate);
+            let order_t = Arc::clone(&order);
+            let runner = thread::spawn(move || {
+                rt.block_on(async move {
+                    let mut tasks = Vec::new();
+                    for id in 0..200u32 {
+                        let prio = if id % 50 == 49 { Priority::Interactive } else { Priority::UserAction };
+                        let gate = Arc::clone(&local);
+                        let order = Arc::clone(&order_t);
+                        tasks.push(tokio::spawn(async move {
+                            let permit = gate.acquire_unless_async(prio, &|| false).await;
+                            order.lock().unwrap().push(id);
+                            drop(permit);
+                        }));
+                    }
+                    for t in tasks {
+                        t.await.unwrap();
+                    }
+                });
+            });
+            wait_until_queued(&gate, 200);
+            drop(holder);
+            runner.join().unwrap();
+            let got = order.lock().unwrap().clone();
+            let mut want: Vec<u32> = vec![49, 99, 149, 199];
+            want.extend((0..200).filter(|id| id % 50 != 49));
+            assert_eq!(got, want);
+        });
+    }
+
+    // A thread and a task wait in the same line: whichever kind a caller is, its place
+    // is its priority and arrival, and a release wakes both kinds.
+    #[test]
+    fn threads_and_tasks_share_one_line() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+            let (gate_t, order_t) = (Arc::clone(&gate), Arc::clone(&order));
+            let as_thread = thread::spawn(move || {
+                let permit = gate_t.acquire(Priority::UserAction);
+                order_t.lock().unwrap().push("thread");
+                drop(permit);
+            });
+            wait_until_queued(&gate, 1);
+
+            let (gate_a, order_a) = (Arc::clone(&gate), Arc::clone(&order));
+            let as_task = thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                rt.block_on(async move {
+                    let permit = gate_a.acquire_unless_async(Priority::Interactive, &|| false).await;
+                    order_a.lock().unwrap().push("task");
+                    drop(permit);
+                });
+            });
+            wait_until_queued(&gate, 2);
+
+            drop(holder);
+            as_thread.join().unwrap();
+            as_task.join().unwrap();
+            assert_eq!(*order.lock().unwrap(), vec!["task", "thread"]);
+        });
+    }
+
+    // A task that stops waiting (its future dropped, as when the window goes) takes its
+    // ticket with it: left at the head of the lane, it would hold up everyone after it.
+    #[test]
+    fn a_dropped_waiting_task_leaves_the_line() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            rt.block_on(async {
+                use std::future::Future;
+                let mut waiting = Box::pin(gate.acquire_unless_async(Priority::Interactive, &|| false));
+                // Poll it once, so it joins the line, then give up on it.
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(waker);
+                assert!(waiting.as_mut().poll(&mut cx).is_pending());
+                assert_eq!(gate.queued(), 1);
+                drop(waiting);
+                assert_eq!(gate.queued(), 0);
+            });
+            drop(holder);
+            // The lane is free for the next caller at once.
+            drop(gate.acquire(Priority::UserAction));
+        });
+    }
+
+    // A queued task let go of leaves at the next wake with nothing admitted, as a thread does.
+    #[test]
+    fn an_abandoned_task_leaves_without_the_lane() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (gate_t, gone_t) = (Arc::clone(&gate), Arc::clone(&gone));
+            let task = thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                rt.block_on(async move {
+                    gate_t
+                        .acquire_unless_async(Priority::Interactive, &|| gone_t.load(Ordering::SeqCst))
+                        .await
+                        .is_none()
+                })
+            });
+            wait_until_queued(&gate, 1);
+            gone.store(true, Ordering::SeqCst);
+            gate.wake_all();
+            assert!(task.join().unwrap());
+            assert_eq!(gate.queued(), 0);
+            // The holder still has the lane, and its release lets the next caller straight in.
+            drop(holder);
+            drop(gate.acquire(Priority::UserAction));
         });
     }
 
@@ -3674,6 +4587,8 @@ mod log_tests {
         // The whole-library sweeps come in by priority tier, not by a second list.
         assert_eq!(priority_for("listForMount"), Priority::Enumerate);
         assert_eq!(deadline_for("listForMount"), long);
+        assert_eq!(deadline_for("listTrashed"), long, "a large trash must not cost the session");
+        assert_eq!(deadline_for("listTrashedAhead"), long, "nor the same walk read ahead");
         assert!(deadline_for("getPreview") < long);
         assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
     }

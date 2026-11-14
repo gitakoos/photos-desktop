@@ -291,6 +291,11 @@ body {
 .pfp-veil .app-shell {
   visibility: hidden;
 }
+/* A dialog drawn at the page's top level (Confirm) is hidden with the rest: its text can name
+   a person or an album. */
+.pfp-veil .cf-backdrop {
+  visibility: hidden;
+}
 
 .app-shell {
   user-select: none;

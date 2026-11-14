@@ -23,6 +23,7 @@
 .cf-backdrop {
   position: fixed;
   inset: 0;
+  user-select: none;
   z-index: 1100;
   display: grid;
   place-items: center;
@@ -71,7 +72,7 @@
   font-weight: 500;
   cursor: pointer;
 }
-.cf-btn:hover {
+.cf-btn:hover:not(:disabled) {
   color: var(--fg-primary);
 }
 .cf-btn.primary {
@@ -80,13 +81,17 @@
   color: var(--on-accent);
   font-weight: 600;
 }
+.cf-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .cf-btn.danger {
   border-color: transparent;
   background: var(--status-error);
   color: #fff;
   font-weight: 600;
 }
-.cf-btn.danger:hover {
+.cf-btn.danger:hover:not(:disabled) {
   filter: brightness(1.08);
   color: #fff;
 }

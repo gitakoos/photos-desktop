@@ -20,6 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import { ResizeEdges } from "./components/ResizeEdges";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
@@ -102,6 +103,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <ErrorBoundary>
     <LangProvider>
       {isTrayPopup ? <TrayPopup /> : isViewer ? <ViewerWindow /> : <App />}
+      {/* Windows draws the frame itself; elsewhere the page is the frame and its edges resize it. */}
+      {!isTrayPopup && !isWindows && <ResizeEdges />}
     </LangProvider>
   </ErrorBoundary>,
 );

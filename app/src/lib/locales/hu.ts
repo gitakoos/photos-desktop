@@ -210,6 +210,8 @@ export const hu: Record<string, string> = {
   "settings.diagnosticsFailed": "Nem sikerült elkészíteni a diagnosztikát. Próbáld újra.",
   "settings.diagDetailed": "Részletes naplózás",
   "settings.diagDetailedDesc": "Minden fotó- és fájllépés idejét is feljegyzi, nem csak a lassúakét. Akkor kapcsold be, ha valami lassúságot vizsgálsz.",
+  "settings.softwareVideo": "Videó szoftveres dekódolása",
+  "settings.softwareVideoDesc": "Kapcsold be, ha a videók előretekeréskor dekódolási hibával megállnak. Több processzort használ, mint a videokártya. Újraindítás után lép életbe.",
   "settings.myFiles": "Saját fájlok",
   "settings.myFilesNav": "Fotók és videók behozása a Proton Drive mappáiból",
   "settings.uploadQuality": "Feltöltési minőség",

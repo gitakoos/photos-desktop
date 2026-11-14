@@ -91,6 +91,7 @@ sidecar/
                       the backup shared with the phone
 setup/                Installer (Tauri)
 flatpak/              Linux Flatpak manifest and local build
+tools/                pfp_profile.py: profiles the Linux app from /proc
 ```
 
 ## What's reused vs. what's built here

@@ -23,14 +23,15 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { request } from "node:http";
 
-import { startThumbServer, stopThumbServer } from "./thumbServer.ts";
+import { startThumbServer, stopThumbServer, takeServerStats } from "./thumbServer.ts";
+import { videoFromBytes, type VideoSource } from "./videoStream.ts";
 
 const PHOTO = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
 const UID = "dm9sdW1l~bGluaw==";
 const source = async (uid: string) => (uid === UID ? PHOTO : null);
 
 /** A raw GET, so the method and the Host header can be anything a caller might send. */
-function get(url: string, options: { method?: string; host?: string } = {}) {
+function get(url: string, options: { method?: string; host?: string; range?: string; origin?: string } = {}) {
   const target = new URL(url);
   return new Promise<{ status: number; headers: Record<string, unknown>; body: Buffer }>(
     (resolve, reject) => {
@@ -38,9 +39,13 @@ function get(url: string, options: { method?: string; host?: string } = {}) {
         {
           hostname: target.hostname,
           port: target.port,
-          path: target.pathname,
+          path: target.pathname + target.search,
           method: options.method ?? "GET",
-          headers: options.host ? { Host: options.host } : {},
+          headers: {
+            ...(options.host ? { Host: options.host } : {}),
+            ...(options.range ? { Range: options.range } : {}),
+            ...(options.origin ? { Origin: options.origin } : {}),
+          },
         },
         (res) => {
           const chunks: Buffer[] = [];
@@ -72,6 +77,22 @@ describe("the loopback thumbnail server", () => {
     expect(res.headers["content-type"]).toBe("image/jpeg");
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("lets the app's own window read a thumbnail from a worker, and no other origin", async () => {
+    const base = await startThumbServer(source);
+    const url = base + encodeURIComponent(UID);
+
+    const app = await get(url, { origin: "tauri://localhost" });
+    expect(app.status).toBe(200);
+    expect(app.headers["access-control-allow-origin"]).toBe("tauri://localhost");
+    expect(app.headers["vary"]).toBe("Origin");
+    expect((await get(url, { origin: "http://tauri.localhost" })).headers["access-control-allow-origin"]).toBe("http://tauri.localhost");
+
+    for (const origin of ["https://example.com", "null", "tauri://localhost.example.com"]) {
+      const other = await get(url, { origin });
+      expect(other.headers["access-control-allow-origin"]).toBeUndefined();
+    }
   });
 
   it("refuses a wrong token, and one from before the last start", async () => {
@@ -119,6 +140,180 @@ describe("the loopback thumbnail server", () => {
     req.destroy();
 
     await vi.waitFor(() => expect(seen!.aborted).toBe(true));
+  });
+
+  it("serves a cover cut to a face, with the same token and no-store", async () => {
+    const CUT = Buffer.from([0xff, 0xd8, 9, 9]);
+    const asked: unknown[] = [];
+    const base = await startThumbServer(source, async (uid, box) => {
+      asked.push([uid, box]);
+      return CUT;
+    });
+
+    const res = await get(base + encodeURIComponent(UID) + "/f/0.1,0.2,0.3,0.4");
+
+    expect(res.status).toBe(200);
+    expect(res.body.equals(CUT)).toBe(true);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(asked).toEqual([[UID, [0.1, 0.2, 0.3, 0.4]]]);
+  });
+
+  it("refuses a face cover with a bad box, a wrong token, or no face source", async () => {
+    const faces = async () => Buffer.from([1]);
+    const base = await startThumbServer(source, faces);
+    const wrong = base.replace(/\/t\/[^/]+\//, `/t/${Buffer.alloc(32, 7).toString("base64url")}/`);
+
+    expect((await get(base + encodeURIComponent(UID) + "/f/0.5,0.2,0.3,0.4")).status).toBe(404);
+    expect((await get(base + encodeURIComponent(UID) + "/f/x")).status).toBe(404);
+    expect((await get(base + encodeURIComponent(UID) + "/g/0.1,0.2,0.3,0.4")).status).toBe(404);
+    expect((await get(wrong + encodeURIComponent(UID) + "/f/0.1,0.2,0.3,0.4")).status).toBe(403);
+
+    const plain = await startThumbServer(source);
+    expect((await get(plain + encodeURIComponent(UID) + "/f/0.1,0.2,0.3,0.4")).status).toBe(404);
+  });
+
+  describe("a video", () => {
+    const CLIP = Buffer.from(Array.from({ length: 600_000 }, (_, i) => i % 253));
+    const videos = async (uid: string): Promise<VideoSource | null> =>
+      uid === UID ? videoFromBytes(CLIP, "video/mp4") : null;
+
+    it("answers a range with 206 and where it sits in the file", async () => {
+      const base = await startThumbServer(source, undefined, videos);
+      const res = await get(base + encodeURIComponent(UID) + "/v", { range: "bytes=1000-1999" });
+      expect(res.status).toBe(206);
+      expect(res.headers["content-range"]).toBe(`bytes 1000-1999/${CLIP.length}`);
+      expect(res.headers["content-length"]).toBe("1000");
+      expect(res.headers["accept-ranges"]).toBe("bytes");
+      expect(res.headers["content-type"]).toBe("video/mp4");
+      expect(res.headers["cache-control"]).toBe("no-store");
+      expect(res.body.equals(CLIP.subarray(1000, 2000))).toBe(true);
+    });
+
+    it("answers the whole video without a range, and says ranges may be asked for", async () => {
+      const base = await startThumbServer(source, undefined, videos);
+      const res = await get(base + encodeURIComponent(UID) + "/v");
+      expect(res.status).toBe(200);
+      expect(res.headers["accept-ranges"]).toBe("bytes");
+      expect(res.body.equals(CLIP)).toBe(true);
+    });
+
+    it("refuses a range past the end with 416 and the size", async () => {
+      const base = await startThumbServer(source, undefined, videos);
+      const res = await get(base + encodeURIComponent(UID) + "/v", { range: `bytes=${CLIP.length}-` });
+      expect(res.status).toBe(416);
+      expect(res.headers["content-range"]).toBe(`bytes */${CLIP.length}`);
+    });
+
+    it("answers HEAD for a video with its size and nothing else, and refuses HEAD for a thumbnail", async () => {
+      const base = await startThumbServer(source, undefined, videos);
+      const res = await get(base + encodeURIComponent(UID) + "/v", { method: "HEAD" });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-length"]).toBe(String(CLIP.length));
+      expect(res.body.length).toBe(0);
+      expect((await get(base + encodeURIComponent(UID), { method: "HEAD" })).status).toBe(405);
+    });
+
+    it("needs the token, and answers 404 for an unknown video or without a video source", async () => {
+      const base = await startThumbServer(source, undefined, videos);
+      const wrong = base.replace(/\/t\/[^/]+\//, `/t/${Buffer.alloc(32, 7).toString("base64url")}/`);
+      expect((await get(wrong + encodeURIComponent(UID) + "/v")).status).toBe(403);
+      expect((await get(base + encodeURIComponent("other~uid") + "/v")).status).toBe(404);
+      const plain = await startThumbServer(source);
+      expect((await get(plain + encodeURIComponent(UID) + "/v")).status).toBe(404);
+    });
+
+    it("cuts the connection when the video turns out shorter than it said", async () => {
+      const short: VideoSource = {
+        size: 1000,
+        mime: "video/mp4",
+        async *read() {
+          yield Buffer.alloc(600);
+          throw new Error("video shorter than stated");
+        },
+      };
+      const base = await startThumbServer(source, undefined, async () => short);
+      await expect(get(base + encodeURIComponent(UID) + "/v")).rejects.toThrow();
+    });
+
+    it("stops reading when the player hangs up", async () => {
+      let read = 0;
+      let stopped: AbortSignal | null = null;
+      const endless: VideoSource = {
+        size: 1 << 30,
+        mime: "video/mp4",
+        async *read(_start, _end, gone) {
+          stopped = gone;
+          while (!gone.aborted) {
+            read++;
+            yield Buffer.alloc(64 * 1024);
+            await new Promise((r) => setTimeout(r, 1));
+          }
+        },
+      };
+      const base = await startThumbServer(source, undefined, async () => endless);
+      const target = new URL(base + encodeURIComponent(UID) + "/v");
+      const req = request({ hostname: target.hostname, port: target.port, path: target.pathname });
+      req.on("error", () => {});
+      req.on("response", (res) => {
+        res.once("data", () => req.destroy());
+      });
+      req.end();
+      await vi.waitFor(() => expect(stopped?.aborted).toBe(true));
+      const at = read;
+      await new Promise((r) => setTimeout(r, 50));
+      expect(read - at).toBeLessThanOrEqual(1);
+    });
+  });
+
+  it("counts the answers open, and how the ended ones went", async () => {
+    takeServerStats();
+    let release!: () => void;
+    const base = await startThumbServer(async (uid) => {
+      if (uid === "slow~one") await new Promise<void>((r) => (release = r));
+      return uid === UID || uid === "slow~one" ? PHOTO : null;
+    });
+    await get(base + encodeURIComponent(UID));
+    await get(base + encodeURIComponent("unknown~uid"));
+    const first = takeServerStats();
+    expect([first.open, first.served, first.missing, first.failed, first.dropped]).toEqual([0, 1, 1, 0, 0]);
+    const pending = get(base + encodeURIComponent("slow~one"));
+    await vi.waitFor(() => expect(takeServerStats().open).toBe(1));
+    const s = takeServerStats();
+    expect(s.open).toBe(1);
+    expect(s.oldestMs).toBeGreaterThanOrEqual(0);
+    release();
+    await pending;
+    await vi.waitFor(() => expect(takeServerStats().open).toBe(0));
+  });
+
+  it("counts an answer the window stopped waiting for as dropped", async () => {
+    takeServerStats();
+    const base = await startThumbServer((_uid, gone) => new Promise((resolve) => gone.addEventListener("abort", () => resolve(null))));
+    const target = new URL(base + encodeURIComponent(UID));
+    const req = request({ hostname: target.hostname, port: target.port, path: target.pathname });
+    req.on("error", () => {});
+    req.end();
+    await vi.waitFor(() => expect(takeServerStats().open).toBe(1));
+    req.destroy();
+    let dropped = 0;
+    await vi.waitFor(() => {
+      dropped += takeServerStats().dropped;
+      expect(dropped).toBe(1);
+    });
+  });
+
+  it("passes on the size a tile asks for, rounded up, and the full thumbnail without one", async () => {
+    const widths: (number | undefined)[] = [];
+    const base = await startThumbServer(async (_uid, _gone, width) => {
+      widths.push(width);
+      return PHOTO;
+    });
+    await get(base + encodeURIComponent(UID) + "?w=150");
+    await get(base + encodeURIComponent(UID) + "?w=150&a=2");
+    await get(base + encodeURIComponent(UID));
+    await get(base + encodeURIComponent(UID) + "?w=4000");
+    await get(base + encodeURIComponent(UID) + "?w=x");
+    expect(widths).toEqual([192, 192, undefined, undefined, undefined]);
   });
 
   it("stops answering at lock", async () => {
