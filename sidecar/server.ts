@@ -46,6 +46,7 @@ import { scrubSecrets } from "./scrub.ts";
 import { diag, type DiagArea } from "./proton/diag.ts";
 import { diagnosticsReport, saveDiagnostics, watchJobs, withoutNames } from "./proton/diagReport.ts";
 import { checkUpdate, downloadUpdate, startUpdateDownload, updateStatus } from "./update.ts";
+import { beginRequest, endRequest, takeCancelLine, type CallContext } from "./proton/requests.ts";
 
 // Two hard rules for the sidecar's output. (1) stdout carries ONLY JSON-RPC
 // responses; a stray write corrupts the channel and knocks the sidecar offline.
@@ -130,7 +131,9 @@ function driveKinds(p: any) {
   return { faces: p?.faces !== false, labels: p?.labels !== false, search: !!p?.search, faceData: !!p?.faceData };
 }
 
-const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
+// Each handler is given its params and the request's context, whose `signal` aborts when the
+// host lets go of the call (see proton/requests.ts). A handler that ignores it runs to its end.
+const handlers: Record<string, (params: any, ctx: CallContext) => Promise<unknown> | unknown> = {
   // Sent by the Rust host before anything else: the app directory, and the key
   // that seals the vault's own metadata. The store's data key is NOT passed here;
   // it is derived from the user's password by the vault on unlock, so the cache
@@ -173,9 +176,9 @@ const handlers: Record<string, (params: any) => Promise<unknown> | unknown> = {
   getTimeline: () => session.getTimeline(),
   startTimeline: () => session.startTimeline(),
   timelinePage: (p) => session.timelinePage(p.run, p.offset ?? 0, p.limit ?? 20000),
-  getThumbnails: (p) => session.getThumbnails(p.uids),
-  warmThumbnails: (p) => session.warmThumbnails(p.uids),
-  getPreview: (p) => session.getPreview(p.uid),
+  getThumbnails: (p, ctx) => session.getThumbnails(p.uids, undefined, ctx.signal),
+  warmThumbnails: (p, ctx) => session.warmThumbnails(p.uids, ctx.signal),
+  getPreview: (p, ctx) => session.getPreview(p.uid, ctx.signal),
   getOriginal: (p) => session.getOriginal(p.uid),
   releaseOriginal: (p) => session.releaseOriginal(p?.uid),
   readOriginalBytes: (p) => session.readOriginalBytes(p.token),
@@ -376,16 +379,22 @@ async function handle(req: Request): Promise<unknown> {
     return { id: req.id, ok: false, error: `unknown method: ${req.method}` };
   }
   const started = Date.now();
+  const ctx = beginRequest(req.id ?? null);
   try {
-    const result = await handler(req.params ?? {});
+    const result = await handler(req.params ?? {}, ctx);
     diag.record("rpc", req.method, Date.now() - started);
     return { id: req.id, ok: true, result };
   } catch (e) {
+    // A call the host let go of, stopped by its signal: said as such, and not counted as a
+    // failure in the diagnostics.
+    if (ctx.signal.aborted) return { id: req.id, ok: false, error: "rpc cancelled", code: "CANCELLED" };
     diag.record("rpc", req.method, Date.now() - started, false, { error: (e as Error)?.name ?? "error" });
     const message = (e as Error).message ?? String(e);
     // Open on the photos kept offline: what needs Proton says so, in the window's language.
     const offline = message === "Not signed in" && session.isOfflineOnly();
     return { id: req.id, ok: false, error: offline ? OFFLINE_ERROR : message };
+  } finally {
+    endRequest(req.id ?? null);
   }
 }
 
@@ -412,6 +421,8 @@ process.stdin.on("data", (chunk) => {
       respond(write, null, { id: null, ok: false, error: "invalid JSON request" });
       continue;
     }
+    // The host letting go of a call it sent: its signal aborts.
+    if (takeCancelLine(req)) continue;
     // The host answering a call of ours, not asking anything.
     if (takeHostLine(req)) continue;
     const id = req?.id ?? null;

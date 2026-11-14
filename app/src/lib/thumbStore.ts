@@ -53,6 +53,14 @@ export function disconnectThumbServer(): void {
   setServerBase(null);
 }
 
+/**
+ * Where the server streams a video for the viewer to play, a byte range at a time, or
+ * null while there is no server to ask.
+ */
+export function videoStreamUrl(uid: string): string | null {
+  return serverBase ? serverBase + encodeURIComponent(uid) + "/v" : null;
+}
+
 /** A grid thumbnail's URL on the server, or null while there is no server to ask. */
 export function thumbUrl(uid: string): string | null {
   return serverBase ? serverBase + encodeURIComponent(uid) : null;
