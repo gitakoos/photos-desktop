@@ -156,7 +156,7 @@ function decodeRecord(text: string): Fingerprint | null {
 }
 
 /** The fingerprint of a thumbnail, turned upright and brought near the phone's 256 pixels. */
-export async function fingerprintOf(bytes: Buffer): Promise<Fingerprint | null> {
+export async function fingerprintOf(bytes: Buffer | string): Promise<Fingerprint | null> {
   const sharp = (await import("sharp")).default;
   const { data, info } = await sharp(bytes, { failOn: "none" })
     .rotate()
@@ -179,6 +179,8 @@ export class DuplicateFinder {
   private source: DuplicateSource | null = null;
   /** Each photo's content hash, as the last timeline listing gave it. */
   private readonly contentHashes = new Map<string, string>();
+  /** The content hash of each Live Photo's video, by its photo: the listing's related photos. */
+  private readonly relatedHashes = new Map<string, string[]>();
   private prints = new Map<string, Fingerprint>();
   /** Photos with no thumbnail to read, or one that would not decode: not asked for again. */
   private unreadable = new Set<string>();
@@ -225,6 +227,7 @@ export class DuplicateFinder {
       if (this.regroupTimer) clearTimeout(this.regroupTimer);
       this.regroupTimer = null;
       this.contentHashes.clear();
+      this.relatedHashes.clear();
       this.library.clear();
       this.gone.clear();
       this.prints.clear();
@@ -251,8 +254,40 @@ export class DuplicateFinder {
       const uid = `${volumeId}~${link}`;
       if (typeof hash === "string" && hash) this.contentHashes.set(uid, hash);
       else this.contentHashes.delete(uid);
+      const related = (p as { RelatedPhotos?: unknown })?.RelatedPhotos;
+      const hashes = Array.isArray(related)
+        ? related.map((r) => (r as { ContentHash?: unknown })?.ContentHash).filter((h): h is string => typeof h === "string" && !!h)
+        : [];
+      if (hashes.length > 0) this.relatedHashes.set(uid, hashes);
+      else this.relatedHashes.delete(uid);
     }
     this.inputsChanged();
+  }
+
+  /** Each library photo's content hash, as the last timeline listing gave it. */
+  contentHashEntries(): [string, string][] {
+    const related = [...this.relatedHashes].flatMap(([uid, hashes]) => hashes.map((h): [string, string] => [uid, h]));
+    // A photo's own hash first, so a Live video's never stands in for a photo's own.
+    return [...this.contentHashes, ...related];
+  }
+
+  /**
+   * A library photo's fingerprint: the one the scan made, or one made now from its small
+   * thumbnail, and kept, when the scan has not reached it. Null for one with no picture to read.
+   */
+  async printOf(uid: string): Promise<Fingerprint | null> {
+    this.load();
+    const known = this.prints.get(uid);
+    if (known) return known;
+    if (this.unreadable.has(uid) || !this.source) return null;
+    for await (const { uid: got, bytes } of this.source.thumbnails([uid])) {
+      if (got !== uid) continue;
+      const fp = bytes ? await this.fingerprint(bytes).catch(() => null) : null;
+      if (fp) this.prints.set(uid, fp);
+      else this.unreadable.add(uid);
+      return fp;
+    }
+    return null;
   }
 
   /** Photos moved to the trash anywhere in the app: no group holds them from now on. */

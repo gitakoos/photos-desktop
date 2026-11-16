@@ -43,14 +43,15 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
+import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { Readable } from "node:stream";
 
 import exifr from "exifr";
 import sharp from "sharp";
 
-import { createAlbum, deleteAlbum, findAlbumByName, listAlbumPhotos } from "./albums.ts";
+import { createAlbum, deleteAlbum, findAlbumByName, listAlbumPhotos, listAlbums } from "./albums.ts";
+import { withStallGuard } from "./stallGuard.ts";
 import { compressForUpload, videoLaneBusy, wouldCompress, type PreparedCopy } from "./compression.ts";
 import { compressedUploadOf, rememberCompressedUpload } from "./compressedUploads.ts";
 import {
@@ -69,6 +70,8 @@ import { dateFromName } from "./nameDate.ts";
 import { diag } from "./diag.ts";
 import { readMp4CreationTime } from "./mp4Date.ts";
 import { withRetry } from "./transient.ts";
+import { fingerprintOf } from "./duplicates.ts";
+import { matchFile, type LibraryIndex, type Match, type MatchWhy } from "./importMatch.ts";
 import { watchSlowUploads } from "./api.ts";
 import { PhotoTag, ThumbnailType } from "@protontech/drive-sdk";
 
@@ -180,10 +183,25 @@ export type ImportState = {
   items?: number;
   checked?: number;
   already?: number;
+  /** How many look like a photo already in the library without being the same file. */
+  probable?: number;
+  /** Whether the check reads the library's content hashes; false is Proton's name-and-bytes check only. */
+  byContent?: boolean;
 };
+
+/** What happened to an album at the end of an upload, beyond the files themselves. */
+export type AlbumNote =
+  /** Fuller than an album may hold: the rest went into `part` ("Name (2)" and on). */
+  | { kind: "split"; album: string; part: string; moved: number }
+  /** Photos that could not be put in the album: they are in the library, not in it. */
+  | { kind: "failed"; album: string; count: number };
 
 export type UploadStatus = {
   running: boolean;
+  /** While the photos of a group go into its album, after its files: how far that has got. */
+  albumStep?: { album: string; added: number; total: number };
+  /** The album splits and failures of the last upload, until the record is cleared. */
+  albumNotes?: AlbumNote[];
   total: number;
   done: number;
   skipped: number;
@@ -460,6 +478,7 @@ export function clearFinishedUploads(): void {
   if (status.running || status.importing) return;
   status.importError = undefined;
   status.moveResult = undefined;
+  status.albumNotes = undefined;
   status.items = [];
   status.total = 0;
   status.done = 0;
@@ -543,7 +562,8 @@ async function walkMedia(dir: string, out: string[], depth: number): Promise<voi
 function sha1Of(path: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash("sha1");
-    createReadStream(path)
+    // Large reads: an export is read whole once, and small ones cost more than the hashing.
+    createReadStream(path, { highWaterMark: 1 << 20 })
       .on("data", (chunk) => hash.update(chunk))
       .on("error", reject)
       .on("end", () => resolve(hash.digest("hex")));
@@ -807,6 +827,8 @@ async function uploadOne(
     extraTags?: number[];
     known?: string;
     fresh?: boolean;
+    /** Called once the library is known not to have the file, just before it is sent. */
+    onCleared?: () => void;
     onProgress?: (sent: number, size: number) => void;
     /**
      * Make a lighter copy to upload in its place. The copy made on a first try is kept here and
@@ -869,6 +891,7 @@ async function uploadOne(
   }
   const sendPath = copy?.path ?? path;
   const sendSize = copy?.size ?? info.size;
+  options.onCleared?.();
   options.onProgress?.(0, sendSize);
 
   // Dimensions come from whichever side actually opened the file. The shell answered for
@@ -994,6 +1017,200 @@ const UPLOAD_CONCURRENCY = 4;
 // get too little of it to finish a block in time. Cleared when the queue next starts.
 let slowLink = false;
 
+/** The most photos a Proton album holds. */
+const ALBUM_MAX = 10_000;
+/** Photos sent to an album per step: a step that fails costs only these. */
+const ALBUM_CHUNK = 500;
+/** How long an album or favourite step may go without an answer before it is given up. */
+const STEP_STALL_MS = 120_000;
+/** The API's answer for a photo the album already holds. */
+const ALREADY_EXISTS = 2500;
+/** The most parts an album is split into ("Name (2)" and on). */
+const ALBUM_PARTS_MAX = 20;
+
+function noteAlbum(note: AlbumNote): void {
+  status.albumNotes = [...(status.albumNotes ?? []), note];
+}
+
+/**
+ * The parts an album was split into before ("Name (2)" and on), the fullest of each number,
+ * with the photos they hold, so photos already in one are not put in another.
+ */
+async function albumParts(
+  photos: any,
+  name: string,
+): Promise<{ parts: Map<number, { uid: string; held: number }>; members: Set<string> }> {
+  const base = name.trim().toLocaleLowerCase();
+  const found = new Map<number, { uid: string; count: number }>();
+  for (const album of await listAlbums(photos)) {
+    const m = /^(.*) \((\d+)\)$/.exec(album.name.trim());
+    if (!m || m[1].trim().toLocaleLowerCase() !== base) continue;
+    const n = Number(m[2]);
+    if (n < 2 || n > ALBUM_PARTS_MAX) continue;
+    const had = found.get(n);
+    if (!had || album.photoCount > had.count) found.set(n, { uid: album.uid, count: album.photoCount });
+  }
+  const parts = new Map<number, { uid: string; held: number }>();
+  const members = new Set<string>();
+  for (const [n, { uid }] of found) {
+    const inside = await listAlbumPhotos(photos, uid);
+    parts.set(n, { uid, held: inside.length });
+    for (const p of inside) members.add(p.uid);
+  }
+  return { parts, members };
+}
+
+/**
+ * Puts `uids` into an album that holds `already` photos, a chunk at a time, with its progress
+ * in the status and the log. Past what an album may hold, the rest go into "Name (2)" and on,
+ * found or made. A chunk that fails or stalls is tried once more for what it had not put in;
+ * what still will not go in is counted, and those photos stay in the library, not in the album.
+ */
+export async function addAllToAlbum(
+  photos: any,
+  albumUid: string,
+  name: string,
+  uids: string[],
+  already: number,
+  limits: { max: number; chunk: number; stallMs: number } = { max: ALBUM_MAX, chunk: ALBUM_CHUNK, stallMs: STEP_STALL_MS },
+): Promise<void> {
+  const { max, chunk: chunkSize, stallMs } = limits;
+  /** Still to put in. */
+  let rest = uids.slice();
+  /** How many have been dealt with: put in, found already there, or given up on. */
+  let dealt = 0;
+  let failed = 0;
+  const show = (inFlight = 0) => {
+    status.albumStep = { album: name, added: dealt + inFlight, total: uids.length };
+  };
+  show();
+  let target = albumUid;
+  let held = already;
+  let part = 1;
+  let putInPart = 0;
+  /** Whether this run made the part it is filling, so one left empty is taken away again. */
+  let madeHere = false;
+  let parts: Map<number, { uid: string; held: number }> | null = null;
+  let loggedAt = 0;
+  const leavePart = async () => {
+    if (part > 1 && putInPart > 0) noteAlbum({ kind: "split", album: name, part: `${name} (${part})`, moved: putInPart });
+    if (madeHere && putInPart === 0) {
+      await deleteAlbum(photos, target).catch((e) =>
+        process.stderr.write(`[upload] empty album part not removed: ${(e as Error).message}\n`),
+      );
+    }
+    putInPart = 0;
+    madeHere = false;
+  };
+  try {
+    while (rest.length > 0) {
+      if (held >= max) {
+        if (part >= ALBUM_PARTS_MAX) break;
+        if (!parts) {
+          // Read once, at the first split: an import run again finds its earlier parts here.
+          const found = await albumParts(photos, name);
+          parts = found.parts;
+          const before = rest.length;
+          rest = rest.filter((u) => !found.members.has(u));
+          dealt += before - rest.length;
+          show();
+          if (rest.length === 0) break;
+        }
+        await leavePart();
+        part++;
+        const known = parts.get(part);
+        if (known) {
+          target = known.uid;
+          held = known.held;
+        } else {
+          target = (await createAlbum(photos, `${name} (${part})`)).uid;
+          held = 0;
+          madeHere = true;
+        }
+        continue;
+      }
+      const chunk = rest.slice(0, Math.min(chunkSize, max - held));
+      const settled = new Set<string>();
+      let ok = 0;
+      /** Already in it: a step that stalled after its request went through, asked again. */
+      let there = 0;
+      let refused = 0;
+      let error: Error | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // What the first try put in is not sent again: in the next part it would be in two.
+        const todo = chunk.filter((u) => !settled.has(u));
+        if (todo.length === 0) {
+          error = null;
+          break;
+        }
+        const stop = new AbortController();
+        try {
+          const added = photos.addPhotosToAlbum(target, todo, stop.signal);
+          for await (const result of withStallGuard<any>(added, stallMs, "addPhotosToAlbum")) {
+            settled.add(result.uid);
+            if (result.ok) ok++;
+            else if (result.error?.code === ALREADY_EXISTS || result.error?.name === "PhotoAlreadyInTargetError") there++;
+            else if (++refused === 1) {
+              process.stderr.write(`[upload] album add refused (${result.error?.name} ${result.error?.code ?? ""})\n`);
+            }
+            show(settled.size);
+          }
+          error = null;
+          break;
+        } catch (e) {
+          stop.abort();
+          error = e as Error;
+          process.stderr.write(`[upload] album add step failed (${error.name} ${(error as any).code ?? ""})\n`);
+          // The server's no (a full album among them) is not changed by asking again.
+          if (error.name === "ValidationError") break;
+        }
+      }
+      held += ok + there;
+      putInPart += ok;
+      failed += refused;
+      if (!error) {
+        // Every photo was answered for; one the SDK passed over without a word did not go in.
+        failed += chunk.length - settled.size;
+        for (const u of chunk) settled.add(u);
+      }
+      rest = rest.filter((u) => !settled.has(u));
+      dealt += settled.size;
+      show();
+      if (error) {
+        if (error.name === "ValidationError" && held >= max / 2 && part < ALBUM_PARTS_MAX) {
+          // Refused with the album well on: full sooner than counted (a Live Photo's video
+          // may count too). The rest go on in the next part.
+          held = max;
+          continue;
+        }
+        // Anything else that will not go in (no connection, no answer, the server saying no)
+        // would say no to the rest too: they are counted, and an import run again puts them in.
+        failed += rest.length;
+        dealt += rest.length;
+        rest = [];
+        show();
+        break;
+      }
+      if (dealt - loggedAt >= 500 || rest.length === 0) {
+        loggedAt = dealt;
+        process.stderr.write(`[upload] album add ${dealt}/${uids.length}\n`);
+      }
+    }
+    await leavePart();
+    failed += rest.length;
+    if (failed > 0) {
+      process.stderr.write(`[upload] add to album failed for ${failed} photo(s)\n`);
+      noteAlbum({ kind: "failed", album: name, count: failed });
+    }
+  } catch (e) {
+    process.stderr.write(`[upload] addPhotosToAlbum: ${(e as Error).message}\n`);
+    await leavePart().catch(() => {});
+    noteAlbum({ kind: "failed", album: name, count: rest.length + failed });
+  } finally {
+    status.albumStep = undefined;
+  }
+}
+
 async function drain(photos: any): Promise<void> {
   draining = true;
   status.running = true;
@@ -1053,6 +1270,7 @@ async function drain(photos: any): Promise<void> {
         // What goes into the album: the new uploads, and the photos the library already
         // had, since the folder holds them too. Never one the album already contains.
         const toAlbum: string[] = [];
+        const toAlbumSet = new Set<string>();
         const inAlbum = new Set<string>();
         if (albumUid && !albumIsNew) {
           try {
@@ -1062,11 +1280,15 @@ async function drain(photos: any): Promise<void> {
           }
         }
         const intoAlbum = (uid: string) => {
-          if (albumUid && !inAlbum.has(uid) && !toAlbum.includes(uid)) toAlbum.push(uid);
+          if (albumUid && !inAlbum.has(uid) && !toAlbumSet.has(uid)) {
+            toAlbumSet.add(uid);
+            toAlbum.push(uid);
+          }
         };
         // A photo the library already had, copied into the Favorites folder: what was
         // asked for is that photo as a favourite.
         const toFavorite: string[] = [];
+        const toFavoriteSet = new Set<string>();
 
         // A bounded worker pool over the group's files. The SDK's own queue caps the
         // uploads at 5 concurrent, but the expensive per-file PREP (hashing, EXIF read,
@@ -1090,6 +1312,7 @@ async function drain(photos: any): Promise<void> {
           };
           const video = group.related?.get(file);
           let mainUid: string | null = null;
+          let stillWentUp = false;
           // In the library as a lighter copy, uploaded now or found there.
           let wentLighter = false;
           // Not a Live Photo's still: its video is matched to it as it was taken.
@@ -1104,6 +1327,7 @@ async function drain(photos: any): Promise<void> {
           try {
             const key = frameKey(file);
             let attempt = 0;
+            let cleared = false;
             const { uid, duplicates, saved, lighter } = await withRetry(
               () =>
                 uploadOne(
@@ -1119,6 +1343,9 @@ async function drain(photos: any): Promise<void> {
                     // A try after a failure asks the library first: the failed one may
                     // have finished on the server with only its answer lost.
                     fresh: attempt++ === 0 && group.fresh?.has(file),
+                    onCleared: () => {
+                      cleared = true;
+                    },
                     extraTags: video ? [PhotoTag.LivePhotos] : [],
                     onProgress: progress,
                     compress,
@@ -1128,6 +1355,10 @@ async function drain(photos: any): Promise<void> {
               abort.signal,
             );
             mainUid = uid ?? duplicates[0] ?? null;
+            // Up now, or found on a retry after an earlier try of this run had found nothing
+            // there and begun sending it (its answer lost): either way, a still this run put
+            // there. A try that failed before asking proves nothing, so it does not count.
+            stillWentUp = uid !== null || cleared;
             wentLighter = !!lighter && mainUid !== null;
             if (mainUid) group.uidOf?.set(file, mainUid);
             if (uid) {
@@ -1144,7 +1375,12 @@ async function drain(photos: any): Promise<void> {
               // copied into an album folder in the file manager: what was asked for is
               // that photo in that album, so it goes in, and only once.
               if (duplicates[0]) intoAlbum(duplicates[0]);
-              if (duplicates[0] && group.favorite && !toFavorite.includes(duplicates[0])) toFavorite.push(duplicates[0]);
+              // A favourite in the export is one in the library too, whichever had it first.
+              const favorite = group.favorite || !!group.sidecars?.get(file)?.favorited;
+              if (duplicates[0] && favorite && !toFavoriteSet.has(duplicates[0])) {
+                toFavoriteSet.add(duplicates[0]);
+                toFavorite.push(duplicates[0]);
+              }
               item.status = "skipped";
               item.error = "already in your library";
               status.skipped++;
@@ -1174,15 +1410,23 @@ async function drain(photos: any): Promise<void> {
             // so a large export never holds the disk for longer than it must.
             if (group.staging && isStagedImport(file)) await rm(file, { force: true }).catch(() => {});
           }
-          if (video) await processLiveVideo(video, file, mainUid);
+          if (video) await processLiveVideo(video, file, mainUid, stillWentUp);
         };
 
         /** A Live Photo's video, uploaded as part of the photo that went up just before it. */
-        const processLiveVideo = async (video: string, photo: string, mainUid: string | null) => {
+        const processLiveVideo = async (video: string, photo: string, mainUid: string | null, stillWentUp: boolean) => {
           const item = status.items[group.itemOf?.get(video) ?? -1];
           if (!item || abort.signal.aborted) return;
           try {
             if (!mainUid) throw new Error("its photo did not upload");
+            // A still the library already had keeps what it has: a video is never joined to
+            // a photo that was there before this upload.
+            if (!stillWentUp) {
+              item.status = "skipped";
+              item.error = "already in your library";
+              status.skipped++;
+              return;
+            }
             item.status = "uploading";
             const progress = (sent: number, size: number) => {
               item.sent = sent;
@@ -1257,7 +1501,7 @@ async function drain(photos: any): Promise<void> {
         if (toFavorite.length > 0) {
           try {
             const updates = toFavorite.map((nodeUid) => ({ nodeUid, tagsToAdd: [PhotoTag.Favorites], tagsToRemove: [] }));
-            for await (const result of photos.updatePhotos(updates)) {
+            for await (const result of withStallGuard<any>(photos.updatePhotos(updates), STEP_STALL_MS, "updatePhotos")) {
               if (!(result as any).ok) process.stderr.write(`[upload] favourite not set on a photo already there
 `);
             }
@@ -1270,20 +1514,8 @@ async function drain(photos: any): Promise<void> {
         if (albumUid && toAlbum.length > 0) {
           // Add the files that DID upload to their album even if the user cancelled:
           // they are already in the cloud, so finishing this beats leaving an empty
-          // album with the photos orphaned on the timeline. A fresh signal, so the
-          // cancel that stopped the uploads does not also abort this last step.
-          const addSignal = new AbortController().signal;
-          try {
-            let failed = 0;
-            for await (const result of photos.addPhotosToAlbum(albumUid, toAlbum, addSignal)) {
-              if (!result.ok) failed++;
-            }
-            if (failed > 0) {
-              process.stderr.write(`[upload] add to album failed for ${failed} photo(s)\n`);
-            }
-          } catch (e) {
-            process.stderr.write(`[upload] addPhotosToAlbum: ${(e as Error).message}\n`);
-          }
+          // album with the photos orphaned on the timeline.
+          await addAllToAlbum(photos, albumUid, group.album ?? "", toAlbum, inAlbum.size);
         } else if (albumUid && albumIsNew) {
           // Every file failed or was cancelled: an album made only for them would be left
           // empty, one more of the same name at each retry.
@@ -1599,8 +1831,13 @@ export type ReviewItem = {
   alsoIn?: string[];
 };
 
-/** What the library check found for one item: not yet checked, new, or already there. */
-export type ReviewCheck = "pending" | "new" | "already";
+/**
+ * What the library check found for one item: not yet checked, new, already there (the same
+ * file, under any name), or probably there (the same photo taken at the same moment, in other
+ * bytes). One already or probably there is not uploaded: the photo the library has goes into
+ * the album instead, unless the probable ones are asked for anyway.
+ */
+export type ReviewCheck = "pending" | "new" | "already" | "probable";
 
 /** The export under review, between `prepareImport` and `confirmImport` or `discardImport`. */
 let review: {
@@ -1610,8 +1847,16 @@ let review: {
   frames: Record<string, string>;
   media: Record<string, ShellMediaInfo>;
   checks: ReviewCheck[];
+  /** Why each item was found already or probably there. */
+  reasons: (MatchWhy | null)[];
   /** The photo already in the library, for an item found there, and for its Live video. */
   found: Map<string, string>;
+  /** The photo an item is probably a copy of, or null when there is none to point to. */
+  probable: Map<string, string | null>;
+  /** Items whose match is a hidden photo: left out, so the hidden one is not put in an album. */
+  hiddenMatch: Set<string>;
+  /** An item whose bytes another item of the export has: by its id, that item's id. */
+  copyOf: Map<number, number>;
   /** Files the check asked about and the library does not have: their upload skips asking. */
   verifiedNew: Set<string>;
   abort: AbortController;
@@ -1635,6 +1880,7 @@ export function prepareImport(
   photos: any,
   given: Record<string, string> = {},
   media: Record<string, ShellMediaInfo> = {},
+  library?: () => Promise<LibraryIndex | null>,
 ): void {
   const job = pendingImport;
   if (!job) return;
@@ -1680,7 +1926,11 @@ export function prepareImport(
         frames,
         media,
         checks: items.map((): ReviewCheck => "pending"),
+        reasons: items.map((): MatchWhy | null => null),
         found: new Map<string, string>(),
+        probable: new Map<string, string | null>(),
+        hiddenMatch: new Set<string>(),
+        copyOf: new Map<number, number>(),
         verifiedNew: new Set<string>(),
         abort: new AbortController(),
         myFiles: job.myFiles,
@@ -1695,8 +1945,9 @@ export function prepareImport(
         items: items.length,
         checked: 0,
         already: 0,
+        probable: 0,
       };
-      void checkReview(photos, current);
+      void checkReview(photos, current, library);
     } catch (e) {
       for (const root of job.staged) await discardStagedImport(root);
       status.importError = (e as Error).message;
@@ -1705,47 +1956,269 @@ export function prepareImport(
   })();
 }
 
-/** Marks each reviewed item new or already in the library, a few at a time. */
-async function checkReview(photos: any, current: NonNullable<typeof review>): Promise<void> {
-  let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= current.plan.length || current.abort.signal.aborted) return;
-      const item = current.plan[i];
-      try {
-        const existing = await findInLibrary(photos, item.file, current.abort.signal);
-        if (existing) current.found.set(item.file, existing);
-        else current.verifiedNew.add(item.file);
-        if (item.liveVideo) {
-          const video = await findInLibrary(photos, item.liveVideo, current.abort.signal);
-          if (video) current.found.set(item.liveVideo, video);
-          else current.verifiedNew.add(item.liveVideo);
+/** How many files are read whole for their hash at once: a disk is read fastest by a few. */
+const HASH_CONCURRENCY = 3;
+
+/**
+ * Marks each reviewed item new, already or probably in the library. Two passes: first every
+ * file's exact copy, by content under any name; then, for the rest, a photo of the same moment
+ * that looks the same, among the library photos no exact copy has claimed, each for one file
+ * at most. A file whose check fails is held back, never taken for new.
+ */
+async function checkReview(
+  photos: any,
+  current: NonNullable<typeof review>,
+  library?: () => Promise<LibraryIndex | null>,
+): Promise<void> {
+  // The library's own record of every photo's content, when it can be had: one listing,
+  // instead of a question to the server per file that only finds files under the same name.
+  const loaded = library ? await library().catch(() => null) : null;
+  const index = loaded?.canMatchContent() ? loaded : null;
+  diag.log("upload", "import_check", { items: current.plan.length, by_content: index ? 1 : 0 });
+  if (review === current && status.importing?.phase === "review") status.importing.byContent = !!index;
+  const signal = current.abort.signal;
+  const settled = (i: number) => {
+    if (review !== current || status.importing?.phase !== "review") return;
+    status.importing.checked = (status.importing.checked ?? 0) + 1;
+    if (current.checks[i] === "already") status.importing.already = (status.importing.already ?? 0) + 1;
+    if (current.checks[i] === "probable") status.importing.probable = (status.importing.probable ?? 0) + 1;
+  };
+  const heldBack = (i: number) => {
+    current.checks[i] = "probable";
+    current.reasons[i] = "unchecked";
+    current.probable.set(current.plan[i].file, null);
+  };
+  const pool = async (ids: number[], width: number, one: (i: number) => Promise<void>) => {
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const k = next++;
+        if (k >= ids.length || signal.aborted) return;
+        try {
+          await one(ids[k]);
+        } catch {
+          if (!signal.aborted) heldBack(ids[k]);
         }
-        current.checks[i] = existing ? "already" : "new";
-      } catch {
-        // Unchecked is not a verdict: the upload checks again, so this only loses the mark.
-        current.checks[i] = "new";
+        if (current.checks[ids[k]] !== "pending") settled(ids[k]);
       }
-      if (review === current && status.importing?.phase === "review") {
-        status.importing.checked = (status.importing.checked ?? 0) + 1;
-        if (current.checks[i] === "already") {
-          status.importing.already = (status.importing.already ?? 0) + 1;
-        }
+    };
+    await Promise.all(Array.from({ length: width }, worker));
+  };
+  const all = current.plan.map((_, i) => i);
+
+  if (!index) {
+    // Proton's own check, by name and bytes only, which is what the upload would ask again: the
+    // review says this check is the weaker one, and Import waits for a yes to go on.
+    await pool(all, CHECK_CONCURRENCY, async (i) => {
+      const item = current.plan[i];
+      const existing = await findInLibrary(photos, item.file, signal);
+      if (existing) record(current, i, { verdict: "already", uid: existing, why: "same_file", hidden: false });
+      else if (item.liveVideo && (await findInLibrary(photos, item.liveVideo, signal))) {
+        record(current, i, { verdict: "probable", uid: null, why: "live_video", hidden: false });
+      } else record(current, i, { verdict: "new" });
+    });
+    return;
+  }
+
+  // First pass: the exact copies, and what the export holds twice.
+  const claimed = new Set<string>();
+  const firstOf = new Map<string, number>();
+  /** The library photo each exact copy's bytes are, found by content or by name. */
+  const exactOf = new Map<string, string>();
+  const sha1s = new Map<number, string>();
+  const rest: number[] = [];
+  await pool(all, HASH_CONCURRENCY, async (i) => {
+    const item = current.plan[i];
+    const sha1 = await sha1Of(item.file);
+    if (signal.aborted) return;
+    sha1s.set(i, sha1);
+    const exact = index.sameFile(sha1) ?? exactOf.get(sha1) ?? (await findInLibrary(photos, item.file, signal, sha1));
+    if (exact) {
+      exactOf.set(sha1, exact);
+      claimed.add(exact);
+      record(current, i, { verdict: "already", uid: exact, why: "same_file", hidden: index.hidden(exact) });
+      return;
+    }
+    const first = firstOf.get(sha1);
+    if (first !== undefined) {
+      // The same bytes under another name in this export: one upload, in both albums.
+      const kept = current.plan[first];
+      const albumsOf = [item.album, ...(item.alsoIn ?? [])].filter((a): a is string => !!a);
+      kept.alsoIn = [...new Set([...(kept.alsoIn ?? []), ...albumsOf.filter((a) => a !== kept.album)])];
+      current.checks[i] = "already";
+      current.reasons[i] = "same_in_export";
+      current.copyOf.set(i, first);
+      return;
+    }
+    firstOf.set(sha1, i);
+    if (item.liveVideo) {
+      const half = index.sameFile(await sha1Of(item.liveVideo));
+      if (half) {
+        // The library's Live Photo of that video stands in for it.
+        record(current, i, { verdict: "probable", uid: half, why: "live_video", hidden: index.hidden(half) });
+        return;
       }
     }
+    rest.push(i);
+  });
+  if (signal.aborted) return;
+
+  // Second pass: the same photo in other bytes, among the library photos left unclaimed.
+  // A video's length is what the host read off the file before the review. The export's own
+  // videos are looked at together first: a series in it, or many of one size and length.
+  const mediaByKey = new Map(Object.entries(current.media).map(([path, info]) => [frameKey(path), info]));
+  const takenOf = async (i: number) => {
+    const item = current.plan[i];
+    return current.myFiles ? await takenForMatch(item.file) : (item.sidecar?.takenMs ?? (await takenForMatch(item.file)));
   };
-  await Promise.all(Array.from({ length: CHECK_CONCURRENCY }, worker));
+  const videoFacts = new Map<number, { size: number | null; durationMs: number | null; takenMs: number | null }>();
+  await pool(rest, CHECK_CONCURRENCY, async (i) => {
+    if (signal.aborted) return;
+    const item = current.plan[i];
+    if (!(mediaTypeOf(item.file) ?? "").startsWith("video/")) return;
+    const seconds = Number(mediaByKey.get(frameKey(item.file))?.durationSec);
+    videoFacts.set(i, {
+      size: await stat(item.file).then((s) => s.size).catch(() => null),
+      durationMs: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : null,
+      // The same date the match goes by.
+      takenMs: await takenOf(i),
+    });
+  });
+  if (signal.aborted) return;
+  const sizeLengthCount = new Map<string, number>();
+  for (const f of videoFacts.values()) {
+    if (f.size && f.durationMs) sizeLengthCount.set(`${f.size}:${f.durationMs}`, (sizeLengthCount.get(`${f.size}:${f.durationMs}`) ?? 0) + 1);
+  }
+  // In time order, so a video's half hour either side is a short walk from it.
+  const dated = [...videoFacts.entries()]
+    .filter(([, f]) => f.takenMs !== null && !!f.durationMs)
+    .sort((a, b) => a[1].takenMs! - b[1].takenMs!);
+  const placeOf = new Map(dated.map(([i], at) => [i, at]));
+  const exportSeries = (i: number) => {
+    const at = placeOf.get(i);
+    if (at === undefined) return false;
+    const me = dated[at][1];
+    const near = (j: number) => {
+      const f = dated[j][1];
+      const apart = Math.abs(f.takenMs! - me.takenMs!);
+      return apart > 2_000 && Math.abs(f.durationMs! - me.durationMs!) <= 1_000;
+    };
+    for (let j = at - 1; j >= 0 && me.takenMs! - dated[j][1].takenMs! <= 30 * 60_000; j--) if (near(j)) return true;
+    for (let j = at + 1; j < dated.length && dated[j][1].takenMs! - me.takenMs! <= 30 * 60_000; j++) if (near(j)) return true;
+    return false;
+  };
+  await pool(rest, CHECK_CONCURRENCY, async (i) => {
+    const item = current.plan[i];
+    const video = (mediaTypeOf(item.file) ?? "").startsWith("video/");
+    const fact = videoFacts.get(i);
+    const takenMs = fact ? fact.takenMs : await takenOf(i);
+    const file = {
+      sha1: sha1s.get(i)!,
+      takenMs,
+      video,
+      size: fact?.size ?? null,
+      durationMs: fact?.durationMs ?? null,
+      inSeries: video && exportSeries(i),
+      crowded: !!fact?.size && !!fact.durationMs && (sizeLengthCount.get(`${fact.size}:${fact.durationMs}`) ?? 0) > 4,
+      print: async () => (video ? null : fingerprintOf(item.file)),
+    };
+    let match = await matchFile(index, file, claimed);
+    // Two files that took the same library photo at once: the later one looks again without it.
+    for (let tries = 0; match.verdict === "probable" && match.uid && claimed.has(match.uid) && tries < 3; tries++) {
+      match = await matchFile(index, file, claimed);
+    }
+    // Still taken by another file after three looks: held back rather than shared.
+    if (match.verdict === "probable" && match.uid && claimed.has(match.uid)) match = { ...match, uid: null };
+    if (match.verdict === "probable" && match.uid) claimed.add(match.uid);
+    record(current, i, match);
+  });
+}
+
+/** Notes what the check found for item `i`. */
+function record(current: NonNullable<typeof review>, i: number, match: Match): void {
+  const file = current.plan[i].file;
+  const live = current.plan[i].liveVideo;
+  if (match.verdict === "new") {
+    current.checks[i] = "new";
+    current.verifiedNew.add(file);
+    if (live) current.verifiedNew.add(live);
+    return;
+  }
+  current.checks[i] = match.verdict;
+  current.reasons[i] = match.why;
+  if (match.hidden) current.hiddenMatch.add(file);
+  if (match.verdict === "already") current.found.set(file, match.uid);
+  // A video of the same moment is shown, never put in an album on its own say-so; nor is a
+  // smaller library copy put there in place of the export's better file.
+  else current.probable.set(file, match.why === "same_time_video" || match.why === "smaller_in_library" ? null : match.uid);
 }
 
 /**
- * The photo in the library with these exact bytes, if there is one. The SDK asks the
- * server by name first and hashes the file only when a name matches, which in an import
- * is rare: hashing every file up front was most of what made the check slow.
+ * When a file was taken, for matching it: its EXIF date, or a video's recorded time. Never the
+ * name or the file's own times, which say when it was copied, not taken.
  */
-async function findInLibrary(photos: any, path: string, signal: AbortSignal): Promise<string | null> {
-  const duplicates: string[] = await photos.findPhotoDuplicates(basename(path), () => sha1Of(path), signal);
+async function takenForMatch(path: string): Promise<number | null> {
+  try {
+    const exif = await exifFactsOf(path);
+    if (exif.captureTime) return exif.captureTime.getTime();
+    if ((mediaTypeOf(path) ?? "").startsWith("video/")) {
+      const recorded = await readMp4CreationTime(path).catch(() => null);
+      if (recorded) return recorded.getTime();
+    }
+  } catch {
+    /* no date to go by */
+  }
+  return null;
+}
+
+/**
+ * The photo in the library with this exact name and these bytes, if there is one. The SDK asks
+ * the server by name first and hashes the file only when a name matches.
+ */
+async function findInLibrary(photos: any, path: string, signal: AbortSignal, sha1?: string): Promise<string | null> {
+  const duplicates: string[] = await photos.findPhotoDuplicates(basename(path), async () => sha1 ?? sha1Of(path), signal);
   return duplicates[0] ?? null;
+}
+
+/** The longest edge of a review tile's picture. */
+const REVIEW_THUMB_EDGE = 320;
+
+/**
+ * Pictures for the review's tiles, as small JPEG data URLs: of the file itself, or of the frame
+ * the host made for a video or a still sharp cannot open. Null where neither can be drawn, and
+ * for any path that is not a file of the export under review, which is all this reads.
+ */
+export async function importThumbnails(paths: string[]): Promise<(string | null)[]> {
+  const current = review;
+  if (!current) return paths.map(() => null);
+  const known = new Set(current.items.map((i) => i.path));
+  const frames = new Map(Object.entries(current.frames).map(([path, frame]) => [frameKey(path), frame]));
+  const asked = paths.slice(0, 32);
+  const out: (string | null)[] = asked.map(() => null);
+  // A few at a time: the review's own check reads the export on the same threads.
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const k = next++;
+      if (k >= asked.length) return;
+      const path = asked[k];
+      if (!known.has(path)) continue;
+      const source = frames.get(frameKey(path)) ?? path;
+      try {
+        const jpeg = await sharp(source, { failOn: "none", limitInputPixels: 300_000_000 })
+          .rotate()
+          .resize(REVIEW_THUMB_EDGE, REVIEW_THUMB_EDGE, { fit: "inside", withoutEnlargement: true })
+          .flatten({ background: "#ffffff" })
+          .jpeg({ quality: 72 })
+          .toBuffer();
+        out[k] = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+      } catch {
+        /* no picture to draw */
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 4 }, worker));
+  return out;
 }
 
 /** The export under review, for the review screen; null when there is none. */
@@ -1754,22 +2227,83 @@ export function getImportReview(): { items: ReviewItem[] } | null {
 }
 
 /** What the library check has found so far, one entry per reviewed item. */
-export function getImportChecks(): { checks: ReviewCheck[] } | null {
-  return review ? { checks: review.checks } : null;
+export function getImportChecks(): { checks: ReviewCheck[]; reasons: (MatchWhy | null)[] } | null {
+  return review ? { checks: review.checks, reasons: review.reasons } : null;
 }
 
 /**
  * Queues the reviewed export, less what was left out. `albums` false puts everything on
- * the timeline; `live` false uploads a Live Photo's two files as two separate items.
+ * the timeline; `live` false uploads a Live Photo's two files as two separate items. An item
+ * probably in the library is not uploaded unless `probable` is true: the photo the library has
+ * goes into its album instead, and one with no photo to point to is left out. An item whose
+ * match is a hidden photo is always left out, so the hidden photo is not put in an album.
  */
-export function confirmImport(photos: any, exclude: number[] = [], albums = true, live = true): void {
+export function confirmImport(
+  photos: any,
+  exclude: number[] = [],
+  albums = true,
+  live = true,
+  probable = false,
+  upload: number[] = [],
+): void {
   const current = review;
   if (!current) return;
+  // Every item is checked first: one not checked yet could go up although the library has it.
+  if (current.checks.some((c) => c === "pending")) throw new Error("The check against your library has not finished.");
   review = null;
   current.abort.abort();
   status.importing = undefined;
 
   const left = new Set(exclude);
+  const asked = new Set(upload);
+  /** Items probably in the library that are put in their album as the library's photo. */
+  const standIn = new Set<string>();
+  const leftByUser = new Set(exclude);
+  // Of the copies of a first item the user left out, one goes in its place, carrying the
+  // albums of the others, which stay out: the same bytes still go up once.
+  const standInFor = new Map<number, number>();
+  for (const [id, first] of [...current.copyOf].sort((a, b) => a[0] - b[0])) {
+    if (!leftByUser.has(first) || leftByUser.has(id)) continue;
+    const taken = standInFor.get(first);
+    if (taken === undefined) {
+      standInFor.set(first, id);
+      continue;
+    }
+    const keeper = current.plan[taken];
+    const item = current.plan[id];
+    const albumsOf = [item.album, ...(item.alsoIn ?? [])].filter((a): a is string => !!a && a !== keeper.album);
+    keeper.alsoIn = [...new Set([...(keeper.alsoIn ?? []), ...albumsOf])];
+  }
+  current.plan.forEach((item, id) => {
+    // Its bytes go up once, as the other item, which carries its albums too; but in its place
+    // when that one was left out, as that one would have gone.
+    const first = current.copyOf.get(id);
+    if (first !== undefined) {
+      if (standInFor.get(first) !== id) {
+        left.add(id);
+        return;
+      }
+      current.checks[id] = current.checks[first];
+      current.reasons[id] = current.reasons[first];
+      const firstFile = current.plan[first].file;
+      const found = current.found.get(firstFile);
+      if (found) current.found.set(item.file, found);
+      if (current.probable.has(firstFile)) current.probable.set(item.file, current.probable.get(firstFile)!);
+      if (current.hiddenMatch.has(firstFile)) current.hiddenMatch.add(item.file);
+      if (current.verifiedNew.has(firstFile)) current.verifiedNew.add(item.file);
+    }
+    const wanted = probable || asked.has(id);
+    if (current.hiddenMatch.has(item.file)) {
+      if (current.checks[id] === "already" || !wanted) left.add(id);
+      return;
+    }
+    if (wanted || current.checks[id] !== "probable") return;
+    const uid = current.probable.get(item.file);
+    if (uid) {
+      current.found.set(item.file, uid);
+      standIn.add(item.file);
+    } else left.add(id);
+  });
   const kept = current.plan.filter((_, id) => !left.has(id));
   // Left-out files are never uploaded, so their unpacked copies go now.
   for (const item of current.plan.filter((_, id) => left.has(id))) {
@@ -1811,7 +2345,10 @@ export function confirmImport(photos: any, exclude: number[] = [], albums = true
           const state = status.items[rowOf.get(file) ?? -1]?.status;
           // A Live Photo's video joined to its photo is that photo; apart, it is its own.
           const photo = file === item.liveVideo && live ? photoOf(item.file) : photoOf(file);
-          if (source) outcomes.push({ source, settled: state === "done" || state === "skipped", photo });
+          // Only what went up, or the library's exact copy, lets an original go: never a
+          // photo that only looks the same.
+          const settled = (state === "done" || state === "skipped") && !standIn.has(item.file);
+          if (source) outcomes.push({ source, settled, photo });
         }
       }
       return trashMovedOriginals(photos, job, outcomes);

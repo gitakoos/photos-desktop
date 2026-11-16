@@ -347,11 +347,32 @@ export function Upload({ status, running, error, nothingFound, start, startImpor
                 <span className="up-sumtitle">
                   {status.total === 0
                     ? importLine
-                    : t(running ? "upload.progressRunning" : "upload.progressFinished", {
-                        settled,
-                        total: status.total,
-                      })}
+                    : status.albumStep
+                      ? t("upload.albumStep", {
+                          album: status.albumStep.album,
+                          added: status.albumStep.added,
+                          total: status.albumStep.total,
+                        })
+                      : t(running ? "upload.progressRunning" : "upload.progressFinished", {
+                          settled,
+                          total: status.total,
+                        })}
                 </span>
+                {status.albumStep && (
+                  <span className="up-sumsub">
+                    {t(settled < status.total ? "upload.progressRunning" : "upload.progressFinished", {
+                      settled,
+                      total: status.total,
+                    })}
+                  </span>
+                )}
+                {status.albumNotes?.map((n, i) => (
+                  <span key={i} className="up-sumsub">
+                    {n.kind === "split"
+                      ? t("upload.albumSplit", { album: n.album, part: n.part, moved: n.moved })
+                      : t("upload.albumFailed", { album: n.album, count: n.count })}
+                  </span>
+                ))}
                 {importing && status.total > 0 && <span className="up-sumsub">{importLine}</span>}
                 {moved && !running && (
                   <span className="up-sumsub">

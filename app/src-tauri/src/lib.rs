@@ -204,7 +204,7 @@ fn classified(method: &str) -> Option<Priority> {
         "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
         | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
         | "facePeople" | "facePersonCandidates" | "faceSplitStart" | "faceSplitPlan" | "labelsList" | "labelsOf" | "myFilesList"
-        | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
+        | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "importThumbnails" | "diagReport"
         | "duplicatesGroups" => Priority::UserAction,
 
         // The window's status polls: tiny answers.

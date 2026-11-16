@@ -2546,7 +2546,7 @@ export function Photos({
     ? {
         kind: "upload",
         label: uploads.progressLabel
-          ? `${t("avatar.uploading")} ${uploads.progressLabel}`
+          ? `${t(uploads.albumStep ? "avatar.addingToAlbum" : "avatar.uploading")} ${uploads.progressLabel}`
           : t("avatar.uploading"),
       }
     : downloading
@@ -3149,7 +3149,9 @@ export function Photos({
             onClick={() => openUpload()}
             title={
               uploads.running
-                ? t("photos.uploadingProgress", { progress: uploads.progressLabel })
+                ? t(uploads.albumStep ? "photos.addingToAlbumProgress" : "photos.uploadingProgress", {
+                    progress: uploads.progressLabel,
+                  })
                 : t("photos.uploadTitle")
             }
           >
@@ -4328,10 +4330,11 @@ export function Photos({
         <ImportReview
           items={uploads.review}
           checks={uploads.checks}
+          reasons={uploads.reasons}
           progress={uploads.status.importing}
-          onConfirm={(exclude, albums) => {
+          onConfirm={(exclude, albums, probable, upload) => {
             openUpload();
-            void uploads.confirmImport(exclude, albums, true);
+            void uploads.confirmImport(exclude, albums, true, probable, upload);
           }}
           onDiscard={() => void uploads.discardImport()}
         />

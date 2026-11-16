@@ -609,6 +609,8 @@ struct Drive {
     refreshing: Mutex<(bool, bool)>,
     refresh_soon: AtomicBool,
     watching_uploads: AtomicBool,
+    /// A rebuild was asked for while an upload ran and put off to its end; noted once.
+    held_for_upload: AtomicBool,
     hydrated: Mutex<Vec<Hydrated>>,
     hydrating: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// How many downloads may run at once, and who waits for one (see `Slots`).
@@ -706,6 +708,7 @@ pub fn start(app: &AppHandle) {
         refreshing: Mutex::new((false, false)),
         refresh_soon: AtomicBool::new(false),
         watching_uploads: AtomicBool::new(false),
+        held_for_upload: AtomicBool::new(false),
         hydrated: Mutex::new(Vec::new()),
         hydrating: Mutex::new(HashMap::new()),
         slots: Slots::default(),
@@ -745,7 +748,7 @@ pub fn start(app: &AppHandle) {
         let Some(d) = watcher.upgrade() else { return };
         let recent = now_ms() - d.last_request.load(Ordering::SeqCst) < IN_USE_FOR_MS;
         if recent && d.live.load(Ordering::SeqCst) {
-            refresh(&d);
+            refresh(&d, "keep fresh");
         }
     });
 
@@ -781,7 +784,7 @@ impl Drive {
 pub fn session_started() {
     if let Some(d) = drive() {
         if !d.live.swap(true, Ordering::SeqCst) {
-            refresh(&d);
+            refresh(&d, "session started");
         }
         if !d.retried.swap(true, Ordering::SeqCst) {
             std::thread::spawn(move || retry_staged(&d));
@@ -811,7 +814,7 @@ pub fn library_changed() {
         // A burst of changes (a multi-select trash, an album being filled) lands as one.
         std::thread::sleep(Duration::from_secs(4));
         d.refresh_soon.store(false, Ordering::SeqCst);
-        refresh(&d);
+        refresh(&d, "library changed");
     });
 }
 
@@ -829,11 +832,18 @@ fn watch_uploads(d: &Arc<Drive>) {
     }
     let d = d.clone();
     std::thread::spawn(move || {
-        let running = |d: &Drive| {
-            crate::sidecar_rpc(&d.app, "uploadStatus", serde_json::json!({}))
-                .ok()
-                .and_then(|s| s.get("running").and_then(|v| v.as_bool()))
-                .unwrap_or(false)
+        // A busy sidecar can miss an answer in the middle of a big upload; that is not the
+        // upload ending, so only a run of misses (about a minute) is taken as it gone.
+        let misses = std::cell::Cell::new(0u32);
+        let running = |d: &Drive| match crate::sidecar_rpc(&d.app, "uploadStatus", serde_json::json!({})) {
+            Ok(s) => {
+                misses.set(0);
+                s.get("running").and_then(|v| v.as_bool()).unwrap_or(false)
+            }
+            Err(_) => {
+                misses.set(misses.get() + 1);
+                misses.get() < 20
+            }
         };
         loop {
             std::thread::sleep(Duration::from_secs(3));
@@ -841,7 +851,8 @@ fn watch_uploads(d: &Arc<Drive>) {
                 std::thread::sleep(Duration::from_secs(3));
             }
             d.watching_uploads.store(false, Ordering::SeqCst);
-            refresh(&d);
+            d.held_for_upload.store(false, Ordering::SeqCst);
+            refresh(&d, "upload finished");
             // An upload that started between the last look and the flag going down found
             // the flag still up, so it is picked up here rather than missed.
             if !d.live.load(Ordering::SeqCst)
@@ -855,7 +866,17 @@ fn watch_uploads(d: &Arc<Drive>) {
 }
 
 /// Rebuild the listing in the background; one build at a time, and one more queued at most.
-fn refresh(d: &Arc<Drive>) {
+/// While an upload runs a rebuild only competes with it for the sidecar, and the upload's
+/// end rebuilds anyway, so one asked for meanwhile waits for that (the first listing never does).
+fn refresh(d: &Arc<Drive>, why: &str) {
+    // try_read: a PROPFIND asks for this while it holds the index for reading itself.
+    let listed = || d.index.try_read().map(|i| !i.photos.is_empty()).unwrap_or(true);
+    if d.watching_uploads.load(Ordering::SeqCst) && listed() {
+        if !d.held_for_upload.swap(true, Ordering::SeqCst) {
+            crate::note(&d.app, &format!("[drive] relist ({why}) held until the upload ends"));
+        }
+        return;
+    }
     {
         let mut state = d.refreshing.lock().unwrap();
         if state.0 {
@@ -864,6 +885,7 @@ fn refresh(d: &Arc<Drive>) {
         }
         *state = (true, false);
     }
+    crate::note(&d.app, &format!("[drive] relist ({why})"));
     let d = d.clone();
     std::thread::spawn(move || loop {
         build(&d);
@@ -1979,7 +2001,7 @@ fn propfind(d: &Arc<Drive>, request: &mut Request, segs: &[String]) -> Answer {
     let depth0 = header(request, "Depth") == Some("0");
     let index = d.index.read().unwrap();
     if index.built.is_some_and(|b| b.elapsed() > STALE_AFTER) {
-        refresh(d);
+        refresh(d, "stale listing");
     }
     let Some(node) = resolve(d, &index, segs) else { return text(404, "Not found") };
 

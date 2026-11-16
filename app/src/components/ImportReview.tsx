@@ -22,7 +22,12 @@
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { requestThumbnail } from "../hooks/useFolderMedia";
-import type { ImportState, ReviewCheck, ReviewItem } from "../hooks/useUploads";
+import { clearImportThumbnails, requestImportThumbnail } from "../lib/importThumbs";
+import { isWindows } from "../lib/platform";
+
+/** The system draws a file's picture on Windows; elsewhere the sidecar draws it from the export. */
+const askThumbnail = isWindows ? requestThumbnail : requestImportThumbnail;
+import type { ImportState, ReviewCheck, ReviewItem, ReviewReason } from "../hooks/useUploads";
 import { locale } from "../lib/format";
 import { VirtualSections } from "./VirtualSections";
 import { useT } from "../lib/i18n";
@@ -33,8 +38,10 @@ import "../styles/ImportReview.css";
 type Props = {
   items: ReviewItem[];
   checks: ReviewCheck[];
+  reasons: (ReviewReason | null)[];
   progress: ImportState | undefined;
-  onConfirm: (exclude: number[], albums: boolean) => void;
+  /** `probable`: upload every item probably in the library already too; `upload`: just these. */
+  onConfirm: (exclude: number[], albums: boolean, probable: boolean, upload: number[]) => void;
   onDiscard: () => void;
 };
 
@@ -53,10 +60,22 @@ function dayOf(ms: number | undefined): string | null {
  * second puts it back, Shift+click does a run. A Live Photo is one tile, and uploads as
  * one. Nothing uploads until the import button.
  */
-export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: Props) {
+export function ImportReview({ items, checks, reasons, progress, onConfirm, onDiscard }: Props) {
   const t = useT();
   const [excluded, setExcluded] = useState<Set<number>>(new Set());
   const [albums, setAlbums] = useState(true);
+  // What is probably in the library already stays out unless asked for; only the new ones on
+  // screen, to look them over before they go up.
+  const [uploadProbable, setUploadProbable] = useState(false);
+  // The probable ones picked one by one to upload anyway.
+  const [chosen, setChosen] = useState<Set<number>>(new Set());
+  const [onlyNew, setOnlyNew] = useState(false);
+  const [copied, setCopied] = useState(false);
+  // Checked by name and bytes only (the library's content hashes could not be had): a renamed
+  // copy is not found that way, so Import waits for a yes.
+  const [weakOk, setWeakOk] = useState(false);
+  // The pictures belong to this export: gone with the review.
+  useEffect(() => () => clearImportThumbnails(), []);
   const anchor = useRef<number | null>(null);
 
   const albumCount = useMemo(
@@ -68,10 +87,14 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
   // One section per album, the timeline's first; with albums off, one section for all.
   // A photo copied into several albums shows in each, since it will be in each, and is
   // still one item: counted once, and left out everywhere by one click.
+  const shown = useMemo(
+    () => (onlyNew ? items.filter((i) => checks[i.id] !== "already" && checks[i.id] !== "probable") : items),
+    [items, checks, onlyNew],
+  );
   const sections = useMemo(() => {
-    if (!albums || albumCount === 0) return [{ album: null as string | null, list: items }];
+    if (!albums || albumCount === 0) return [{ album: null as string | null, list: shown }];
     const byAlbum = new Map<string, ReviewItem[]>();
-    for (const item of items) {
+    for (const item of shown) {
       for (const key of [item.album ?? "", ...(item.alsoIn ?? [])]) {
         const list = byAlbum.get(key);
         if (list) list.push(item);
@@ -84,7 +107,7 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
       ...(timeline.length > 0 ? [{ album: null as string | null, list: timeline }] : []),
       ...[...byAlbum.entries()].map(([album, list]) => ({ album: album as string | null, list })),
     ];
-  }, [items, albums, albumCount]);
+  }, [shown, albums, albumCount]);
   const order = useMemo(() => sections.flatMap((s) => s.list.map((i) => i.id)), [sections]);
   const virtualSections = useMemo(
     () => sections.map((s) => ({ key: s.album ?? "", items: s.list })),
@@ -97,13 +120,45 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
     t("importReview.statItems", { n: items.length }),
     ...(albumCount > 0 ? [t("importReview.statAlbums", { n: albumCount })] : []),
     ...(liveCount > 0 ? [t("importReview.statLive", { n: liveCount })] : []),
-    checking
-      ? t("importReview.checking", { done: progress?.checked ?? 0, total: progress?.items ?? items.length })
-      : t("importReview.statAlready", { n: progress?.already ?? 0 }),
+    ...(checking
+      ? [t("importReview.checking", { done: progress?.checked ?? 0, total: progress?.items ?? items.length })]
+      : [
+          t("importReview.statAlready", { n: progress?.already ?? 0 }),
+          ...((progress?.probable ?? 0) > 0 ? [t("importReview.statProbable", { n: progress?.probable ?? 0 })] : []),
+        ]),
   ].join(" · ");
   const kept = items.length - excluded.size;
+  const probableCount = progress?.probable ?? 0;
+
+  /** The review as text, one line per item: what the check found, why, its album and name. */
+  async function copyList() {
+    const lines = items.map((i) => {
+      const check = checks[i.id] ?? "pending";
+      const why = reasons[i.id];
+      const out = excluded.has(i.id) ? "left out" : "";
+      const plain = (text: string) => text.replace(/[\t\r\n]+/g, " ");
+      return [check, why ?? "", out, plain([i.album, ...(i.alsoIn ?? [])].filter(Boolean).join(", ")), plain(i.name)].join("\t");
+    });
+    try {
+      await navigator.clipboard.writeText(["check\treason\tchoice\talbums\tname", ...lines].join("\n"));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* nothing to copy into */
+    }
+  }
 
   function toggle(id: number, e: MouseEvent) {
+    // A probable one is picked to upload anyway, or unpicked.
+    if (checks[id] === "probable" && !e.shiftKey) {
+      setChosen((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      return;
+    }
     const from = e.shiftKey && anchor.current !== null ? order.indexOf(anchor.current) : -1;
     const to = order.indexOf(id);
     setExcluded((prev) => {
@@ -160,8 +215,13 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
                   <ReviewCell
                     key={item.id}
                     item={item}
-                    already={checks[item.id] === "already"}
-                    kept={!excluded.has(item.id)}
+                    check={checks[item.id]}
+                    reason={reasons[item.id] ?? null}
+                    kept={
+                      checks[item.id] === "probable"
+                        ? uploadProbable || chosen.has(item.id)
+                        : !excluded.has(item.id)
+                    }
                     onClick={(e) => toggle(item.id, e)}
                   />
                 ))}
@@ -170,6 +230,15 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
           />
         </div>
 
+        {progress?.byContent === false && !checking && (
+          <div className="ir-warn">
+            <span>{t("importReview.noContentCheck")}</span>
+            <label className="ir-option">
+              <input type="checkbox" className="st-switch" checked={weakOk} onChange={(e) => setWeakOk(e.currentTarget.checked)} />
+              <span>{t("importReview.importAnyway")}</span>
+            </label>
+          </div>
+        )}
         <div className="ap-foot ir-foot">
           {albumCount > 0 && (
             <label className="ir-option">
@@ -182,15 +251,41 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
               <span>{t("importReview.albumsToggle")}</span>
             </label>
           )}
+          {probableCount > 0 && (
+            <label className="ir-option" title={t("importReview.uploadProbableDesc")}>
+              <input
+                type="checkbox"
+                className="st-switch"
+                checked={uploadProbable}
+                onChange={(e) => setUploadProbable(e.currentTarget.checked)}
+              />
+              <span>{t("importReview.uploadProbable", { n: probableCount })}</span>
+            </label>
+          )}
+          <label className="ir-option">
+            <input
+              type="checkbox"
+              className="st-switch"
+              checked={onlyNew}
+              onChange={(e) => setOnlyNew(e.currentTarget.checked)}
+            />
+            <span>{t("importReview.onlyNew")}</span>
+          </label>
           <span className="ap-spacer" />
           <span className="ir-hint">{t("importReview.hint")}</span>
+          <button className="ap-cancel" disabled={checking} onClick={() => void copyList()}>
+            {copied ? t("importReview.copied") : t("importReview.copyList")}
+          </button>
           <button className="ap-cancel" onClick={onDiscard}>
             {t("common.cancel")}
           </button>
+          {/* Held until the check is done: confirmed early, an item not checked yet could go
+              up although the library has it. */}
           <button
             className="ap-add"
-            disabled={kept === 0}
-            onClick={() => onConfirm([...excluded], albums)}
+            disabled={kept === 0 || checking || (progress?.byContent === false && !weakOk)}
+            title={checking ? t("importReview.waitForCheck") : undefined}
+            onClick={() => onConfirm([...excluded], albums, uploadProbable, [...chosen])}
           >
             {t("importReview.confirm", { n: kept })}
           </button>
@@ -203,15 +298,19 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
 /** One item, drawn like a timeline tile: its picture once on screen, a tick while kept. */
 function ReviewCell({
   item,
-  already,
+  check,
+  reason,
   kept,
   onClick,
 }: {
   item: ReviewItem;
-  already: boolean;
+  check: ReviewCheck | undefined;
+  reason: ReviewReason | null;
   kept: boolean;
   onClick: (e: MouseEvent) => void;
 }) {
+  const already = check === "already";
+  const probable = check === "probable";
   const t = useT();
   const ref = useRef<HTMLDivElement>(null);
   const [url, setUrl] = useState<string | null>(null);
@@ -225,7 +324,7 @@ function ReviewCell({
     const seen = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          if (!stop) stop = requestThumbnail(item.path, setUrl);
+          if (!stop) stop = askThumbnail(item.path, setUrl);
         } else if (stop) {
           stop();
           stop = undefined;
@@ -247,6 +346,8 @@ function ReviewCell({
     item.live ? `${item.name} + ${item.live.name}` : item.name,
     ...(day ? [day] : []),
     ...(item.alsoIn?.length ? [`${t("viewer.albums")}: ${albumsOf}`] : []),
+    ...(reason ? [t(`importReview.why.${reason}`)] : []),
+    ...(probable ? [t("importReview.probableClick")] : []),
   ].join("\n");
   return (
     <div
@@ -255,7 +356,19 @@ function ReviewCell({
       onClick={onClick}
       title={name}
     >
-      {url ? <img src={url} alt="" draggable={false} /> : <div className="g-cell-ph" />}
+      {/* Shown once it has loaded, as every grid tile's picture is (see `.g-cell img`). */}
+      {url ? (
+        <img
+          src={url}
+          alt=""
+          draggable={false}
+          onLoad={(e) => {
+            e.currentTarget.dataset.ok = "1";
+          }}
+        />
+      ) : (
+        <div className="g-cell-ph" />
+      )}
 
       <span className="g-seldot">{kept ? <CheckIcon size={11} /> : null}</span>
 
@@ -268,6 +381,7 @@ function ReviewCell({
       <div className="g-badgerow">
         <span className={`g-tilebadge ir-day${day ? "" : " none"}`}>{day ?? t("importReview.noDate")}</span>
         {already && <span className="g-tilebadge ir-already">{t("importReview.alreadyBadge")}</span>}
+        {probable && <span className="g-tilebadge ir-probable">{t("importReview.probableBadge")}</span>}
       </div>
 
       {(item.live || item.favorite) && (

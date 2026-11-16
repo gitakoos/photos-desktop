@@ -403,7 +403,7 @@ describe("importing an export", () => {
     expect(done.total).toBe(2);
   });
 
-  it("never uploads a photo the library has, when Import is pressed before the check ends", async () => {
+  it("refuses an Import pressed before the check ends, and then uploads only what is new", async () => {
     const root = tree("confirm-early", {
       "A/old.jpg": await jpeg(11),
       "A/new.jpg": await jpeg(12),
@@ -422,7 +422,9 @@ describe("importing an export", () => {
     prepareImport(photos);
     await settle((s) => s.importing?.phase === "review");
     expect(getUploadStatus().importing?.checked).toBe(0);
+    expect(() => confirmImport(photos)).toThrow();
     slow = false;
+    await settle((s) => (s.importing?.checked ?? 0) === 2);
     confirmImport(photos);
     const done = await settle(finished);
 

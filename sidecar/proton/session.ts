@@ -122,6 +122,7 @@ import { SavedCopies, SharedBackup, type BackupKind, type BackupStatus } from ".
 import { checkMyFolders, listMyFolder, type MyFolderListing } from "./myFilesImport.ts";
 import { diag } from "./diag.ts";
 import { duplicateFinder, withListingTap, type DuplicateStatus, type ShownGroups } from "./duplicates.ts";
+import { LibraryIndex, photoRootHashKey, type LibraryPhoto } from "./importMatch.ts";
 import { ocrModelStatus, readText, type OcrResult, type OcrStage } from "./ocr.ts";
 import { hiddenStore, type HiddenKind, type HiddenState } from "./hidden.ts";
 import { isTransient, withRetry } from "./transient.ts";
@@ -193,6 +194,7 @@ import {
   prepareImport as runPrepareImport,
   getImportReview as readImportReview,
   getImportChecks as readImportChecks,
+  importThumbnails as readImportThumbnails,
   confirmImport as runConfirmImport,
   discardImport as runDiscardImport,
   startDropUpload as runDropUpload,
@@ -3053,8 +3055,57 @@ export class ProtonSession {
     media: Record<string, ShellMediaInfo> = {},
   ): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runPrepareImport(this.photos, frames, media);
+    runPrepareImport(this.photos, frames, media, () => this.importLibrary());
     return { started: true };
+  }
+
+  /**
+   * The library as an import checks against it: every photo's capture time and kind, and the
+   * content hashes the timeline listing handed out, with the key to make a file's own.
+   */
+  private async importLibrary(): Promise<LibraryIndex | null> {
+    const photos = this.photos;
+    if (!photos) return null;
+    const items = await this.getTimeline();
+    const hashKey = await photoRootHashKey(photos);
+    // Every video's size and length, read now where this computer has not yet (the duplicate
+    // finder's scan reads them too); from the cache after the first time.
+    // Only those not read yet; a batch of which none could be read is the connection gone, and
+    // the rest wait for another time rather than hold the review up.
+    const unread: string[] = [];
+    let looked = 0;
+    for (const item of items) {
+      if (!item.tags.includes(PhotoTag.Videos)) continue;
+      if (++looked % 300 === 0) await new Promise((r) => setImmediate(r));
+      if (typeof metaGet(item.uid)?.durationMs !== "number") unread.push(item.uid);
+    }
+    for (let at = 0; at < unread.length; at += 200) {
+      const batch = unread.slice(at, at + 200);
+      await this.getDurations(batch).catch(() => []);
+      if (batch.every((uid) => typeof metaGet(uid)?.durationMs !== "number")) break;
+    }
+    let read = 0;
+    const library: LibraryPhoto[] = [];
+    for (const item of items) {
+      const video = item.tags.includes(PhotoTag.Videos);
+      // The cache is read from disk: the event loop is let go now and then.
+      if (video && ++read % 300 === 0) await new Promise((r) => setImmediate(r));
+      const meta = video ? metaGet(item.uid) : undefined;
+      library.push({
+        uid: item.uid,
+        captureTime: item.captureTime,
+        video,
+        size: meta?.size ?? null,
+        durationMs: meta?.durationMs && meta.durationMs > 0 ? meta.durationMs : null,
+      });
+    }
+    return new LibraryIndex(
+      library,
+      duplicateFinder.contentHashEntries(),
+      hashKey,
+      (uid) => duplicateFinder.printOf(uid),
+      hiddenStore.hiddenPhotoTest(),
+    );
   }
 
   getImportReview() {
@@ -3065,10 +3116,15 @@ export class ProtonSession {
     return readImportChecks();
   }
 
+  /** Pictures for the import review's tiles: see `importThumbnails`. */
+  importThumbnails(paths: string[]) {
+    return readImportThumbnails(paths);
+  }
+
   /** Uploads the reviewed export, less the items left out. */
-  confirmImport(exclude: number[], albums: boolean, live: boolean): { started: boolean } {
+  confirmImport(exclude: number[], albums: boolean, live: boolean, probable = false, upload: number[] = []): { started: boolean } {
     if (!this.photos) throw new Error("Not signed in");
-    runConfirmImport(this.photos, exclude, albums, live);
+    runConfirmImport(this.photos, exclude, albums, live, probable, upload);
     return { started: true };
   }
 
