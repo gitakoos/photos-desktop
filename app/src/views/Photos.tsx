@@ -141,6 +141,7 @@ import {
   thumbUrl,
   useThumbServerBase,
 } from "../lib/thumbStore";
+import { forgetThumbRepairs, startThumbRepairs } from "../lib/thumbRepair";
 import { forgetBurstStacks, stacksFrom, useBurstStacks } from "../hooks/useBurstStacks";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { DebugHud } from "../components/DebugHud";
@@ -785,11 +786,14 @@ export function Photos({
   // token is asked for here and let go on the way out, which is a lock or a sign-out.
   useEffect(() => {
     void connectThumbServer();
+    // Videos Proton holds no thumbnail for get one drawn on this computer, as they come up.
+    startThumbRepairs();
     return () => {
       disconnectThumbServer();
       // The photo names the viewer kept go with the session that showed them, and the bursts.
       forgetNames();
       forgetBurstStacks();
+      forgetThumbRepairs();
     };
   }, []);
 

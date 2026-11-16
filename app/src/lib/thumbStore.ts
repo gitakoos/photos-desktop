@@ -65,6 +65,14 @@ export function videoStreamUrl(uid: string): string | null {
   return serverBase ? serverBase + encodeURIComponent(uid) + "/v" : null;
 }
 
+/**
+ * Where the server streams a video to draw a picture of: its own route, opened apart from
+ * the viewer's videos and read only as far as a picture needs.
+ */
+export function videoFrameUrl(uid: string): string | null {
+  return serverBase ? serverBase + encodeURIComponent(uid) + "/vf" : null;
+}
+
 /** A grid thumbnail's URL on the server, or null while there is no server to ask. */
 export function thumbUrl(uid: string): string | null {
   return serverBase ? serverBase + encodeURIComponent(uid) : null;

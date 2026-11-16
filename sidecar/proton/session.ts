@@ -26,6 +26,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { PhotoTag, ProtonDriveClient, ThumbnailType } from "@protontech/drive-sdk";
@@ -58,6 +59,7 @@ import {
   metaPut,
   readSealedOrDiscard,
   storeDir,
+  THUMB_REPAIR_FILE,
   coverGet,
   coverPut,
   sizedGet,
@@ -199,6 +201,7 @@ import {
   discardImport as runDiscardImport,
   startDropUpload as runDropUpload,
   takeDropReplaced,
+  isStagedFrame,
   type ShellMediaInfo,
   type UploadStatus,
 } from "./upload.ts";
@@ -518,6 +521,25 @@ type LockStatus = {
 
 /** The least time between two scans started for the timeline's stacked bursts. */
 const BURST_RESCAN_MS = 5 * 60_000;
+
+/** The longer side of a thumbnail made on this computer: Proton's own grid thumbnails are this size. */
+const LOCAL_THUMB_PX = 512;
+/** The SDK's answer for a photo with no thumbnail at all, as opposed to one it could not fetch. */
+const NO_PREVIEW = "This item has no image preview";
+/** Photos without a thumbnail kept noted at once: the latest, which are the ones on screen. */
+const THUMBLESS_KEPT = 200;
+/** Videos the host draws a picture of at once: each holds one of the SDK's download slots meanwhile. */
+const FRAMES_AT_ONCE = 3;
+/** Kinds looked up on Proton per call for a thumbnail to draw. */
+const KIND_LOOKUPS = 10;
+/** Videos that could not be drawn, kept noted. */
+const THUMB_UNDRAWABLE_KEPT = 20_000;
+/** How long a video that could not be drawn is left alone: a decoder may be added meanwhile. */
+const UNDRAWABLE_FOR_MS = 7 * 24 * 3_600_000;
+/** Bumped when frames are drawn another way, so those that failed are tried again. */
+const FRAME_RECIPE = 1;
+/** An old video that cannot be read block by block is taken whole for a picture only up to this size. */
+const FRAME_WHOLE_MAX = 64 * 1024 * 1024;
 
 export class ProtonSession {
   /** When the duplicate finder was last started for the timeline's stacks. */
@@ -1206,6 +1228,11 @@ export class ProtonSession {
     this.faceCovers.clear();
     this.trash.changed();
     this.videos.clear();
+    this.frameVideos.clear();
+    this.thumbless.clear();
+    this.thumbsHanded.clear();
+    this.thumbsUndrawable = null;
+    this.notVideos.clear();
     this.smallThumbs.clear();
     lockVault();
     this.offlineResume = null;
@@ -1311,6 +1338,11 @@ export class ProtonSession {
     this.faceCovers.clear();
     this.trash.changed();
     this.videos.clear();
+    this.frameVideos.clear();
+    this.thumbless.clear();
+    this.thumbsHanded.clear();
+    this.thumbsUndrawable = null;
+    this.notVideos.clear();
     this.smallThumbs.clear();
     this.timelineRun = null;
     this.session = null;
@@ -1345,6 +1377,11 @@ export class ProtonSession {
     this.faceCovers.clear();
     this.trash.changed();
     this.videos.clear();
+    this.frameVideos.clear();
+    this.thumbless.clear();
+    this.thumbsHanded.clear();
+    this.thumbsUndrawable = null;
+    this.notVideos.clear();
     this.smallThumbs.clear();
     this.legacySignIn = false;
     lockVault();
@@ -2134,6 +2171,8 @@ export class ProtonSession {
   private trash = new TrashListing();
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid) => this.videoSource(uid));
+  /** Videos opened only to draw a picture of, as many as the host draws at once, closed soon: see `frameSource`. */
+  private frameVideos = new OpenVideos((uid) => this.frameSource(uid), Date.now, 15_000, FRAMES_AT_ONCE);
   /** Grid thumbnails cut down to the size the grid shows them: see `thumbSizes`. */
   private smallThumbs = new SmallThumbs(undefined, { get: sizedGet, put: sizedPut });
   private thumbFlush: ReturnType<typeof setTimeout> | null = null;
@@ -2153,6 +2192,7 @@ export class ProtonSession {
             : this.thumbnailFor(uid, gone),
         (uid, box, gone, width) => this.faceCovers.get(uid, box, gone, width),
         (uid) => this.videos.get(uid),
+        (uid) => this.frameVideos.get(uid),
       ),
     };
   }
@@ -2223,6 +2263,7 @@ export class ProtonSession {
           thumbPut(uid, ThumbnailType.Type1, bytes);
           answer(uid, bytes);
         } else {
+          this.noteThumbless(uid, (r as any).error);
           answer(uid, null);
         }
       }
@@ -2287,6 +2328,7 @@ export class ProtonSession {
           thumbPut(uid, ThumbnailType.Type1, bytes);
           out.push({ uid, dataUrl: toDataUrl(bytes) });
         } else {
+          this.noteThumbless(uid, (r as any).error);
           out.push({ uid, dataUrl: null });
         }
       }
@@ -2354,6 +2396,31 @@ export class ProtonSession {
    * when neither can be had, or Proton does not say how large the video is, which ranges
    * need: the window then falls back to `getVideo`.
    */
+  /**
+   * A video opened only to draw a picture of it: read from Proton block by block where the
+   * player asks, which for a picture is the start and the index (often at the end), never the
+   * whole file and on one stream only. An old file that cannot be read that way is taken whole
+   * only when small.
+   */
+  private async frameSource(uid: string): Promise<VideoSource | null> {
+    if (!this.photos) return null;
+    const node = await this.photos.getNode(uid);
+    const mime = (node as any)?.mediaType || "";
+    if (!String(mime).startsWith("video/")) return null;
+    const opened = await openDownloader(this.photos, uid);
+    const size = opened.downloader.getClaimedSizeInBytes?.() ?? 0;
+    if (!size) {
+      opened.unused();
+      return null;
+    }
+    const video = seekVideo(opened.downloader, size, mime, opened);
+    if (video) return video;
+    if (size > FRAME_WHOLE_MAX) return null;
+    // `seekVideo` gave the slot back: a downloader of its own for the whole file.
+    const again = await openDownloader(this.photos, uid);
+    return downloadVideo(again.downloader, size, mime, again.stop);
+  }
+
   private async videoSource(uid: string): Promise<VideoSource | null> {
     const keptType = metaGet(uid)?.mediaType ?? "";
     if (isOfflineReady(uid) && keptType.startsWith("video/")) {
@@ -3547,6 +3614,146 @@ export class ProtonSession {
     if (!this.photos) throw new Error("Not signed in");
     const photos = this.photos;
     return this.trash.get(() => readTrash(photos), !ahead);
+  }
+
+  /** Photos Proton said it holds no thumbnail for, the latest last: what a thumbnail is made for. */
+  private thumbless = new Map<string, number>();
+  /** Handed to the window to draw, and not answered for yet. */
+  private thumbsHanded = new Set<string>();
+  /** Those this computer's decoders could not draw, and when: see `loadThumbRepairs`. */
+  private thumbsUndrawable: Map<string, number> | null = null;
+  private loggedOtherThumbError = false;
+  /** Photos noted without a thumbnail that are no videos: not looked up again this session. */
+  private notVideos = new Set<string>();
+
+  /** Notes `uid` when Proton's answer for its thumbnail was that it has none, and only then. */
+  private noteThumbless(uid: string, error: unknown): void {
+    if (String(error) !== NO_PREVIEW) {
+      // Shown once, so a reworded answer from the SDK does not leave this silently idle.
+      if (!this.loggedOtherThumbError && !isTransient(error)) {
+        this.loggedOtherThumbError = true;
+        process.stderr.write(`[thumbs] a thumbnail answer other than "no preview" (${String(error).slice(0, 60)})\n`);
+      }
+      return;
+    }
+    this.thumbless.delete(uid);
+    this.thumbless.set(uid, Date.now());
+    while (this.thumbless.size > THUMBLESS_KEPT) {
+      const oldest = this.thumbless.keys().next().value;
+      if (oldest === undefined) break;
+      this.thumbless.delete(oldest);
+    }
+  }
+
+  private loadThumbRepairs(): Map<string, number> {
+    if (this.thumbsUndrawable) return this.thumbsUndrawable;
+    this.thumbsUndrawable = new Map();
+    try {
+      const raw = readSealedOrDiscard(join(storeDir(), THUMB_REPAIR_FILE));
+      const saved = raw ? (JSON.parse(raw.toString("utf8")) as { r?: number; u?: Record<string, number> }) : null;
+      // Tried again once the way frames are drawn has changed, or a week on.
+      if (saved?.r === FRAME_RECIPE && saved.u && typeof saved.u === "object") {
+        const since = Date.now() - UNDRAWABLE_FOR_MS;
+        for (const [uid, at] of Object.entries(saved.u)) if (typeof at === "number" && at > since) this.thumbsUndrawable.set(uid, at);
+      }
+    } catch {
+      /* tried again */
+    }
+    return this.thumbsUndrawable;
+  }
+
+  /**
+   * Up to `limit` videos to draw a thumbnail for, the latest noted first: Proton has none for
+   * them, none was made here, and this computer has not failed to draw one lately. One whose
+   * kind is not known is looked up: a photo is not drawn this way.
+   */
+  async thumblessVideos(limit = 3): Promise<{ uids: string[] }> {
+    const photos = this.photos;
+    if (!photos) return { uids: [] };
+    const undrawable = this.loadThumbRepairs();
+    const want = Math.min(Math.max(1, limit), 10);
+    const uids: string[] = [];
+    // A few lookups a call at most: the channel is shared, and the rest wait for the next call.
+    let lookups = 0;
+    for (const uid of [...this.thumbless.keys()].reverse()) {
+      if (uids.length >= want || lookups >= KIND_LOOKUPS) break;
+      this.thumbless.delete(uid);
+      if (undrawable.has(uid) || this.thumbsHanded.has(uid) || this.notVideos.has(uid) || thumbGet(uid, ThumbnailType.Type1)) continue;
+      let kind = metaGet(uid)?.mediaType ?? null;
+      if (!kind) {
+        lookups++;
+        kind = String(((await photos.getNode(uid).catch(() => null)) as any)?.mediaType ?? "");
+      }
+      if (!kind.startsWith("video/")) {
+        if (kind) this.notVideos.add(uid);
+        continue;
+      }
+      this.thumbsHanded.add(uid);
+      uids.push(uid);
+    }
+    return { uids };
+  }
+
+  /**
+   * Thumbnails this computer made for videos Proton holds none for: a frame the host drew of
+   * each, by uid, staged in its frame folder. Each is made the size of a grid thumbnail and
+   * kept in the sealed cache the grid and the duplicate finder read first; its staged frame is
+   * deleted. Only for a video handed out by `thumblessVideos`, and never over a thumbnail
+   * already there. `undrawable`: those this computer's decoders could not draw, left alone
+   * for a week; `letGo`: those not drawn for another reason, asked for again. Only on this
+   * computer: Proton's copy is left as it is.
+   */
+  async putLocalThumbnails(
+    frames: Record<string, string>,
+    undrawable: string[] = [],
+    letGo: string[] = [],
+    roundOver = false,
+  ): Promise<{ stored: string[] }> {
+    // The round is drawn: its videos give their download slots back now, not when idle. Not
+    // for a round handed back after a lock, whose successor may be drawing meanwhile.
+    if (roundOver) this.frameVideos.clear();
+    const stored: string[] = [];
+    for (const [uid, path] of Object.entries(frames ?? {})) {
+      if (typeof path !== "string" || !isStagedFrame(path)) continue;
+      try {
+        if (!this.thumbsHanded.has(uid) || thumbGet(uid, ThumbnailType.Type1)) continue;
+        const small = await sharp(await readFile(path), { limitInputPixels: 80_000_000 })
+          .rotate()
+          .resize(LOCAL_THUMB_PX, LOCAL_THUMB_PX, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 82 })
+          .toBuffer();
+        thumbPut(uid, ThumbnailType.Type1, small);
+        if (!thumbGet(uid, ThumbnailType.Type1)) continue;
+        duplicateFinder.readable(uid);
+        stored.push(uid);
+      } catch (e) {
+        process.stderr.write(`[thumbs] a made thumbnail was not kept: ${(e as Error)?.name ?? "error"}\n`);
+      } finally {
+        this.thumbsHanded.delete(uid);
+        await rm(path, { force: true }).catch(() => {});
+      }
+    }
+    for (const uid of Array.isArray(letGo) ? letGo : []) if (typeof uid === "string") this.thumbsHanded.delete(uid);
+    const kept = this.loadThumbRepairs();
+    let added = 0;
+    for (const uid of Array.isArray(undrawable) ? undrawable : []) {
+      if (typeof uid !== "string" || !this.thumbsHanded.delete(uid)) continue;
+      kept.set(uid, Date.now());
+      added++;
+    }
+    if (added > 0) {
+      try {
+        const latest = [...kept.entries()].slice(-THUMB_UNDRAWABLE_KEPT);
+        writeSealedAtomic(
+          join(storeDir(), THUMB_REPAIR_FILE),
+          Buffer.from(JSON.stringify({ r: FRAME_RECIPE, u: Object.fromEntries(latest) }), "utf8"),
+        );
+      } catch {
+        /* tried again next run */
+      }
+    }
+    if (stored.length || added) process.stderr.write(`[thumbs] made ${stored.length} video thumbnail(s), ${added} could not be drawn\n`);
+    return { stored };
   }
 
   /** How many items the trash holds, read without decrypting any: for following an emptying. */

@@ -293,6 +293,23 @@ export class DuplicateFinder {
     return this.library.size;
   }
 
+  /**
+   * A photo that had no picture to read has one now (a thumbnail made on this computer): it is
+   * read at the next scan, rather than left out for good.
+   */
+  readable(uid: string): void {
+    this.load();
+    if (!this.unreadable.delete(uid)) return;
+    // One save for a run of them, a moment after the last.
+    if (this.readableSave) clearTimeout(this.readableSave);
+    this.readableSave = setTimeout(() => {
+      this.readableSave = null;
+      this.save();
+    }, 5_000);
+    this.readableSave.unref?.();
+  }
+  private readableSave: ReturnType<typeof setTimeout> | null = null;
+
   /** Whether the groups are still to be worked out again for what is known now. */
   pending(): boolean {
     return this.stale || this.computing !== null || this.regroupTimer !== null;
@@ -302,6 +319,9 @@ export class DuplicateFinder {
   setSource(source: DuplicateSource | null): void {
     this.source = source;
     if (!source) {
+      // A save still to come would write the emptied state below over the kept fingerprints.
+      if (this.readableSave) clearTimeout(this.readableSave);
+      this.readableSave = null;
       this.generation++;
       this.running = null;
       if (this.regroupTimer) clearTimeout(this.regroupTimer);

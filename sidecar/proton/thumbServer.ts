@@ -148,6 +148,8 @@ let token: Buffer | null = null;
 let source: ThumbnailSource | null = null;
 let faces: FaceSource | null = null;
 let videos: VideoLookup | null = null;
+/** Videos opened only to draw a picture of: their own, so a frame never closes one playing. */
+let frameVideos: VideoLookup | null = null;
 
 /**
  * Starts serving (or keeps serving) and mints a fresh token, so a URL from before the
@@ -157,10 +159,12 @@ export async function startThumbServer(
   from: ThumbnailSource,
   faceFrom?: FaceSource,
   videoFrom?: VideoLookup,
+  frameFrom?: VideoLookup,
 ): Promise<string> {
   source = from;
   faces = faceFrom ?? null;
   videos = videoFrom ?? null;
+  frameVideos = frameFrom ?? null;
   token = randomBytes(32);
   if (!server) {
     const created = createServer((req, res) => void handle(req, res));
@@ -208,7 +212,9 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   const parts = path.split("/");
   const width = thumbWidthFor(Number(new URLSearchParams(query).get("w") ?? NaN)) ?? undefined;
   const face = parts.length === 6 && parts[4] === "f";
-  const video = parts.length === 5 && parts[4] === "v";
+  // "vf": a video read only for a picture of it (see `frameVideos`).
+  const frame = parts.length === 5 && parts[4] === "vf";
+  const video = (parts.length === 5 && parts[4] === "v") || frame;
   if ((parts.length !== 4 && !face && !video) || parts[0] !== "" || parts[1] !== "t") return refuse(404);
   // A player may ask what a video is before it asks for it; a thumbnail is only fetched.
   if (head && !video) return refuse(405);
@@ -241,7 +247,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
     openSince.delete(id);
     if (!res.writableFinished) ended.dropped++;
   });
-  if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
+  if (video) return serveVideo(uid, req, res, head, gone.signal, refuse, frame ? frameVideos : videos);
   try {
     const bytes = box && faces ? await faces(uid, box, gone.signal, width) : await source(uid, gone.signal, width);
     if (gone.signal.aborted) return;
@@ -276,8 +282,8 @@ async function serveVideo(
   head: boolean,
   gone: AbortSignal,
   refuse: (code: number) => void,
+  lookup: VideoLookup | null,
 ): Promise<void> {
-  const lookup = videos;
   if (!lookup) return refuse(404);
   let video: VideoSource | null;
   try {

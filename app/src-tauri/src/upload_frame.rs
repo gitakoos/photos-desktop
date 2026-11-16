@@ -585,7 +585,19 @@ mod gst_media {
             .timed_pop_filtered(STEP, &[gst::MessageType::AsyncDone, gst::MessageType::Error])
             .ok_or("timed out")?;
         match message.view() {
-            gst::MessageView::Error(e) => Err(e.error().to_string()),
+            gst::MessageView::Error(e) => {
+                let error = e.error();
+                // By what failed, not by the words, which differ by version and language.
+                if error.kind::<gst::ResourceError>().is_some() {
+                    Err("fetch".into())
+                } else if error.kind::<gst::StreamError>().is_some()
+                    || error.kind::<gst::CoreError>() == Some(gst::CoreError::MissingPlugin)
+                {
+                    Err("decode".into())
+                } else {
+                    Err(error.to_string())
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -961,6 +973,149 @@ pub async fn upload_frames(app: AppHandle, paths: Vec<String>) -> Result<FramePr
         .map_err(|e| format!("preparing those frames failed: {e}"))
 }
 
+/// A video the window has no thumbnail for: Proton holds none (it went up from a computer
+/// that could not draw one). `url` is the app's own loopback stream of it.
+#[derive(serde::Deserialize)]
+pub struct ThumbAsk {
+    uid: String,
+    url: String,
+}
+
+/// Draws a picture of each video from its stream on the app's loopback server, the way an
+/// upload draws one from a file, and stages it for the sidecar to keep as the video's
+/// thumbnail on this computer. Answers the staged frame by uid; one that could not be drawn
+/// is left out. Only loopback addresses are read. Not on Windows, whose frames come from the
+/// shell, which reads files only.
+/// The frames drawn, by uid, and for each that was not, why: "decode" (this computer's
+/// decoders could not draw it, which drawing again will not change), "timeout" or "fetch"
+/// (it could not be read just now).
+#[derive(Default, serde::Serialize)]
+pub struct ThumbFrames {
+    frames: HashMap<String, String>,
+    failed: HashMap<String, &'static str>,
+}
+
+#[tauri::command]
+pub async fn thumb_frames(app: AppHandle, items: Vec<ThumbAsk>) -> Result<ThumbFrames, String> {
+    tauri::async_runtime::spawn_blocking(move || thumb_frames_blocking(&app, &items))
+        .await
+        .map_err(|e| format!("drawing those frames failed: {e}"))
+}
+
+#[cfg(not(windows))]
+fn thumb_frames_blocking(app: &AppHandle, items: &[ThumbAsk]) -> ThumbFrames {
+    let mut out = ThumbFrames::default();
+    if items.is_empty() || gstreamer::init().is_err() || std::fs::create_dir_all(frame_dir()).is_err() {
+        return out;
+    }
+    sweep_old_frames();
+    let own: Vec<&ThumbAsk> = items.iter().filter(|item| is_own_frame_url(&item.url)).collect();
+    // A few at a time: each waits mostly on Proton for its blocks, and the sidecar keeps as
+    // many open for pictures (FRAMES_AT_ONCE there).
+    let results = std::sync::Mutex::new(Vec::new());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..THUMB_FRAMES_AT_ONCE.min(own.len()) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(item) = own.get(i) else { break };
+                let dest = frame_dir().join(frame_name());
+                let drawn = gst_media::grab(&item.url, &dest);
+                if drawn.is_err() {
+                    let _ = std::fs::remove_file(&dest);
+                }
+                if let Ok(mut all) = results.lock() {
+                    all.push((item.uid.clone(), dest, drawn));
+                }
+            });
+        }
+    });
+    for (uid, dest, drawn) in results.into_inner().unwrap_or_default() {
+        match drawn {
+            Ok(()) => {
+                if let Ok(mut made) = REPAIR_FRAMES.lock() {
+                    made.push((dest.clone(), std::time::Instant::now()));
+                }
+                out.frames.insert(uid, dest.to_string_lossy().into_owned());
+            }
+            Err(e) => {
+                out.failed.insert(uid, failure_kind(&e));
+            }
+        }
+    }
+    // The kinds only: GStreamer's own text can carry the address and its token.
+    let count = |k: &str| out.failed.values().filter(|v| **v == k).count();
+    crate::note(
+        app,
+        &format!(
+            "[frames] thumbnails wanted {} made {} decode {} timeout {} fetch {}",
+            items.len(),
+            out.frames.len(),
+            count("decode"),
+            count("timeout"),
+            count("fetch")
+        ),
+    );
+    out
+}
+
+/// Why a frame could not be drawn, from GStreamer's error: the decoders, or the reading.
+#[cfg(not(windows))]
+fn failure_kind(e: &str) -> &'static str {
+    let e = e.to_ascii_lowercase();
+    if e == "timed out" {
+        "timeout"
+    } else if e == "fetch" {
+        "fetch"
+    } else if e == "decode"
+        || e == "no picture"
+        || ["decoder", "codec", "plugin", "plug-in", "missing", "not-negotiated", "not negotiated", "demux"]
+            .iter()
+            .any(|w| e.contains(w))
+    {
+        "decode"
+    } else {
+        "fetch"
+    }
+}
+
+/// Thumbnail frames drawn at once: as many as the sidecar keeps videos open for pictures.
+#[cfg(not(windows))]
+const THUMB_FRAMES_AT_ONCE: usize = 3;
+
+/// The frames drawn for thumbnails, and when: only these are swept, never an upload's, which
+/// wait in the same folder for as long as their upload runs.
+#[cfg(not(windows))]
+static REPAIR_FRAMES: std::sync::Mutex<Vec<(PathBuf, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+
+/// Thumbnail frames a round left behind (the window went away between drawing and keeping
+/// them), an hour on. Those the sidecar kept are gone already, and removing them again is nothing.
+#[cfg(not(windows))]
+fn sweep_old_frames() {
+    let Ok(mut made) = REPAIR_FRAMES.lock() else { return };
+    made.retain(|(path, at)| {
+        if at.elapsed() < std::time::Duration::from_secs(3600) {
+            return true;
+        }
+        let _ = std::fs::remove_file(path);
+        false
+    });
+}
+
+/// Whether `url` is the app's own loopback server's frame route: `http://127.0.0.1:<port>/t/`,
+/// with nothing between the address and the port that could send it elsewhere.
+#[cfg(not(windows))]
+fn is_own_frame_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://127.0.0.1:") else { return false };
+    let port: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    !port.is_empty() && rest[port.len()..].starts_with("/t/") && url.ends_with("/vf") && !url.contains('@')
+}
+
+#[cfg(windows)]
+fn thumb_frames_blocking(_app: &AppHandle, _items: &[ThumbAsk]) -> ThumbFrames {
+    ThumbFrames::default()
+}
+
 /// The work behind `upload_frames`, for the file-manager drive too, whose drops upload
 /// through the same path an in-app drop does. Blocking.
 pub(crate) fn prepare(app: &AppHandle, paths: &[String]) -> FramePrep {
@@ -1002,6 +1157,16 @@ pub(crate) fn prepare(app: &AppHandle, paths: &[String]) -> FramePrep {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn frames_are_drawn_only_from_the_apps_own_server() {
+        assert!(super::is_own_frame_url("http://127.0.0.1:41234/t/abc/vol~link/vf"));
+        assert!(!super::is_own_frame_url("http://127.0.0.1:1@evil.example/t/x/vf"));
+        assert!(!super::is_own_frame_url("http://127.0.0.1:41234/t/abc/vol~link/v"));
+        assert!(!super::is_own_frame_url("http://127.0.0.1.evil.example:80/t/x/vf"));
+        assert!(!super::is_own_frame_url("file:///etc/passwd"));
+    }
 
     /// A directory holding the named empty files, removed when the guard drops.
     struct TempTree(PathBuf);

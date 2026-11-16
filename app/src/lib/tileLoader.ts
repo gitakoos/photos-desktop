@@ -183,6 +183,11 @@ export class TileLoader {
     this.onArrive(key);
   }
 
+  /** A thumbnail that was not there may be now: asked again at the next look, from no backing off. */
+  retry(key: string): void {
+    this.failed.delete(key);
+  }
+
   private fromWorker(m: { kind: string; key?: string; bytes?: ArrayBuffer; type?: string; unreachable?: boolean }): void {
     if (this.mode !== "worker") return;
     if (m.kind === "done") {

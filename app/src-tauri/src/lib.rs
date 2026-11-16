@@ -205,7 +205,7 @@ fn classified(method: &str) -> Option<Priority> {
         | "listTrashed" | "trashCount" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
         | "facePeople" | "facePersonCandidates" | "faceSplitStart" | "faceSplitPlan" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "importThumbnails" | "diagReport"
-        | "duplicatesGroups" | "burstStacks" => Priority::UserAction,
+        | "duplicatesGroups" | "burstStacks" | "putLocalThumbnails" | "thumblessVideos" => Priority::UserAction,
 
         // The window's status polls: tiny answers.
         "uploadStatus" | "dropReplaced" | "dateEditStatus" | "offlineStatus" | "offlineAlbums" | "saveStatus" | "hydrateProgress" | "updateStatus"
@@ -3697,6 +3697,7 @@ pub fn run() {
             local_folder::list_media_folder,
             local_folder::local_thumbnails,
             upload_frame::upload_frames,
+            upload_frame::thumb_frames,
             device_pick::pick_for_upload,
             files_drive_status,
             set_files_drive,

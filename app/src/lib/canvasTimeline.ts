@@ -6,6 +6,7 @@
  * License version 3. See <https://www.gnu.org/licenses/>.
  */
 
+import { onThumbsMade } from "./thumbRepair";
 import { bench, benchCount, benchSpan } from "./benchProbe";
 import { GRID_GAP, TileRange, sectionOfIndex, type GridLayout } from "./gridLayout";
 
@@ -104,6 +105,8 @@ export class CanvasTimeline {
   private onRatio = () => this.measure(true);
   private gone = false;
 
+  private stopMade: () => void;
+
   constructor(
     private canvas: HTMLCanvasElement,
     private scroller: HTMLElement,
@@ -118,6 +121,11 @@ export class CanvasTimeline {
     private onStill: () => void,
   ) {
     this.ctx = canvas.getContext("2d", { alpha: false })!;
+    // A thumbnail made on this computer for a video Proton has none for: asked for again.
+    this.stopMade = onThumbsMade((uids) => {
+      for (const uid of uids) this.loader?.retry(uid);
+      this.pump();
+    });
     this.palette = readPalette(scroller);
     this.speed = new ScrollSpeed(1, () => this.settled());
     scroller.addEventListener("scroll", this.onScroll, { passive: true });
@@ -259,6 +267,7 @@ export class CanvasTimeline {
 
   destroy(): void {
     this.gone = true;
+    this.stopMade();
     this.scroller.removeEventListener("scroll", this.onScroll);
     this.sized.disconnect();
     this.themed.disconnect();

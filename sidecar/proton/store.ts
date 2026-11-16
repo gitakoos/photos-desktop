@@ -102,6 +102,8 @@ export const BACKUP_FLAGS_FILE = "backup-flags";
 export const LABELS_DIR = "labels";
 /** The duplicate finder's fingerprints and the groups left alone. */
 export const DUPLICATES_FILE = "duplicates.enc";
+/** Videos this computer could not draw a thumbnail for, and when. */
+export const THUMB_REPAIR_FILE = "thumb-repair.bin";
 /** The photos and albums hidden on this computer (hidden.ts). The account's own, so `wipeCache` takes it. */
 export const HIDDEN_FILE = "hidden.enc";
 /** Which original each lighter copy uploaded from here was made from (compressedUploads.ts). */
@@ -216,6 +218,7 @@ export function wipeCache(): void {
     rmSync(join(dataDir, BACKUP_STATE_FILE), { force: true });
     rmSync(join(dataDir, BACKUP_FLAGS_FILE), { force: true });
     rmSync(join(dataDir, DUPLICATES_FILE), { force: true });
+    rmSync(join(dataDir, THUMB_REPAIR_FILE), { force: true });
     rmSync(join(dataDir, HIDDEN_FILE), { force: true });
     rmSync(join(dataDir, COMPRESSED_UPLOADS_FILE), { force: true });
   } catch {

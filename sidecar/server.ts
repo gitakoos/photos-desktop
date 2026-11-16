@@ -358,6 +358,14 @@ const handlers: Record<string, (params: any, ctx: CallContext) => Promise<unknow
       (Array.isArray(p?.groups) ? p.groups : []).map((g: any) => ({ uids: uidList(g?.uids), keep: uidList(g?.keep) })),
       (Array.isArray(p?.whole) ? p.whole : []).map(uidList),
     ),
+  putLocalThumbnails: (p) =>
+    session.putLocalThumbnails(
+      p?.frames ?? {},
+      Array.isArray(p?.undrawable) ? p.undrawable : [],
+      Array.isArray(p?.letGo) ? p.letGo : [],
+      p?.roundOver === true,
+    ),
+  thumblessVideos: (p) => session.thumblessVideos(typeof p?.limit === "number" ? p.limit : 3),
   burstStacks: (p) =>
     session.burstStacks(typeof p?.since === "number" ? p.since : undefined, typeof p?.count === "number" ? p.count : undefined),
   duplicatesIgnore: (p) => session.duplicatesIgnore(uidList(p?.uids), p?.on !== false),
