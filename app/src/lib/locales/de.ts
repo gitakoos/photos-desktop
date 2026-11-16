@@ -803,6 +803,9 @@ export const de: Record<string, string> = {
   "trash.restored": "{count} wiederhergestellt",
   "trash.deleted": "{count} endgültig gelöscht",
   "trash.emptied": "Papierkorb geleert",
+  "trash.emptying": "Papierkorb wird geleert…",
+  "trash.emptyingLeft": "Proton leert den Papierkorb noch: {count}",
+  "trash.emptyingLater": "Proton leert den Papierkorb noch. Schau später noch einmal nach.",
   "trash.partial": "{ok} erledigt, {failed} fehlgeschlagen",
 
   // Photo viewer / lightbox

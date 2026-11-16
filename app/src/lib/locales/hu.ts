@@ -800,6 +800,9 @@ export const hu: Record<string, string> = {
   "trash.restored": "{count} visszaállítva",
   "trash.deleted": "{count} véglegesen törölve",
   "trash.emptied": "A kuka kiürítve",
+  "trash.emptying": "A kuka ürítése…",
+  "trash.emptyingLeft": "A Proton még üríti a kukát: {count}",
+  "trash.emptyingLater": "A Proton még üríti a kukát. Nézz vissza kicsit később.",
   "trash.partial": "{ok} kész, {failed} sikertelen",
 
   // Photo viewer / lightbox

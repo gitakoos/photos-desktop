@@ -276,7 +276,11 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
     for (const album of albums) {
       if (joined.has(album)) continue;
       const results = await deps.addToAlbum(album, [newUid]);
-      if (!results.some((r) => r.ok)) throw new Error("The new copy could not be added to one of its albums; the original is kept");
+      if (!results.some((r) => r.ok)) {
+        const why = (results.find((r) => !r.ok) as { error?: string } | undefined)?.error ?? "no answer";
+        process.stderr.write(`[dateedit] album add refused: ${why}\n`);
+        throw new Error("The new copy could not be added to one of its albums; the original is kept");
+      }
     }
     if (albums.length > 0) {
       const check = albumUidsOf(await freshNode(photos, newUid));

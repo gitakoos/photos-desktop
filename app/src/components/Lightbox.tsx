@@ -258,6 +258,14 @@ export function Lightbox({
   // details as before (the fallback path fetches them on open).
   const isVideo =
     kind === "video" || (kind === undefined && (details?.mediaType ?? "").startsWith("video/"));
+  // The kind this photo was opened with. A caller that learns it only later, often from these
+  // very details, passes it on a later render: that is no new photo, and starting it over
+  // cleared the title and restarted a video as it began to play.
+  const opened = useRef<{ uid: string; kind: typeof kind }>({ uid, kind });
+  if (opened.current.uid !== uid) opened.current = { uid, kind };
+  const openKind = opened.current.kind;
+  const kindNow = useRef(kind);
+  kindNow.current = kind;
 
   // The caller's cached tags win when it has them (instant, and it is the state
   // the grid renders); callers without them fall back to the details lookup.
@@ -326,7 +334,9 @@ export function Lightbox({
       // before the details have settled its type, and for a transfer that fails. In
       // every one of those the preview simply stays, which is what the viewer showed
       // before.
-      if (!cancelled && kind !== "video" && (await settled)) {
+      // Asked again after the settle: the caller may have learned meanwhile that it is a video.
+      const notVideo = () => kindNow.current !== "video";
+      if (!cancelled && notVideo() && (await settled) && notVideo()) {
         const full = await fetchOriginal(uid, () => cancelled);
         if (!cancelled) setOriginal({ uid, url: full });
       }
@@ -359,7 +369,8 @@ export function Lightbox({
       // drop, and the release knows it.
       releaseOriginal(uid);
     };
-  }, [uid, kind]);
+    // `openKind`, not `kind`: see where it is kept.
+  }, [uid, openKind]);
 
   // A video: played from the thumbnail server, which streams it a byte range at a time
   // as the player asks, so it starts after its first blocks, seeks without fetching what
@@ -401,13 +412,17 @@ export function Lightbox({
           }
         }
       })();
-    }, kind === "video" ? SETTLE_MS : 0);
+      // Waited for when it opened as a video, or when it is known as one before its details:
+      // either way it may be one being stepped past. Only off the details has it sat still.
+    }, openKind === "video" || details === null ? SETTLE_MS : 0);
     return () => {
       cancelled = true;
       clearTimeout(settle);
       if (url) URL.revokeObjectURL(url);
     };
-  }, [uid, isVideo, kind, streamFailed]);
+    // `details` is read, not followed: its arrival must not restart a video already starting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, isVideo, openKind, streamFailed]);
 
   async function trash() {
     if (busy) return;

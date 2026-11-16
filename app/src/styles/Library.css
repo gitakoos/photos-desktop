@@ -403,13 +403,9 @@
   flex-direction: column;
   border-left: 1px solid var(--line);
   background: var(--surface);
-  animation: lib-findin 0.18s ease;
-}
-@keyframes lib-findin {
-  from {
-    transform: translateX(24px);
-    opacity: 0;
-  }
+  /* No slide-in: on Linux the animation gave the panel a layer of its own that WebKitGTK
+     then repainted only where its text changed, leaving the desktop showing through the
+     rest of a transparent window. */
 }
 .lib-findhead {
   display: flex;

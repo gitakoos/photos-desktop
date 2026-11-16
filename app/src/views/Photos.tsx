@@ -96,6 +96,7 @@ import {
   CalendarIcon,
   ChevronDownIcon,
   DeleteForeverIcon,
+  SpinnerIcon,
   ImageIcon,
   MotionPhotoIcon,
   PanoramaIcon,
@@ -474,6 +475,13 @@ export function Photos({
   }, [view, loadInvitations]);
   // Lifted so the trash's count and its empty button can share the top bar row.
   const [trashCount, setTrashCount] = useState<number | null>(null);
+  /**
+   * Emptying the trash: "asking" while the request runs, then "server" while Proton is still
+   * deleting in the background and the trash is read again until it is empty.
+   */
+  const [emptying, setEmptying] = useState<{ stage: "asking" | "server"; left: number | null } | null>(null);
+  /** Reloads the Trash view alone, without the rest of the library. */
+  const [trashReload, setTrashReload] = useState(0);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
 
   const [confirmTrash, setConfirmTrash] = useState(false);
@@ -1191,11 +1199,15 @@ export function Photos({
   const [dateStatus, setDateStatus] = useState<DateEditStatus | null>(null);
   const [dateRun, setDateRun] = useState(false);
   const [dateEditMode, setDateEditMode] = useState<DateEditMode>("set");
+  /** Counts the opens, so each one starts the panel afresh rather than on the last run's result. */
+  const [dateEditOpens, setDateEditOpens] = useState(0);
   /** Opens the date editor beside the grid for `uids`; the viewer opens its own beside the photo. */
   const openDateEdit = (uids: string[], mode: DateEditMode = "set") => {
     if (uids.length === 0) return;
     setDateEditMode(mode);
     setDateEditUids(uids);
+    // While a run goes on the panel keeps following it, and shows how it ended.
+    if (!dateRun) setDateEditOpens((n) => n + 1);
   };
   // A run a restart cut short carries on by itself in the sidecar: followed here too.
   useEffect(() => {
@@ -2158,16 +2170,71 @@ export function Photos({
     }
   }
 
-  /** Destroys the whole trash. The view below refetches once it is done. */
+  /** Destroys the whole trash, then follows Proton until it is empty. */
   async function emptyTrash() {
+    setEmptying({ stage: "asking", left: null });
     try {
       await rpc("emptyTrash");
-      setToast(t("trash.emptied"));
-      bumpReload();
+      setEmptying({ stage: "server", left: null });
     } catch (e) {
+      setEmptying(null);
       setToast(String(e));
     }
   }
+
+  // Proton may go on deleting after it answered: the trash is counted (its items listed, not
+  // read) every few seconds until it is empty, for five minutes at most. Only the Trash view
+  // is read again, once at the end.
+  const emptyingServer = emptying?.stage === "server";
+  const tRef = useRef(t);
+  tRef.current = t;
+  useEffect(() => {
+    if (!emptyingServer) return;
+    let live = true;
+    const since = Date.now();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      const r = await rpc<{ count: number }>("trashCount").catch(() => null);
+      if (!live) return;
+      if (r?.count === 0) {
+        live = false;
+        setEmptying(null);
+        // The Trash view may not be open: what it keeps for next time is emptied too.
+        warm.putTrash([]);
+        setTrashCount(0);
+        setTrashReload((n) => n + 1);
+        setToast(tRef.current("trash.emptied"));
+        return;
+      }
+      if (r) setEmptying((e) => (e ? { ...e, left: r.count } : e));
+      if (Date.now() - since > 5 * 60_000) {
+        live = false;
+        setEmptying(null);
+        // Part gone, part not: every view reads afresh, the trash's kept copy included.
+        bumpReload();
+        setToast(tRef.current("trash.emptyingLater"));
+        return;
+      }
+      timer = setTimeout(() => void tick(), 4000);
+    };
+    void tick();
+    return () => {
+      live = false;
+      if (timer) clearTimeout(timer);
+    };
+    // `warm` and `bumpReload` are read as they stand when the emptying ends.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emptyingServer]);
+  /** The trash's count as shown: what Proton still holds while it empties. */
+  const shownTrashCount = emptying?.left ?? trashCount;
+  const emptyingLine = emptying && (
+    <span className="g-emptying" aria-live="polite">
+      <SpinnerIcon size={14} />
+      {emptying.stage === "server" && emptying.left
+        ? t("trash.emptyingLeft", { count: emptying.left })
+        : t("trash.emptying")}
+    </span>
+  );
 
   /**
    * Puts the selected photos in an album. The whole selection goes down in one
@@ -2641,7 +2708,7 @@ export function Photos({
           key: "editDate",
           label: t("selection.editDate"),
           icon: <CalendarIcon size={14} />,
-          onSelect: () => setDateEditUids([...selected]),
+          onSelect: () => openDateEdit([...selected]),
         },
         {
           key: "favorite",
@@ -3111,6 +3178,7 @@ export function Photos({
                 {!!trashCount && (
                   <button
                     className="g-titleact danger"
+                    disabled={!!emptying}
                     onClick={() => setConfirmEmpty(true)}
                     title={t("trash.emptyAction")}
                     aria-label={t("trash.emptyAction")}
@@ -3119,7 +3187,8 @@ export function Photos({
                   </button>
                 )}
               </div>
-              <span className="g-pagesub">{t(trashCount === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: trashCount ?? 0 })}</span>
+              <span className="g-pagesub">{t(shownTrashCount === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: shownTrashCount ?? 0 })}</span>
+              {emptyingLine}
             </div>
             <div className="g-spacer" data-tauri-drag-region="" />
           </>
@@ -3129,12 +3198,13 @@ export function Photos({
             {/* No redundant "Trash" label; the nav already says which view this is. A
                 count of nothing is not worth a pill, and neither is emptying an empty
                 trash, so both wait until there is something in there. */}
-            {!!trashCount && <span className="g-headpill count">{trashCount}</span>}
+            {!!shownTrashCount && <span className="g-headpill count">{shownTrashCount}</span>}
             {!!trashCount && (
-              <button className="g-chip danger" onClick={() => setConfirmEmpty(true)}>
+              <button className="g-chip danger" disabled={!!emptying} onClick={() => setConfirmEmpty(true)}>
                 {t("trash.emptyAction")}
               </button>
             )}
+            {emptyingLine}
           </>
         )}
         {((view === "trash" && !sidebar) || (view === "shared" && sharedAlbumOpen)) && (
@@ -3525,7 +3595,7 @@ export function Photos({
         ) : view === "trash" ? (
           <Trash
             cellSize={cellSize}
-            reloadKey={reloadKey}
+            reloadKey={reloadKey + trashReload}
             initial={warm.trash}
             onCount={setTrashCount}
             onRestored={bumpReload}
@@ -3641,11 +3711,12 @@ export function Photos({
       </div>
       {dateEditUids && (view === "photos" || view === "albums") && (
         <DateEditPanel
-          key={dateEditMode}
+          key={`${dateEditMode}-${dateEditOpens}`}
           initialMode={dateEditMode}
           uids={dateEditUids}
           status={dateStatus}
           onStarted={() => {
+            setDateStatus(null); // not the last run's result until the first reading of this one
             setDateRun(true);
             sel.clear();
           }}
@@ -3848,7 +3919,7 @@ export function Photos({
             onCancel={sel.clear}
             onAddToAlbum={() => setPickAlbum(true)}
             onLabels={settings.driveLabels ? openLabelPicker : undefined}
-            onEditDate={() => setDateEditUids([...selected])}
+            onEditDate={() => openDateEdit([...selected])}
             onDownload={() => void runSelection(downloadSelected)}
             // Local copies to free exist only in the File Explorer folder, on Windows.
             onFreeUp={isWindows ? () => void runSelection(freeUpSelected) : undefined}

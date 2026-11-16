@@ -801,6 +801,9 @@ export const sl: Record<string, string> = {
   "trash.restored": "{count} obnovljenih",
   "trash.deleted": "{count} trajno izbrisanih",
   "trash.emptied": "Koš izpraznjen",
+  "trash.emptying": "Praznjenje koša…",
+  "trash.emptyingLeft": "Proton še prazni koš: {count}",
+  "trash.emptyingLater": "Proton še prazni koš. Preverite znova čez nekaj časa.",
   "trash.partial": "{ok} končanih, {failed} ni uspelo",
 
   // Photo viewer / lightbox

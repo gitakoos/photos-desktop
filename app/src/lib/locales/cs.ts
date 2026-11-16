@@ -801,6 +801,9 @@ export const cs: Record<string, string> = {
   "trash.restored": "{count} obnoveno",
   "trash.deleted": "{count} trvale smazáno",
   "trash.emptied": "Koš vysypán",
+  "trash.emptying": "Vyprazdňování koše…",
+  "trash.emptyingLeft": "Proton koš ještě vyprazdňuje: {count}",
+  "trash.emptyingLater": "Proton koš ještě vyprazdňuje. Podívejte se znovu za chvíli.",
   "trash.partial": "Hotovo {ok}, {failed} selhalo",
 
   // Photo viewer / lightbox

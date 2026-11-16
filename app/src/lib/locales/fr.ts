@@ -802,6 +802,9 @@ export const fr: Record<string, string> = {
   "trash.restored": "{count} restaurées",
   "trash.deleted": "{count} supprimées définitivement",
   "trash.emptied": "Corbeille vidée",
+  "trash.emptying": "Vidage de la corbeille…",
+  "trash.emptyingLeft": "Proton vide encore la corbeille : {count}",
+  "trash.emptyingLater": "Proton vide encore la corbeille. Revenez voir un peu plus tard.",
   "trash.partial": "{ok} effectuées, {failed} échouées",
 
   // Photo viewer / lightbox

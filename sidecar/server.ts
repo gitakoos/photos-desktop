@@ -333,6 +333,7 @@ const handlers: Record<string, (params: any, ctx: CallContext) => Promise<unknow
   renamePhoto: (p) => session.renamePhoto(p.uid, p.name),
   trashPhotos: (p) => session.trashPhotos(p.uids),
   listTrashed: () => session.listTrashed(),
+  trashCount: () => session.trashCount(),
   // The same listing, read ahead for a Trash view not yet open: its own name so the host
   // runs it in the background lane rather than in front of what the window is waiting on.
   listTrashedAhead: () => session.listTrashed(true),

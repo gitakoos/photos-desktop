@@ -118,7 +118,10 @@ export function DateEditPanel({
     }
   }
 
-  const running = !!status?.running;
+  // Started, with no reading of the run yet: shown as under way from nothing done.
+  const run: DateEditStatus | null =
+    status ?? (started ? { running: true, total: changes.length, done: 0, changed: 0, unchanged: 0, failed: 0, errors: [], cancelled: false } : null);
+  const running = !!run?.running;
   const showRun = started || running;
 
   const shiftField = (key: keyof Shift, label: string) => (
@@ -147,24 +150,24 @@ export function DateEditPanel({
         </button>
       </div>
 
-      {showRun && status ? (
+      {showRun && run ? (
         <div className="lib-findsweep">
           <p className="lib-findnote">
             {running
-              ? t("dateEdit.running", { done: status.done, total: status.total })
-              : t("dateEdit.done", { changed: status.changed, failed: status.failed })}
+              ? t("dateEdit.running", { done: run.done, total: run.total })
+              : t("dateEdit.done", { changed: run.changed, failed: run.failed })}
           </p>
           <div className="lib-findbar">
-            <div className="de-barfill" style={{ width: `${status.total > 0 ? (100 * status.done) / status.total : 0}%` }} />
+            <div className="de-barfill" style={{ width: `${run.total > 0 ? (100 * run.done) / run.total : 0}%` }} />
           </div>
           {running && (
             <button className="lib-suggestbtn" onClick={() => void rpc("stopDateEdit").catch(() => {})}>
               {t("dateEdit.stop")}
             </button>
           )}
-          {status.errors.length > 0 && (
+          {run.errors.length > 0 && (
             <ul className="de-errors">
-              {status.errors.slice(-20).map((e) => (
+              {run.errors.slice(-20).map((e) => (
                 <li key={e.uid}>{e.error}</li>
               ))}
             </ul>

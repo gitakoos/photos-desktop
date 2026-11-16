@@ -862,6 +862,9 @@ export const es: Record<string, string> = {
   "trash.restored": "{count} restauradas",
   "trash.deleted": "{count} eliminadas para siempre",
   "trash.emptied": "Papelera vaciada",
+  "trash.emptying": "Vaciando la papelera…",
+  "trash.emptyingLeft": "Proton sigue vaciando la papelera: {count}",
+  "trash.emptyingLater": "Proton sigue vaciando la papelera. Vuelve a mirar en un rato.",
   "trash.partial": "Completadas {ok}, {failed} fallidas",
 
   // Photo viewer / lightbox

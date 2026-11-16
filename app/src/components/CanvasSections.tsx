@@ -6,7 +6,8 @@
  * License version 3. See <https://www.gnu.org/licenses/>.
  */
 
-import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { learnNames } from "../lib/photoNames";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { useT } from "../lib/i18n";
 import { GRID_GAP, anchorAt, gridLayout, tileAt, TileRange, viewTopFor, type GridLayout } from "../lib/gridLayout";
 import { CanvasTimeline, type TimelineData } from "../lib/canvasTimeline";
@@ -216,6 +217,15 @@ export function CanvasSections({
     engineRef.current?.setHover(hover ? layout.starts[hover.s] + hover.k : -1);
   }, [hover, layout]);
 
+  // The name of the tile the pointer rests on, asked of the sidecar's cache ahead of a click,
+  // so the viewer opens on it rather than on "…" with the name a moment later.
+  const hoverUid = hover ? sections[hover.s]?.items[hover.k]?.uid : undefined;
+  useEffect(() => {
+    if (!hoverUid) return;
+    const id = setTimeout(() => void learnNames([hoverUid]), 120);
+    return () => clearTimeout(id);
+  }, [hoverUid]);
+
   useLayoutEffect(() => {
     if (bench.on && benchFrom) benchSpan("vs_ms", benchFrom);
   });
@@ -267,6 +277,11 @@ export function CanvasSections({
       onMouseLeave={() => {
         pointerRef.current = null;
         setHover(null);
+      }}
+      // A press asks for the name too, for a click quicker than the rest above.
+      onMouseDown={(e) => {
+        const at = tileUnder(e.clientX, e.clientY);
+        if (at) void learnNames([at.uid]);
       }}
       // Clicks are found by where they land, not by the element under the pointer, which
       // after a scroll may not have caught up with the tile now there.

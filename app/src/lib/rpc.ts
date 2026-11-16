@@ -80,6 +80,8 @@ const TIMEOUT_MS: Record<string, number> = {
   restorePhotos: 15 * MINUTE,
   deletePhotosForever: 15 * MINUTE,
   emptyTrash: 15 * MINUTE,
+  // Walks the trash's items, without reading them, while Proton empties it.
+  trashCount: 5 * MINUTE,
   setFavorite: 15 * MINUTE,
   addPhotosToAlbum: 15 * MINUTE,
   removePhotosFromAlbum: 15 * MINUTE,

@@ -2001,3 +2001,12 @@
   font-size: 13px;
   font-weight: 500;
 }
+
+/* Emptying the trash: what is going on while Proton deletes. */
+.g-emptying {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-dim);
+  font-size: 12.5px;
+}

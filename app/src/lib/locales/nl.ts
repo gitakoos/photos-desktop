@@ -800,6 +800,9 @@ export const nl: Record<string, string> = {
   "trash.restored": "{count} hersteld",
   "trash.deleted": "{count} definitief verwijderd",
   "trash.emptied": "Prullenbak geleegd",
+  "trash.emptying": "Prullenbak wordt geleegd…",
+  "trash.emptyingLeft": "Proton leegt de prullenbak nog: {count}",
+  "trash.emptyingLater": "Proton leegt de prullenbak nog. Kijk straks nog eens.",
   "trash.partial": "{ok} gelukt, {failed} mislukt",
 
   // Photo viewer / lightbox

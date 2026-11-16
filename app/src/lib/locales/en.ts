@@ -862,6 +862,9 @@ export const en: Record<string, string> = {
   "trash.restored": "{count} restored",
   "trash.deleted": "{count} deleted forever",
   "trash.emptied": "Trash emptied",
+  "trash.emptying": "Emptying the trash…",
+  "trash.emptyingLeft": "Proton is still emptying the trash: {count}",
+  "trash.emptyingLater": "Proton is still emptying the trash. Check again in a while.",
   "trash.partial": "{ok} done, {failed} failed",
 
   // Photo viewer / lightbox

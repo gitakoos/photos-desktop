@@ -801,6 +801,9 @@ export const it: Record<string, string> = {
   "trash.restored": "{count} ripristinate",
   "trash.deleted": "{count} eliminate definitivamente",
   "trash.emptied": "Cestino svuotato",
+  "trash.emptying": "Svuotamento del cestino…",
+  "trash.emptyingLeft": "Proton sta ancora svuotando il cestino: {count}",
+  "trash.emptyingLater": "Proton sta ancora svuotando il cestino. Ricontrolla tra un po’.",
   "trash.partial": "Completate {ok}, {failed} non riuscite",
 
   // Photo viewer / lightbox

@@ -202,7 +202,7 @@ fn classified(method: &str) -> Option<Priority> {
         // What the window asks for a screenful at a time, or waits on as it opens a view:
         // short, and wanted now.
         "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
-        | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
+        | "listTrashed" | "trashCount" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
         | "facePeople" | "facePersonCandidates" | "faceSplitStart" | "faceSplitPlan" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "importThumbnails" | "diagReport"
         | "duplicatesGroups" => Priority::UserAction,
@@ -1660,7 +1660,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "listTrashedAhead" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "listTrashedAhead" | "trashCount" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,

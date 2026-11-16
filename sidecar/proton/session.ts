@@ -3501,6 +3501,14 @@ export class ProtonSession {
     return this.trash.get(() => readTrash(photos), !ahead);
   }
 
+  /** How many items the trash holds, read without decrypting any: for following an emptying. */
+  async trashCount(): Promise<{ count: number }> {
+    if (!this.photos) throw new Error("Not signed in");
+    let count = 0;
+    for await (const _ of withStallGuard(this.photos.iterateTrashedNodeUids(), SDK_STALL_MS, "iterateTrashedNodeUids")) count++;
+    return { count };
+  }
+
   async restorePhotos(uids: string[]): Promise<TrashResult[]> {
     if (!this.photos) throw new Error("Not signed in");
     try {
