@@ -32,6 +32,7 @@ import {
   distance,
   fingerprintFromPixels,
   isUsable,
+  looksLikePage,
   matches,
   type Fingerprint,
 } from "./pdq.ts";
@@ -181,5 +182,21 @@ describe("grouping the fingerprints", () => {
     const sliced = await clusterSimilarAsync(fps, async () => void pauses++);
     expect(pauses).toBeGreaterThan(0);
     expect(canonical(sliced)).toEqual(canonical(clusterSimilar(fps)));
+  });
+});
+
+describe("a page", () => {
+  const withColour = (cells: [number, number, number], quality: number): Fingerprint => {
+    const color = new Uint8Array(COLOR_BYTES);
+    for (let c = 0; c < COLOR_BYTES / 3; c++) color.set(cells, c * 3);
+    return { bits: new Uint32Array(8), quality, color };
+  };
+
+  it("is bright, colourless and detailed in the middle of the frame", () => {
+    expect(looksLikePage(withColour([236, 232, 226], 40))).toBe(true);
+    // A colourful scene, a dim page, and a smooth white wall or sky.
+    expect(looksLikePage(withColour([200, 120, 60], 40))).toBe(false);
+    expect(looksLikePage(withColour([110, 110, 108], 40))).toBe(false);
+    expect(looksLikePage(withColour([240, 240, 240], 8))).toBe(false);
   });
 });

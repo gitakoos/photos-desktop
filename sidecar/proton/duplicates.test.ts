@@ -87,11 +87,34 @@ const fpOf = (seed: number): Fingerprint => ({
   color: colour,
 });
 
-/** A library of photos whose thumbnail bytes name the fingerprint they make. */
-function finder(photos: { uid: string; t: number; look: number | null }[], unanswered: string[] = []) {
+/** "seed" or "seed.flips": the seed's fingerprint with that many of its bits turned over. */
+function lookOf(text: string): Fingerprint {
+  // A trailing "p": a page, bright and colourless in the middle.
+  const page = text.endsWith("p");
+  const [seed, flips = "0"] = text.replace(/p$/, "").split(".");
+  const fp = page ? { ...fpOf(Number(seed)), color: new Uint8Array(COLOR_BYTES).fill(235) } : fpOf(Number(seed));
+  const bits = Uint32Array.from(fp.bits);
+  for (let b = 0; b < Number(flips); b++) bits[b % 8] ^= 1 << Math.floor(b / 8);
+  return { ...fp, bits };
+}
+
+/**
+ * Steps between the test photos' times: hours and minutes apart, and never a whole number of
+ * hours, so look-alikes are only that, not one photo dated the same moment or a burst.
+ */
+const SPREAD = 7_777_777;
+
+/**
+ * A library of photos whose thumbnail bytes name the fingerprint they make. `t` counts steps of
+ * SPREAD; `ms` gives a capture time as it is.
+ */
+function finder(
+  photos: { uid: string; t: number; look: number | string | null; ms?: number; video?: boolean; size?: number; length?: number }[],
+  unanswered: string[] = [],
+) {
   const asked: string[] = [];
   const source: DuplicateSource = {
-    list: async () => photos.map((p) => ({ uid: p.uid, captureTime: p.t })),
+    list: async () => photos.map((p) => ({ uid: p.uid, captureTime: p.ms ?? p.t * SPREAD, video: p.video })),
     async *thumbnails(uids) {
       for (const uid of uids) {
         asked.push(uid);
@@ -100,8 +123,12 @@ function finder(photos: { uid: string; t: number; look: number | null }[], unans
         yield { uid, bytes: look === null ? null : Buffer.from(String(look)) };
       }
     },
+    details: async (uids) =>
+      photos
+        .filter((p) => uids.includes(p.uid))
+        .map((p) => ({ uid: p.uid, size: p.size ?? null, durationMs: p.length ?? null })),
   };
-  const f = new DuplicateFinder(async (bytes) => fpOf(Number(bytes.toString())), false, 0, 0);
+  const f = new DuplicateFinder(async (bytes) => lookOf(bytes.toString()), false, 0, 0);
   f.setSource(source);
   return { f, asked };
 }
@@ -109,6 +136,216 @@ const allThere = async (uids: string[]) => new Set(uids);
 const listing = (pairs: [string, string | null][]) => ({ Photos: pairs.map(([LinkID, ContentHash]) => ({ LinkID, ContentHash })) });
 
 describe("the duplicate finder", () => {
+  it("tells one photo in two files, a burst and look-alikes apart", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      // One photo twice, the copy dated in another time zone.
+      { uid: "v~p1", t: 0, look: 1, ms: T },
+      { uid: "v~p2", t: 0, look: 1, ms: T + 2 * 3_600_000 + 500 },
+      // A burst: shots a second apart, each like the one before.
+      { uid: "v~b1", t: 0, look: 2, ms: T + 100_000 },
+      { uid: "v~b2", t: 0, look: 2, ms: T + 101_000 },
+      { uid: "v~b3", t: 0, look: 2, ms: T + 102_000 },
+      // The same scene a day later: only a look-alike.
+      { uid: "v~s1", t: 0, look: 3, ms: T + 300_000 },
+      { uid: "v~s2", t: 0, look: 3, ms: T + 86_400_000 + 7_000_000 },
+    ]);
+    f.start();
+    await f.settled();
+    const g = f.groups();
+    expect(g.same.map((x) => x.uids)).toEqual([["v~p1", "v~p2"]]);
+    expect(g.burst.map((x) => x.uids)).toEqual([["v~b1", "v~b2", "v~b3"]]);
+    expect(g.similar.map((x) => x.uids)).toEqual([["v~s1", "v~s2"]]);
+  });
+
+  it("keeps a video and a frame of a series out of the same-photo group", async () => {
+    const T = 1_700_000_000_000;
+    const H = 3_600_000;
+    const { f } = finder([
+      // A still and its Live Photo video, the same second.
+      { uid: "v~still", t: 0, look: 6, ms: T },
+      { uid: "v~live", t: 0, look: 6, ms: T, video: true },
+      // A webcam every 30 s of a still scene: frames whole hours apart are not copies.
+      { uid: "v~w1", t: 0, look: 7, ms: T + 10 * 60_000 },
+      { uid: "v~w2", t: 0, look: 7, ms: T + 10 * 60_000 + 30_000 },
+      { uid: "v~w3", t: 0, look: 7, ms: T + 10 * 60_000 + H },
+      { uid: "v~w4", t: 0, look: 7, ms: T + 10 * 60_000 + H + 30_000 },
+      // Two shots a second apart, a blink between them: a burst, not one photo twice.
+      { uid: "v~k1", t: 0, look: "8", ms: T + 5 * H },
+      { uid: "v~k2", t: 0, look: "8.6", ms: T + 5 * H + 1_000 },
+    ]);
+    f.start();
+    await f.settled();
+    const g = f.groups();
+    expect(g.same).toEqual([]);
+    expect(g.burst.map((x) => x.uids)).toEqual([["v~k1", "v~k2"]]);
+  });
+
+  it("pairs one video in two files and keeps the larger, but not two videos of other lengths", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      // The original and a lighter copy, its start a second off and a frame shorter.
+      { uid: "v~orig", t: 0, look: 11, ms: T, video: true, size: 20_000_000, length: 30_000 },
+      { uid: "v~lite", t: 0, look: "11.20", ms: T + 1_000, video: true, size: 4_000_000, length: 29_960 },
+      // The same again, a Google copy dated in local time against the file's UTC.
+      { uid: "v~utc", t: 0, look: 14, ms: T + 300_000, video: true, size: 50_000_000, length: 61_000 },
+      { uid: "v~local", t: 0, look: "14.10", ms: T + 300_000 + 2 * 3_600_000, video: true, size: 8_000_000, length: 61_000 },
+      // Two clips started the same second at one scene, of other lengths.
+      { uid: "v~c1", t: 0, look: 12, ms: T + 600_000, video: true, size: 9_000_000, length: 12_000 },
+      { uid: "v~c2", t: 0, look: 12, ms: T + 600_000, video: true, size: 5_000_000, length: 7_000 },
+    ]);
+    f.start();
+    await f.settled();
+    const g = f.groups();
+    expect(g.same).toEqual([
+      {
+        key: "v~local|v~utc",
+        kind: "same",
+        uids: ["v~utc", "v~local"],
+        times: [T + 300_000, T + 300_000 + 2 * 3_600_000],
+        keep: 0,
+      },
+      { key: "v~lite|v~orig", kind: "same", uids: ["v~orig", "v~lite"], times: [T, T + 1_000], keep: 0 },
+    ]);
+    expect(g.similar.map((x) => x.uids)).toEqual([["v~c1", "v~c2"]]);
+  });
+
+  it("pairs two videos of one size and length whatever their dates, and keeps the oldest", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~first", t: 0, look: 15, ms: T, video: true, size: 7_340_032, length: 18_200 },
+      // The same file with a rewritten header, dated the day it was uploaded somewhere.
+      { uid: "v~again", t: 0, look: "15.2", ms: T + 400 * 86_400_000, video: true, size: 7_340_032, length: 18_200 },
+      // Another clip of that size and length that looks different: not paired.
+      { uid: "v~other", t: 0, look: 16, ms: T + 3_000, video: true, size: 7_340_032, length: 18_200 },
+    ]);
+    f.start();
+    await f.settled();
+    const same = f.groups().same;
+    expect(same.map((x) => x.uids)).toEqual([["v~first", "v~again"]]);
+    expect(same[0].keep).toBeUndefined();
+  });
+
+  it("puts an original, its same-size twin and its lighter copy in one group", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~orig", t: 0, look: 22, ms: T, video: true, size: 20_000_000, length: 30_000 },
+      { uid: "v~twin", t: 0, look: "22.2", ms: T + 90 * 86_400_000, video: true, size: 20_000_000, length: 30_000 },
+      { uid: "v~lite", t: 0, look: "22.20", ms: T, video: true, size: 4_000_000, length: 29_960 },
+    ]);
+    f.start();
+    await f.settled();
+    const same = f.groups().same;
+    expect(same).toHaveLength(1);
+    expect(new Set(same[0].uids)).toEqual(new Set(["v~orig", "v~twin", "v~lite"]));
+    expect(same[0].uids[same[0].keep!]).not.toBe("v~lite");
+  });
+
+  it("suggests no keeper for photos: a larger export is not the original", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~heic", t: 0, look: 13, ms: T, size: 900_000 },
+      { uid: "v~jpeg", t: 0, look: "13.4", ms: T, size: 5_000_000 },
+    ]);
+    f.start();
+    await f.settled();
+    expect(f.groups().same[0].keep).toBeUndefined();
+  });
+
+  it("keeps the next largest video once the largest is trashed, and none when a size is unknown", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~20", t: 0, look: 17, ms: T, video: true, size: 20_000_000, length: 40_000 },
+      { uid: "v~10", t: 0, look: "17.4", ms: T + 500, video: true, size: 10_000_000, length: 40_000 },
+      { uid: "v~4", t: 0, look: "17.8", ms: T + 1_000, video: true, size: 4_000_000, length: 39_960 },
+      { uid: "v~u1", t: 0, look: 18, ms: T + 900_000, video: true, size: 9_000_000, length: 20_000 },
+      { uid: "v~u2", t: 0, look: "18.4", ms: T + 900_500, video: true, length: 20_000 },
+    ]);
+    f.start();
+    await f.settled();
+    const byKey = (key: string) => f.groups().same.find((g) => g.uids.includes(key))!;
+    expect(byKey("v~20")).toMatchObject({ uids: ["v~20", "v~10", "v~4"], keep: 0 });
+    expect(byKey("v~u1").keep).toBeUndefined();
+    f.removed(["v~20"]);
+    expect(byKey("v~10")).toMatchObject({ uids: ["v~10", "v~4"], keep: 0 });
+  });
+
+  it("does not pair a dashcam's segments, back-to-back short clips, or a timelapse hours apart", async () => {
+    const T = 1_700_000_000_000;
+    const H = 3_600_000;
+    const photos: Parameters<typeof finder>[0] = [];
+    // Five padded segments of one size and length, a minute apart, of one road at night.
+    for (let k = 0; k < 5; k++) {
+      photos.push({ uid: `v~seg${k}`, t: 0, look: 19, ms: T + k * 60_000, video: true, size: 104_857_600, length: 60_000 });
+    }
+    // Two 2.5 s clips, the second started 2 s after the first.
+    photos.push({ uid: "v~q1", t: 0, look: 20, ms: 2 * T, video: true, size: 3_000_000, length: 2_500 });
+    photos.push({ uid: "v~q2", t: 0, look: "20.2", ms: 2 * T + 2_000, video: true, size: 2_900_000, length: 2_400 });
+    // A timelapse of fixed clips every 10 minutes: clips whole hours apart are other clips.
+    for (let k = 0; k < 13; k++) {
+      photos.push({ uid: `v~tl${k}`, t: 0, look: 21, ms: 3 * T + k * 600_000, video: true, size: 5_000_000 + k, length: 10_000 });
+    }
+    const { f } = finder(photos);
+    f.start();
+    await f.settled();
+    expect(f.groups().same).toEqual([]);
+  });
+
+  it("does not take pages photographed one after another for a burst", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      // Three pages of one book, a second apart: alike at the usual bar.
+      { uid: "v~pg1", t: 0, look: "23.0p", ms: T },
+      { uid: "v~pg2", t: 0, look: "23.30p", ms: T + 1_000 },
+      { uid: "v~pg3", t: 0, look: "23.60p", ms: T + 2_000 },
+      // A page retaken held steady: one shot of it.
+      { uid: "v~rt1", t: 0, look: "24.0p", ms: T + 600_000 },
+      { uid: "v~rt2", t: 0, look: "24.8p", ms: T + 601_000 },
+      // The same distances between ordinary shots are a burst as before.
+      { uid: "v~ph1", t: 0, look: "25", ms: T + 1_200_000 },
+      { uid: "v~ph2", t: 0, look: "25.30", ms: T + 1_201_000 },
+      { uid: "v~ph3", t: 0, look: "25.60", ms: T + 1_202_000 },
+    ]);
+    f.start();
+    await f.settled();
+    expect(f.groups().burst.map((x) => x.uids)).toEqual([
+      ["v~ph1", "v~ph2", "v~ph3"],
+      ["v~rt1", "v~rt2"],
+    ]);
+    // Pages of one book still look alike: shown as similar, not as a burst.
+    expect(f.groups().similar.map((x) => x.uids)).toEqual([["v~pg1", "v~pg2", "v~pg3"]]);
+  });
+
+  it("finds a burst when another scene shot the same second sorts in between", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      { uid: "v~a1", t: 0, look: "9", ms: T },
+      { uid: "v~x", t: 0, look: 10, ms: T },
+      { uid: "v~a2", t: 0, look: "9.20", ms: T + 1_000 },
+      { uid: "v~a3", t: 0, look: "9.40", ms: T + 2_000 },
+    ]);
+    f.start();
+    await f.settled();
+    expect(f.groups().burst.map((x) => x.uids)).toEqual([["v~a1", "v~a2", "v~a3"]]);
+  });
+
+  it("ends a burst at a gap or at a shot that looks different", async () => {
+    const T = 1_700_000_000_000;
+    const { f } = finder([
+      // Two shots a second and a half apart, alike but not one picture.
+      { uid: "v~a", t: 0, look: "4", ms: T },
+      { uid: "v~b", t: 0, look: "4.30", ms: T + 1_500 },
+      { uid: "v~c", t: 0, look: 5, ms: T + 2_500 },
+      { uid: "v~d", t: 0, look: "4", ms: T + 60_000 },
+    ]);
+    f.start();
+    await f.settled();
+    const g = f.groups();
+    expect(g.burst.map((x) => x.uids)).toEqual([["v~a", "v~b"]]);
+    // d looks like a but a minute later: not part of the burst, and not the same photo.
+    expect(g.same).toEqual([]);
+  });
+
   it("groups identical copies by content hash and look-alikes by fingerprint, each photo once", async () => {
     const { f } = finder([
       { uid: "v~a", t: 3, look: 1 },
@@ -122,7 +359,7 @@ describe("the duplicate finder", () => {
     f.start();
     await f.settled();
     const g = f.groups();
-    expect(g.identical).toEqual([{ key: "v~a|v~b", kind: "identical", uids: ["v~b", "v~a"], times: [1, 3] }]);
+    expect(g.identical).toEqual([{ key: "v~a|v~b", kind: "identical", uids: ["v~b", "v~a"], times: [SPREAD, 3 * SPREAD] }]);
     // f looks like a and b, but those two are shown as identical only.
     expect(g.similar.map((x) => x.uids)).toEqual([["v~c", "v~d"]]);
     expect(f.getStatus()).toMatchObject({ state: "done", done: 6, total: 6 });
@@ -208,7 +445,7 @@ describe("the duplicate finder", () => {
   it("works the groups out soon after the scan is through, not at the next scheduled round", async () => {
     const photos = [{ uid: "v~a", t: 1, look: 5 }];
     const source: DuplicateSource = {
-      list: async () => photos.map((p) => ({ uid: p.uid, captureTime: p.t })),
+      list: async () => photos.map((p) => ({ uid: p.uid, captureTime: p.t * SPREAD })),
       async *thumbnails(uids) {
         for (const uid of uids) yield { uid, bytes: Buffer.from("5") };
       },
@@ -266,7 +503,7 @@ describe("the duplicate finder", () => {
     ];
     const asked: string[] = [];
     const source: DuplicateSource = {
-      list: async () => photos.map((p) => ({ uid: p.uid, captureTime: p.t })),
+      list: async () => photos.map((p) => ({ uid: p.uid, captureTime: p.t * SPREAD })),
       async *thumbnails(uids) {
         asked.push(...uids);
         for (const uid of uids) yield { uid, bytes: Buffer.from(String(photos.find((p) => p.uid === uid)!.look)) };

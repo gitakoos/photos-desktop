@@ -1728,9 +1728,23 @@ export class ProtonSession {
       // As on the phone, a hidden photo is in no group.
       list: async () => {
         const hidden = hiddenStore.hiddenPhotoTest();
-        return (await this.getTimeline()).filter((item) => !hidden(item.uid)).map((item) => ({ uid: item.uid, captureTime: item.captureTime }));
+        return (await this.getTimeline()).filter((item) => !hidden(item.uid))
+          .map((item) => ({ uid: item.uid, captureTime: item.captureTime, video: item.tags.includes(PhotoTag.Videos) }));
       },
       thumbnails: (uids) => this.duplicateThumbnails(photos, uids),
+      details: async (uids) => {
+        const meta = await this.getMetadata(uids);
+        const videos = meta.filter((m) => m.mediaType?.startsWith("video/")).map((m) => m.uid);
+        const lengths = new Map((videos.length ? await this.getDurations(videos) : []).map((d) => [d.uid, d.durationMs]));
+        // A length the server did not answer for is not "no length" (that one is noted with 0): the
+        // video is left out, so it counts as unknown until the next session asks again. None answered
+        // at all is the connection gone, and fails the batch.
+        const unread = new Set(videos.filter((u) => typeof metaGet(u)?.durationMs !== "number"));
+        if (unread.size > 0 && unread.size === videos.length) throw new Error("video lengths not read");
+        return meta
+          .filter((m) => !unread.has(m.uid))
+          .map((m) => ({ uid: m.uid, size: m.size ?? null, durationMs: lengths.get(m.uid) ?? null }));
+      },
     });
     faceScanner.setDriveWriter(
       (copy, all) =>

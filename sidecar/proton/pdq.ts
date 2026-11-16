@@ -147,6 +147,36 @@ export function matches(a: Fingerprint, b: Fingerprint): boolean {
   return distance(a.bits, b.bits) <= MATCH_THRESHOLD && colorDistance(a.color, b.color) <= MAX_COLOR_DISTANCE;
 }
 
+/**
+ * Whether a photo looks like a page (a document, a receipt, a screenshot of text): the middle
+ * of the frame bright, colourless and even, with the detail text gives. Read from the colour
+ * grid and the detail score alone, so fingerprints already made need nothing new. Measured on
+ * rendered pages against white-ish photos (snow, sky, walls): it finds nearly all pages and a
+ * few of those.
+ */
+export function looksLikePage(fp: Fingerprint): boolean {
+  if (fp.quality < 13) return false;
+  let minL = 255;
+  let maxL = 0;
+  for (const cell of [5, 6, 9, 10]) {
+    const r = fp.color[cell * 3];
+    const g = fp.color[cell * 3 + 1];
+    const b = fp.color[cell * 3 + 2];
+    const hi = Math.max(r, g, b);
+    if (hi === 0 || (hi - Math.min(r, g, b)) / hi > 0.25) return false;
+    const l = 0.299 * r + 0.587 * g + 0.114 * b;
+    minL = Math.min(minL, l);
+    maxL = Math.max(maxL, l);
+  }
+  return minL >= 130 && maxL - minL <= 40;
+}
+
+/**
+ * How close two pages must be to be shots of one: different pages of one book are as close as
+ * a retake of one page at the usual bar, so only near-identical frames count.
+ */
+export const PAGE_MATCH_THRESHOLD = 16;
+
 /** Whether a fingerprint carries enough detail to be trusted. */
 export function isUsable(fp: Fingerprint): boolean {
   return fp.quality >= MIN_QUALITY;

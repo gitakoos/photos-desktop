@@ -75,6 +75,8 @@ const TIMEOUT_MS: Record<string, number> = {
   // Mutations the SDK batches ten links at a time, over a selection with no ceiling on
   // it, plus the empty that walks the whole trash.
   trashPhotos: 15 * MINUTE,
+  // A chunk of duplicate groups: the same trashing, plus a check that each kept copy is still there.
+  duplicatesTrash: 15 * MINUTE,
   restorePhotos: 15 * MINUTE,
   deletePhotosForever: 15 * MINUTE,
   emptyTrash: 15 * MINUTE,
