@@ -59,6 +59,7 @@ import {
   LockIcon,
   MinimizeIcon,
   NavAlbumsIcon,
+  CollectionsIcon,
   NavSharedIcon,
   OpenInNewIcon,
   OpenWindowIcon,
@@ -104,6 +105,8 @@ import { backdropClose } from "../lib/backdrop";
 export type AppSettings = {
   /** Matches Android's "Hide photos in Drive albums". Off by default. */
   hideAlbumPhotos: boolean;
+  /** Bursts shown in the timeline as one stacked tile each. */
+  stackBursts: boolean;
   /** Lock the app when the window is hidden to the tray, so reopening needs the password. Off by default. */
   lockOnHide: boolean;
   /** Ask Windows Hello before the photos show: when the app opens without a password, and when it comes
@@ -176,6 +179,7 @@ export type AppSettings = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   hideAlbumPhotos: false,
+  stackBursts: true,
   lockOnHide: false,
   helloLock: false,
   lockAfter: 0,
@@ -1595,6 +1599,21 @@ export function Settings({
                     onChange={(e) =>
                       onChange({ ...settings, hideAlbumPhotos: e.currentTarget.checked })
                     }
+                  />
+                </label>
+                <label className="st-row">
+                  <span className="st-row-ico" aria-hidden>
+                    <CollectionsIcon size={18} />
+                  </span>
+                  <div className="st-text">
+                    <div className="st-label">{t("settings.stackBursts")}</div>
+                    <div className="st-desc">{t("settings.stackBurstsDesc")}</div>
+                  </div>
+                  <input
+                    className="st-switch"
+                    type="checkbox"
+                    checked={settings.stackBursts}
+                    onChange={(e) => onChange({ ...settings, stackBursts: e.currentTarget.checked })}
                   />
                 </label>
               </div>

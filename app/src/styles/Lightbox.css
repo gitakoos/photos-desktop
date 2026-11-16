@@ -827,3 +827,84 @@
   background: var(--border);
   border-radius: 999px;
 }
+
+/* A stacked burst, inside the stage: its frames over the picture while it plays, and its
+   strip near the bottom of the picture. */
+.lbx-burstframe {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--viewer-ground, #000);
+  pointer-events: none;
+  z-index: 1;
+}
+.lbx-burst {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  padding: 6px 8px;
+  border-radius: 14px;
+  background: rgba(20, 20, 22, 0.82);
+  color: #f2f2f5;
+}
+.lbx-burstplay {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: inherit;
+  cursor: pointer;
+}
+.lbx-burststrip {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.lbx-burstshot {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+}
+.lbx-burstshot.on {
+  border-color: var(--accent);
+}
+.lbx-burstshot img,
+.lbx-burstshot span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lbx-burstall {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}

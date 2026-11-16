@@ -16,7 +16,7 @@ import { registerDrawnGrid, type CellBox } from "../lib/gridRegistry";
 import { bench, benchCount, benchSpan } from "../lib/benchProbe";
 import type { VirtualSection } from "./VirtualSections";
 import type { GridItem } from "./PhotoGrid";
-import { CheckIcon, CloudIcon, HeartIcon, MotionPhotoIcon, OfflinePinIcon, PanoramaIcon, PlayArrowIcon, RawIcon } from "./icons";
+import { CheckIcon, CloudIcon, CollectionsIcon, HeartIcon, MotionPhotoIcon, OfflinePinIcon, PanoramaIcon, PlayArrowIcon, RawIcon } from "./icons";
 
 /** How long the width must stay put before a resize's new tile size is drawn. */
 const RESIZE_SETTLE_MS = 140;
@@ -31,6 +31,7 @@ const spritesFor = (dpr: number, p: Palette) =>
       heart: <HeartIcon size={px(11)} filled />,
       check: <CheckIcon size={px(11)} />,
       motionPhoto: <MotionPhotoIcon size={px(11)} />,
+      stack: <CollectionsIcon size={px(11)} />,
       panorama: <PanoramaIcon size={px(11)} />,
       raw: <RawIcon size={px(11)} />,
     }),
@@ -63,6 +64,7 @@ export function CanvasSections({
   onContext,
   showBadges = true,
   covered = false,
+  stacks,
 }: {
   scrollRef: RefObject<HTMLElement | null>;
   sections: VirtualSection<GridItem>[];
@@ -74,6 +76,8 @@ export function CanvasSections({
   selected?: Set<string>;
   offlineUids?: Set<string>;
   localUids?: Set<string>;
+  /** Bursts stacked on a tile: the number of shots by the tile's uid. */
+  stacks?: ReadonlyMap<string, number>;
   onToggle?: (uid: string, e: MouseEvent) => void;
   onOpen?: (uid: string, e: MouseEvent) => void;
   onContext?: (uid: string, e: MouseEvent) => void;
@@ -108,7 +112,7 @@ export function CanvasSections({
   const head = header ? headerHeight : 0;
   const layout = useMemo(() => gridLayout(counts, width, cellSize, head, held ?? undefined), [counts, width, cellSize, head, held]);
   const data: TimelineData | null =
-    width > 0 ? { layout, sections, selected, offline: offlineUids, local: localUids, showBadges } : null;
+    width > 0 ? { layout, sections, selected, offline: offlineUids, local: localUids, showBadges, stacks } : null;
   const latest = useRef({ layout, sections, onToggle, onOpen, onContext, data });
   latest.current = { layout, sections, onToggle, onOpen, onContext, data };
 
@@ -211,7 +215,7 @@ export function CanvasSections({
   // Everything the canvas draws from.
   useLayoutEffect(() => {
     if (latest.current.data) engineRef.current?.setData(latest.current.data);
-  }, [layout, sections, selected, offlineUids, localUids, showBadges, width]);
+  }, [layout, sections, selected, offlineUids, localUids, showBadges, stacks, width]);
 
   useLayoutEffect(() => {
     engineRef.current?.setHover(hover ? layout.starts[hover.s] + hover.k : -1);

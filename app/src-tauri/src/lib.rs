@@ -205,7 +205,7 @@ fn classified(method: &str) -> Option<Priority> {
         | "listTrashed" | "trashCount" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
         | "facePeople" | "facePersonCandidates" | "faceSplitStart" | "faceSplitPlan" | "labelsList" | "labelsOf" | "myFilesList"
         | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "importThumbnails" | "diagReport"
-        | "duplicatesGroups" => Priority::UserAction,
+        | "duplicatesGroups" | "burstStacks" => Priority::UserAction,
 
         // The window's status polls: tiny answers.
         "uploadStatus" | "dropReplaced" | "dateEditStatus" | "offlineStatus" | "offlineAlbums" | "saveStatus" | "hydrateProgress" | "updateStatus"

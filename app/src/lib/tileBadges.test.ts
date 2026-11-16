@@ -15,7 +15,12 @@ const base = { tags: [] as number[], isVideo: false, durationMs: null, offline: 
 describe("a tile's marks", () => {
   it("shows every mark at the full tier", () => {
     const b = tileBadges({ ...base, tags: [TAG.Favorite, TAG.Raw, TAG.Video], isVideo: true, durationMs: 5000, offline: true, local: true });
-    expect(b).toEqual({ play: true, offline: true, durationMs: 5000, local: true, favorite: true, type: "raw" });
+    expect(b).toEqual({ play: true, offline: true, durationMs: 5000, local: true, favorite: true, type: "raw", stack: null });
+  });
+
+  it("shows a burst's stack and its count at every size", () => {
+    expect(tileBadges({ ...base, tier: "minimal", stack: 12 }).stack).toBe(12);
+    expect(tileBadges({ ...base, stack: 1 }).stack).toBeNull();
   });
 
   it("keeps one secondary beside the cloud at the compact tier, in Android's order", () => {

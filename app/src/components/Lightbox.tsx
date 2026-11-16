@@ -25,6 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
 import { videoStreamUrl } from "../lib/thumbStore";
 import { knownName, learnNames, rememberName } from "../lib/photoNames";
+import { BurstPlayer } from "./BurstPlayer";
 import { downloadPhotos, explorerMode } from "../lib/download";
 import { pinOffline, unpinOffline } from "../lib/offline";
 import { cachedPreview, dropPreview, loadPreview } from "../lib/previewStore";
@@ -131,6 +132,13 @@ type Props = {
    * is being replaced by its corrected copy.
    */
   onDateEditStarted?: () => void;
+  /**
+   * The shots of the burst the open tile stacks, oldest first; the caller shows a shot picked
+   * in its strip in the tile's place (`onPickShot`), and spreads the stack out (`onUnstack`).
+   */
+  burst?: string[];
+  onPickShot?: (uid: string) => void;
+  onUnstack?: () => void;
 };
 
 /**
@@ -168,6 +176,9 @@ function b64ToBlob(b64: string, mime: string): Blob {
  */
 export function Lightbox({
   uid,
+  burst,
+  onPickShot,
+  onUnstack,
   fallbackUrl,
   hasPrev,
   hasNext,
@@ -695,6 +706,11 @@ export function Lightbox({
       }
       name={details?.name ?? knownName(uid) ?? (items?.[index]?.uid === uid ? items[index].name : undefined) ?? ""}
       stage={stage}
+      stageOverlay={
+        burst && burst.length > 1 && onUnstack && onPickShot ? (
+          <BurstPlayer key={burst[0]} uids={burst} viewing={uid} onPick={onPickShot} onUnstack={onUnstack} />
+        ) : undefined
+      }
       error={error}
       busy={busy}
       hasPrev={hasPrev}

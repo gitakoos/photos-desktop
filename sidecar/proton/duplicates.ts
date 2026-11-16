@@ -288,6 +288,16 @@ export class DuplicateFinder {
     return { ...this.status };
   }
 
+  /** How many photos the last scan listed. */
+  libraryCount(): number {
+    return this.library.size;
+  }
+
+  /** Whether the groups are still to be worked out again for what is known now. */
+  pending(): boolean {
+    return this.stale || this.computing !== null || this.regroupTimer !== null;
+  }
+
   /** The library to read, set on sign-in and cleared on sign-out or lock. */
   setSource(source: DuplicateSource | null): void {
     this.source = source;
@@ -379,7 +389,8 @@ export class DuplicateFinder {
   start(): DuplicateStatus {
     if (!this.running && this.source) {
       const gen = ++this.generation;
-      this.status = { ...this.status, state: "scanning" };
+      // Counted afresh: the last scan's "all done" would read as this one being through.
+      this.status = { ...this.status, state: "scanning", done: 0, total: 0 };
       this.running = this.run(gen)
         .catch((e) => {
           if (gen !== this.generation) return;

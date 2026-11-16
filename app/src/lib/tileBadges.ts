@@ -59,6 +59,8 @@ export type TileBadges = {
   /** Just inside the cloud: the heart and the type mark, in one pill. */
   favorite: boolean;
   type: TypeMark | null;
+  /** Top-end: a burst stacked on this tile, its number of shots; null when it is no stack. */
+  stack: number | null;
 };
 
 export function tileBadges(input: {
@@ -71,6 +73,8 @@ export function tileBadges(input: {
   /** True while anything at all is selected: the play icon and the length step aside. */
   selectionMode: boolean;
   showBadges: boolean;
+  /** The shots of a burst stacked on this tile, when it is one. */
+  stack?: number;
 }): TileBadges {
   const { tags, isVideo, offline, local, tier, selectionMode, showBadges } = input;
   const hasDuration = isVideo && input.durationMs != null && input.durationMs > 0;
@@ -89,5 +93,7 @@ export function tileBadges(input: {
     local,
     favorite: isFavorite && allow("favorite"),
     type: type && allow("type") ? type : null,
+    // At every size: a stack hides photos, and that must always show.
+    stack: input.stack !== undefined && input.stack > 1 ? input.stack : null,
   };
 }

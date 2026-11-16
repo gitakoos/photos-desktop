@@ -20,7 +20,7 @@ import type { TileBadges, TypeMark } from "./tileBadges";
 /** `.g-cell`'s corner radius. */
 export const TILE_RADIUS = 10;
 
-export type Sprites = Record<"play" | "offline" | "cloud" | "heart" | "check" | TypeMark, ImageBitmap>;
+export type Sprites = Record<"play" | "offline" | "cloud" | "heart" | "check" | "stack" | TypeMark, ImageBitmap>;
 
 export type Palette = { bg: string; bg2: string; accent: string; synced: string; font: string };
 
@@ -235,6 +235,26 @@ function paintBadges(
     centred(ctx, s.play, cx - d(14), cy - d(14), d(28), d(28));
   }
   const size = d(18);
+  if (marks.stack !== null) {
+    // Top-end: the stack mark and the number of shots, one pill.
+    const text = String(marks.stack);
+    ctx.font = `600 ${d(11)}px ${p.font}`;
+    const key = `${ctx.font}|${text}`;
+    let tw = textWidths.get(key);
+    if (tw === undefined) {
+      tw = Math.ceil(ctx.measureText(text).width);
+      textWidths.set(key, tw);
+    }
+    const bw = size + tw + d(5);
+    const bx = x + w - d(4) - bw;
+    const by = y + d(4);
+    box(ctx, bx, by, bw, size, d(9));
+    centred(ctx, s.stack, bx + d(1), by, size, size);
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, bx + size, by + size / 2 + 0.5);
+  }
   const top = y + h - d(4) - size;
   // Bottom-start: the pin, then the length, 3 px apart.
   let at = x + d(4);

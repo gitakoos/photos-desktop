@@ -160,6 +160,8 @@ type Props = {
   aside?: ReactNode;
   /** Dialogs and notices that belong over the whole viewer. */
   children?: ReactNode;
+  /** Something of the caller's own over the picture itself (a burst's strip), inside the stage. */
+  stageOverlay?: ReactNode;
 };
 
 /**
@@ -233,6 +235,7 @@ export function ViewerShell({
   initialSide,
   aside,
   children,
+  stageOverlay,
 }: Props) {
   const t = useT();
   const text = useViewerText(stage.kind === "image" ? (textSource ?? null) : null, itemKey);
@@ -609,6 +612,7 @@ export function ViewerShell({
         )}
         <TextPill state={text.state} onLeave={text.leave} />
         <SelectionCopy state={text.state} />
+        {stageOverlay}
 
         {hasNext && (
           <button

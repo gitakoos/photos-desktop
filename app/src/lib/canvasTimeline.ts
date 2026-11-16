@@ -52,6 +52,8 @@ export type TimelineData = {
   offline: ReadonlySet<string> | undefined;
   local: ReadonlySet<string> | undefined;
   showBadges: boolean;
+  /** The bursts stacked on a tile: shots by the tile's uid. */
+  stacks?: ReadonlyMap<string, number>;
 };
 
 /** The tallest canvas made, in device pixels: GPU textures stop at 8192 on many cards. */
@@ -437,6 +439,7 @@ export class CanvasTimeline {
       tier: badgeTier(l.tile),
       selectionMode: d.selected.size > 0,
       showBadges: d.showBadges,
+      stack: d.stacks?.get(uid),
     });
     paintTile(
       this.ctx,

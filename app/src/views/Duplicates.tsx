@@ -361,9 +361,11 @@ export function Duplicates({
           ) : scanning && status ? (
             <>
               <span>
-                {status.total > 0
-                  ? t("duplicates.scanning", { done: status.done.toLocaleString(locale), total: status.total.toLocaleString(locale) })
-                  : t("duplicates.reading")}
+                {status.total > 0 && status.done >= status.total
+                  ? t("duplicates.readingVideos")
+                  : status.total > 0
+                    ? t("duplicates.scanning", { done: status.done.toLocaleString(locale), total: status.total.toLocaleString(locale) })
+                    : t("duplicates.reading")}
               </span>
               <span className="dp-bar">
                 <span style={{ width: `${status.total ? Math.round((status.done / status.total) * 100) : 0}%` }} />
