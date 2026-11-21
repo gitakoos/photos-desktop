@@ -49,13 +49,23 @@
   font-size: 13px;
 }
 .fd-reading {
+  /* On a narrow window it goes to its own line rather than squeezing its text; only the bar gives way. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+.fd-reading > span:first-child {
+  flex: none;
+}
 .fd-bar {
-  flex: 0 0 160px;
+  flex: 0 1 auto;
+  width: 160px;
+  min-width: 40px;
   height: 4px;
   border-radius: 2px;
   background: var(--line-soft);
