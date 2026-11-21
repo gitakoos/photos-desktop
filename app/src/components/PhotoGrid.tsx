@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { isVideo as classifyVideo, TAG } from "../lib/tags";
 import { cachedThumbnail, requestThumbnail, useThumbServerBase } from "../lib/thumbStore";
 import { cachedDuration, formatVideoTime, requestDuration } from "../lib/durations";
@@ -145,10 +145,19 @@ type CellProps = {
   /** Badge density, from the tile's rendered width. */
   tier?: BadgeTier;
   renderOverlay?: (item: GridItem) => ReactNode;
+  /** Classes of a state the grid's owner draws, such as a tile being dragged. */
+  extraClass?: string;
+  /** A tooltip in place of the name. */
+  hint?: string;
 };
 
-/** One photo tile: thumbnail, hover select dot, corner badges, optional name. */
-export function PhotoCell({
+/**
+ * One photo tile: thumbnail, hover select dot, corner badges, optional name.
+ *
+ * Memoized: the grid re-renders on every scroll frame, but a tile's props only change when
+ * the page itself re-renders.
+ */
+export const PhotoCell = memo(function PhotoCell({
   item,
   thumb,
   selected,
@@ -162,6 +171,8 @@ export function PhotoCell({
   local = false,
   tier = "all",
   renderOverlay,
+  extraClass,
+  hint,
 }: CellProps) {
   const t = useT();
   // `thumb === undefined` -> lazy: fetch this cell's thumbnail only once it
@@ -311,10 +322,10 @@ export function PhotoCell({
   const [broken, setBroken] = useState<string | null>(null);
   return (
     <div
-      className={`g-cell ${selected ? "sel" : ""}`}
+      className={`g-cell ${selected ? "sel" : ""}${extraClass ? ` ${extraClass}` : ""}`}
       ref={ref}
       data-uid={item.uid}
-      title={showName ? item.name : undefined}
+      title={hint ?? (showName ? item.name : undefined)}
       onClick={(e) => onOpen?.(item.uid, e)}
       onContextMenu={
         onContext &&
@@ -410,9 +421,13 @@ export function PhotoCell({
       {showName && item.name && <div className="g-cell-name">{item.name}</div>}
     </div>
   );
-}
+});
 
-type GridProps = Omit<CellProps, "item" | "thumb" | "selected" | "tier" | "selectionMode"> & {
+type GridProps = Omit<CellProps, "item" | "thumb" | "selected" | "tier" | "selectionMode" | "extraClass" | "hint"> & {
+  /** Classes a tile takes by its uid, for a state the grid's owner draws. */
+  cellClass?: (uid: string) => string;
+  /** A tooltip every tile shows. */
+  cellTitle?: string;
   items: GridItem[];
   /** Eager thumbnails; omit to let each cell lazy-load its own (large timeline). */
   thumbs?: Record<string, string | null>;
@@ -432,6 +447,8 @@ export function PhotoGrid({
   selected,
   offlineUids,
   localUids,
+  cellClass,
+  cellTitle,
   ...cell
 }: GridProps) {
   const ref = useRef<HTMLDivElement>(null);
@@ -470,6 +487,8 @@ export function PhotoGrid({
           offline={!!offlineUids?.has(item.uid)}
           local={!!localUids?.has(item.uid)}
           tier={tier}
+          extraClass={cellClass?.(item.uid) || undefined}
+          hint={cellTitle}
           {...cell}
         />
       ))}

@@ -57,6 +57,86 @@ export type FaceSample = {
   confirmed: boolean;
 };
 
+/** How long a long face loop runs before the rest of the process gets its turn. */
+export const SLICE_MS = 8;
+
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+let sliceMs = SLICE_MS;
+
+/** Sets how long the long face loops run between turns; Infinity runs them straight through, for a reference run. */
+export function setSliceMs(ms: number): void {
+  sliceMs = ms;
+}
+
+/**
+ * Asked between the steps of a long loop: once `sliceMs` has gone by since the last turn, answers a
+ * wait that lets the rest of the process run (the window's calls, the thumbnail server). Undefined
+ * otherwise, so a short loop runs straight through and costs nothing.
+ */
+export function timeSlicer(ms = sliceMs, now: () => number = () => performance.now()): () => Promise<void> | undefined {
+  let since = now();
+  return () => {
+    if (now() - since < ms) return undefined;
+    return nextTurn().then(() => {
+      since = now();
+    });
+  };
+}
+
+/**
+ * A long loop written as steps that is told at each step whether the rest of the process gets its
+ * turn there: a `yield` answers true when it does. The loop then hands back what it holds, yields
+ * once more, and reads the world again when it is resumed after the turn.
+ */
+export type Pausable<T> = Generator<void, T, boolean>;
+
+/** Runs a pausable loop straight through: no turn is ever given. */
+export function runPausable<T>(steps: Pausable<T>): T {
+  for (;;) {
+    const step = steps.next(false);
+    if (step.done) return step.value;
+  }
+}
+
+/** Runs a pausable loop, giving the rest of the process its turn as `slice` says. */
+export async function runPausableSliced<T>(
+  steps: Pausable<T>,
+  slice: () => Promise<void> | undefined = timeSlicer(),
+): Promise<T> {
+  let step = steps.next(false);
+  for (;;) {
+    if (step.done) return step.value;
+    const turn = slice();
+    if (!turn) {
+      step = steps.next(false);
+      continue;
+    }
+    step = steps.next(true);
+    await turn;
+    if (step.done) return step.value;
+    step = steps.next(false);
+  }
+}
+
+/** Runs a loop written as steps straight through. */
+function runSteps<T>(steps: Generator<void, T>): T {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+/** Runs a loop written as steps, giving the rest of the process its turn as `slice` says. */
+async function runStepsSliced<T>(steps: Generator<void, T>, slice: () => Promise<void> | undefined): Promise<T> {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+    const turn = slice();
+    if (turn) await turn;
+  }
+}
+
 export function dot(a: Float32Array, b: Float32Array): number {
   // Four sums side by side: the grouping spends nearly all its time here.
   const n = a.length;
@@ -123,13 +203,15 @@ class ExemplarCluster {
  * The group of each sample, or -1 for one left over, in input order. Faces are taken clearest
  * first; one that matches nothing opens a group only when it is confident or confirmed, so
  * stray detections do not seed one. `checkActive` is awaited every 64 faces and on every merge
- * round: it gives the rest of the process its turn on a large library, and may throw to stop.
+ * round, and may throw to stop. Whatever it does, the rest of the process gets its turn as `slice`
+ * says (every SLICE_MS by default), so a large library never holds up the window's calls.
  */
 export async function clusterFaces(
   samples: FaceSample[],
   threshold = FACE_CLUSTER_THRESHOLD,
   mergeThreshold = FACE_CLUSTER_MERGE_THRESHOLD,
   checkActive: () => void | Promise<void> = () => {},
+  slice: () => Promise<void> | undefined = timeSlicer(),
 ): Promise<Int32Array> {
   const order = samples.map((_, i) => i).sort((a, b) => samples[b].score - samples[a].score || a - b);
   const clusters: ExemplarCluster[] = [];
@@ -137,6 +219,8 @@ export async function clusterFaces(
   let processed = 0;
   for (const index of order) {
     if ((processed++ & 0x3f) === 0) await checkActive();
+    const turn = slice();
+    if (turn) await turn;
     const sample = samples[index];
     const need = sample.confident ? threshold : threshold + FACE_CLUSTER_STRICT_DELTA;
     let bestCluster = -1;
@@ -156,7 +240,7 @@ export async function clusterFaces(
       clusters.push(new ExemplarCluster(sample.embedding, sample.score));
     }
   }
-  return mergeSimilarClusters(assignment, samples, mergeThreshold, checkActive);
+  return mergeSimilarClusters(assignment, samples, mergeThreshold, checkActive, slice);
 }
 
 /**
@@ -169,6 +253,7 @@ async function mergeSimilarClusters(
   samples: FaceSample[],
   mergeThreshold: number,
   checkActive: () => void | Promise<void>,
+  slice: () => Promise<void> | undefined,
 ): Promise<Int32Array> {
   const result = Int32Array.from(assignment);
   if (new Set(Array.from(result).filter((v) => v >= 0)).size > MERGE_MAX_CLUSTERS) return result;
@@ -184,11 +269,17 @@ async function mergeSimilarClusters(
     const ids = [...members.keys()];
     if (ids.length < 2) break;
     const centroids = new Map<number, Float32Array>();
-    for (const id of ids) centroids.set(id, meanDirection(members.get(id)!.map((m) => samples[m].embedding)));
+    for (const id of ids) {
+      const turn = slice();
+      if (turn) await turn;
+      centroids.set(id, meanDirection(members.get(id)!.map((m) => samples[m].embedding)));
+    }
     let into = -1;
     let from = -1;
     let best = mergeThreshold;
     for (let a = 0; a < ids.length; a++) {
+      const turn = slice();
+      if (turn) await turn;
       for (let b = a + 1; b < ids.length; b++) {
         const s = dot(centroids.get(ids[a])!, centroids.get(ids[b])!);
         if (s >= best) {
@@ -217,9 +308,30 @@ export function assignIncremental(
   threshold = FACE_CLUSTER_THRESHOLD,
   strictDelta = FACE_CLUSTER_STRICT_DELTA,
 ): Int32Array {
+  return runSteps(assignSteps(faces, centroids, threshold, strictDelta));
+}
+
+/** `assignIncremental`, giving the rest of the process its turn as it goes. */
+export function assignIncrementalAsync(
+  faces: FaceSample[],
+  centroids: Float32Array[],
+  threshold = FACE_CLUSTER_THRESHOLD,
+  strictDelta = FACE_CLUSTER_STRICT_DELTA,
+  slice: () => Promise<void> | undefined = timeSlicer(),
+): Promise<Int32Array> {
+  return runStepsSliced(assignSteps(faces, centroids, threshold, strictDelta), slice);
+}
+
+function* assignSteps(
+  faces: FaceSample[],
+  centroids: Float32Array[],
+  threshold: number,
+  strictDelta: number,
+): Generator<void, Int32Array> {
   const result = new Int32Array(faces.length).fill(-1);
   if (centroids.length === 0) return result;
   for (let f = 0; f < faces.length; f++) {
+    if (f > 0) yield;
     let bestIndex = -1;
     let best = -Infinity;
     for (let c = 0; c < centroids.length; c++) {
@@ -322,6 +434,35 @@ export function attractToNamedClusters(
   threshold: number,
   blockedNames: (Set<string> | undefined)[] = [],
 ): Int32Array {
+  return runSteps(attractSteps(embeddings, scores, assignment, clusterName, confirmedPerFace, threshold, blockedNames));
+}
+
+/** `attractToNamedClusters`, giving the rest of the process its turn as it goes. */
+export function attractToNamedClustersAsync(
+  embeddings: Float32Array[],
+  scores: number[],
+  assignment: Int32Array,
+  clusterName: Map<number, string>,
+  confirmedPerFace: (string | null)[],
+  threshold: number,
+  blockedNames: (Set<string> | undefined)[] = [],
+  slice: () => Promise<void> | undefined = timeSlicer(),
+): Promise<Int32Array> {
+  return runStepsSliced(
+    attractSteps(embeddings, scores, assignment, clusterName, confirmedPerFace, threshold, blockedNames),
+    slice,
+  );
+}
+
+function* attractSteps(
+  embeddings: Float32Array[],
+  scores: number[],
+  assignment: Int32Array,
+  clusterName: Map<number, string>,
+  confirmedPerFace: (string | null)[],
+  threshold: number,
+  blockedNames: (Set<string> | undefined)[],
+): Generator<void, Int32Array> {
   const nameToCluster = new Map<string, number>();
   for (const [cid, name] of clusterName) nameToCluster.set(name, cid);
   const result = Int32Array.from(assignment);
@@ -333,6 +474,7 @@ export function attractToNamedClusters(
   }
   const exemplars = new Map<number, Float32Array[]>();
   for (const cid of nameToCluster.values()) {
+    yield;
     const members: number[] = [];
     for (let i = 0; i < result.length; i++) if (result[i] === cid) members.push(i);
     members.sort((a, b) => scores[b] - scores[a] || a - b);
@@ -345,6 +487,7 @@ export function attractToNamedClusters(
   for (let i = 0; i < result.length; i++) {
     if (confirmedPerFace[i] !== null) continue;
     if (clusterName.has(result[i])) continue;
+    yield;
     const blocked = blockedNames[i];
     let bestCid = -1;
     let best = -Infinity;
@@ -372,10 +515,20 @@ export function suggestPersonMatches(
   unnamed: [string, Float32Array][],
   threshold = FACE_SUGGEST_THRESHOLD,
 ): { named: string; unnamed: string; similarity: number }[] {
+  return runPausable(suggestPersonMatchesSteps(named, unnamed, threshold));
+}
+
+/** `suggestPersonMatches` as steps, one unnamed group a step. */
+export function* suggestPersonMatchesSteps(
+  named: [string, Float32Array][],
+  unnamed: [string, Float32Array][],
+  threshold = FACE_SUGGEST_THRESHOLD,
+): Pausable<{ named: string; unnamed: string; similarity: number }[]> {
   if (named.length === 0 || unnamed.length === 0) return [];
   const byId = [...named].sort((a, b) => cmp(a[0], b[0]));
   const out: { named: string; unnamed: string; similarity: number }[] = [];
   for (const [unnamedId, uc] of unnamed) {
+    yield;
     let bestId: string | null = null;
     let best = -Infinity;
     for (const [namedId, nc] of byId) {

@@ -26,10 +26,12 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LockIcon, OpenWindowIcon, PowerIcon, RefreshIcon, SignOutIcon } from "../components/icons";
 import { rpc } from "../lib/rpc";
+import { refreshSharedBackup } from "../lib/backupRefresh";
 // Reuse the profile menu's account shape, storage formatting and header styles
 // so the popup header is identical to the one inside the main window.
 import { barColor, formatBytes, type Account } from "../components/ProfileMenu";
 import { useT } from "../lib/i18n";
+import { isWindows } from "../lib/platform";
 import { describeMount, useMountActivity } from "../lib/mountActivity";
 import "../styles/ProfileMenu.css";
 import "../styles/TrayPopup.css";
@@ -141,8 +143,15 @@ export function TrayPopup() {
       void refresh();
       void getCurrentWindow().setFocus();
     });
+    // Also as soon as the session is unlocked, locked, signed in or out, or ends: the
+    // channel is usually free then, while at the next open the question can queue behind
+    // the window's own calls and the popup would show the state from start-up meanwhile.
+    const unChanged = listen("session-changed", () => void refresh());
+    const unEnded = listen("session-ended", () => void refresh());
     return () => {
       void unlisten.then((f) => f());
+      void unChanged.then((f) => f());
+      void unEnded.then((f) => f());
     };
   }, [refresh]);
 
@@ -193,7 +202,9 @@ export function TrayPopup() {
   async function syncNow() {
     setSyncing(true); // optimistic; the host confirms via "mount-busy"
     // Bounded refresh: syncs only the albums kept offline and reloads the view. It
-    // never bulk-downloads the whole library.
+    // never bulk-downloads the whole library. The shared backup is refreshed alongside; the
+    // sidecar does nothing when it is off or signed out.
+    refreshSharedBackup(true, navigator.onLine, rpc);
     await invoke("sync_now").catch(() => {});
   }
 
@@ -205,7 +216,7 @@ export function TrayPopup() {
   }
 
   async function quit() {
-    await invoke("quit_app").catch(() => {});
+    await invoke("request_quit").catch(() => {});
   }
 
   const account = view.kind === "signedIn" ? view.account : null;
@@ -280,16 +291,21 @@ export function TrayPopup() {
 
         <div className="pm-sep" />
 
-        <div className="tray-status" role="status" aria-live="polite">
-          <span className={`tray-dot${syncing ? " on" : ""}`} aria-hidden="true" />
-          <span title={doing?.why}>{syncing ? (doing?.title ?? t("tray.syncing")) : t("tray.synced")}</span>
-        </div>
-        <button className="tray-row" onClick={syncNow} disabled={syncing}>
-          <span className={syncing ? "tray-spin" : undefined}>
-            <RefreshIcon size={16} />
-          </span>
-          <span>{t("tray.syncNow")}</span>
-        </button>
+        {/* The sync status and Sync now follow the File Explorer folder, which only Windows has. */}
+        {isWindows && (
+          <>
+            <div className="tray-status" role="status" aria-live="polite">
+              <span className={`tray-dot${syncing ? " on" : ""}`} aria-hidden="true" />
+              <span title={doing?.why}>{syncing ? (doing?.title ?? t("tray.syncing")) : t("tray.synced")}</span>
+            </div>
+            <button className="tray-row" onClick={syncNow} disabled={syncing}>
+              <span className={syncing ? "tray-spin" : undefined}>
+                <RefreshIcon size={16} />
+              </span>
+              <span>{t("tray.syncNow")}</span>
+            </button>
+          </>
+        )}
 
         <button className="tray-row" onClick={openMain}>
           <OpenWindowIcon size={16} />

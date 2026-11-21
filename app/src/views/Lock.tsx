@@ -22,8 +22,9 @@
 
 import { useState, type FormEvent } from "react";
 import { rpc } from "../lib/rpc";
+import { requestSignOut } from "../lib/signOut";
 import { useT } from "../lib/i18n";
-import { SignOutConfirm } from "../components/SignOutConfirm";
+import { SignOutConfirm, SignOutUnsaved } from "../components/SignOutConfirm";
 import "../styles/App.css";
 
 type UnlockResult =
@@ -51,6 +52,8 @@ export function Lock({
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  /** Changes that had not reached Drive when the app locked, which a sign-out from here would delete. */
+  const [unsaved, setUnsaved] = useState<string[] | null>(null);
 
   async function onUnlock(e: FormEvent) {
     e.preventDefault();
@@ -73,16 +76,23 @@ export function Lock({
     }
   }
 
-  async function useDifferentAccount() {
+  async function useDifferentAccount(discard = false) {
     setBusy(true);
     setStatus("");
-    try {
-      await rpc("signOut").catch(() => {});
-    } finally {
-      setPassword("");
-      setBusy(false);
-      onDifferentAccount();
+    const outcome = await requestSignOut(rpc, discard);
+    setBusy(false);
+    // Held: the user unlocks to save them, or chooses to lose them.
+    if (outcome.kind === "held") {
+      setUnsaved(outcome.unsaved);
+      return;
     }
+    setUnsaved(null);
+    if (outcome.kind === "failed") {
+      setStatus(t("signOut.failed"));
+      return;
+    }
+    setPassword("");
+    onDifferentAccount();
   }
 
   return (
@@ -122,6 +132,15 @@ export function Lock({
             void useDifferentAccount();
           }}
           onCancel={() => setConfirmSignOut(false)}
+        />
+      )}
+      {unsaved && (
+        <SignOutUnsaved
+          unsaved={unsaved}
+          locked
+          onRetry={() => setUnsaved(null)}
+          onSignOut={() => void useDifferentAccount(true)}
+          onCancel={() => setUnsaved(null)}
         />
       )}
     </div>

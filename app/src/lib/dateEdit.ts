@@ -26,6 +26,8 @@ export type DateEditInfo = {
   name: string;
   captureMs: number;
   nameMs: number | null;
+  /** Where it was taken, latitude then longitude, or null. */
+  place: [number, number] | null;
   blocked: "live" | "type" | "read" | null;
 };
 
@@ -36,9 +38,17 @@ export type DateEditStatus = {
   changed: number;
   unchanged: number;
   failed: number;
-  errors: { uid: string; error: string }[];
+  errors: DateEditError[];
   cancelled: boolean;
 };
+
+/** A photo that was not changed: the sidecar's reason, and a code for one the window words itself. */
+export type DateEditError = { uid: string; error: string; code?: "busy" };
+
+/** What the panels show for an error: the window's own words for a known code, else the sidecar's. */
+export function errorText(e: DateEditError, t: (key: string) => string): string {
+  return e.code === "busy" ? t("dateEdit.busy") : e.error;
+}
 
 /** One date for all, the same shift for each, or the date each file name records. */
 export type DateEditMode = "set" | "shift" | "name";

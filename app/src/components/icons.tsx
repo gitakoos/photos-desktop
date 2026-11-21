@@ -738,6 +738,17 @@ export function PauseIcon({ size = 18 }: Props) {
   );
 }
 
+/** A screen with a play mark on it, outlined: the slideshow. */
+export function SlideshowIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="4.5" width="18" height="12.5" rx="2" />
+      <path d="M10.2 8.3v5.4l4.4 -2.7Z" />
+      <path d="M8 21h8" />
+    </svg>
+  );
+}
+
 /**
  * Icons.Filled.ChevronRight, the mirror of the left one above. Android steps a paused
  * clip a frame at a time with KeyboardArrowLeft and KeyboardArrowRight, which are this
@@ -1244,6 +1255,92 @@ export function VisibilityIcon({ size = 17 }: Props) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
       <path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z" />
+    </svg>
+  );
+}
+
+/** A place: a map pin over its point. */
+export function PlaceIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 21s-6.5-5.6-6.5-11a6.5 6.5 0 0 1 13 0c0 5.4-6.5 11-6.5 11Z" />
+      <circle cx="12" cy="10" r="2.4" />
+    </svg>
+  );
+}
+
+/** Compress: two arrows pressing in on a line. */
+export function CompressIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 3v6M9 6.5 12 9l3-2.5M12 21v-6M9 17.5l3-2.5 3 2.5M4 12h16" />
+    </svg>
+  );
+}
+
+/** A collage: a frame cut into one tall and two short cells. */
+export function CollageIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" />
+      <path d="M12 3.5v17M12 11.5h8.5" />
+    </svg>
+  );
+}
+
+/** A GIF: a frame with the letters' place, a loop arrow in its corner. */
+export function GifIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="5" width="18" height="14" rx="2.5" />
+      <path d="M10 10H8.2a1 1 0 0 0-1 1v2a1 1 0 0 0 1 1H10v-1.6H9M12.5 10v4M15.5 14v-4h2.3M15.5 12h1.8" />
+    </svg>
+  );
+}
+
+/** A month grid in a calendar frame: the Calendar page. */
+export function CalendarViewIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3.5" y="4.5" width="17" height="16" rx="2.5" />
+      <path d="M3.5 9.5h17M9.2 9.5v11M14.8 9.5v11M3.5 15h17" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.ContentCut: scissors, for splitting a clip. */
+export function ContentCutIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M9.64 7.64c.23-.5.36-1.05.36-1.64 0-2.21-1.79-4-4-4S2 3.79 2 6s1.79 4 4 4c.59 0 1.14-.13 1.64-.36L10 12l-2.36 2.36C7.14 14.13 6.59 14 6 14c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4c0-.59-.13-1.14-.36-1.64L12 14l7 7h3v-1L9.64 7.64zM6 8c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm0 12c-1.1 0-2-.89-2-2s.9-2 2-2 2 .89 2 2-.9 2-2 2zm6-7.5c-.28 0-.5-.22-.5-.5s.22-.5.5-.5.5.22.5.5-.22.5-.5.5zM19 3l-6 6 2 2 7-7V3h-3z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.MusicNote: a track for the clip. */
+export function MusicNoteIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z" />
+    </svg>
+  );
+}
+
+/** Two columns of dots: the grip an album is rearranged by. */
+export function DragHandleIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M9 5.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0Zm0 6.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0Zm-1.5 8a1.5 1.5 0 1 0 0-3a1.5 1.5 0 0 0 0 3Zm10.5-14.5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0ZM16.5 13.5a1.5 1.5 0 1 0 0-3a1.5 1.5 0 0 0 0 3Zm1.5 5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0Z" />
+    </svg>
+  );
+}
+
+/** Icons.Filled.PhotoCamera: the frame grab. */
+export function PhotoCameraIcon({ size = 17 }: Props) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M9 2 7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" />
     </svg>
   );
 }

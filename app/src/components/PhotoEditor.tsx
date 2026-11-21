@@ -77,7 +77,7 @@ import {
   type DrawStroke,
   type TextItem,
 } from "../lib/editorOverlay";
-import type { EditorSource } from "../lib/localFile";
+import { isCancelled, untilNameFree, type EditorSource } from "../lib/localFile";
 import { FACE_INPUT, FACE_PAD_GREY, NO_FACES, coversFromHits, letterbox, type FaceStyle } from "../lib/editorFaces";
 import { rpc } from "../lib/rpc";
 import {
@@ -165,12 +165,13 @@ type Props = {
   /**
    * Persists the edited image (base64, encoded as `options` say), carrying the source's
    * metadata onto the copy. Returns a value handed straight to `onSaved`: the new local
-   * path, or null in the cloud, where the copy is a new node the caller reloads for rather
-   * than retargets to.
+   * path, or in the cloud the uid of the copy's new node, which the caller reloads for.
    */
   saveEdit: (imageBase64: string, source: EditorSource, options: SaveOptions) => Promise<string | null>;
   /** Where the copy lands, for the save panel's wording. */
   saveTo: "drive" | "computer";
+  /** The copy's place is picked in the save dialog, not next to the original. */
+  copyPicksPlace?: boolean;
   /**
    * The formats a copy may take. A Drive copy stays a JPEG, as on Android, so only its size
    * and quality are offered.
@@ -372,6 +373,7 @@ export function PhotoEditor({
   loadSource,
   saveEdit,
   saveTo,
+  copyPicksPlace,
   saveFormats = ["jpeg"],
   defaultFormat = "jpeg",
   onClose,
@@ -1499,12 +1501,17 @@ export function PhotoEditor({
     setSaveErr("");
     try {
       const base64 = await encodeFull(imgRef.current, srcW, srcH, present, saveOpts);
-      const result = await saveEdit(base64, source, saveOpts);
+      const result = await untilNameFree(
+        () => saveEdit(base64, source, saveOpts),
+        () => setSaveErr(t("editor.nameTakenLinux")),
+      );
+      setSaveErr("");
       setSaved(true);
       // A beat of confirmation before the caller retargets or reloads, which unmounts this.
       savedTimer.current = window.setTimeout(() => onSaved(result), 850);
-    } catch {
-      setSaveErr(t("editor.saveFailed"));
+    } catch (e) {
+      // A dismissed save dialog writes nothing and loses nothing: the edit stays open.
+      if (!isCancelled(e)) setSaveErr(t("editor.saveFailed"));
       setBusy(false);
     }
   }
@@ -1629,7 +1636,13 @@ export function PhotoEditor({
               {t(saveTo === "drive" ? "editor.saveSheet.copyDrive" : "editor.saveSheet.copyComputer")}
             </span>
             <span className="ed-save-option-sub">
-              {t(saveTo === "drive" ? "editor.saveSheet.copyDriveSub" : "editor.saveSheet.copyComputerSub")}
+              {t(
+                saveTo === "drive"
+                  ? "editor.saveSheet.copyDriveSub"
+                  : copyPicksPlace
+                    ? "editor.saveSheet.copyComputerPickSubLinux"
+                    : "editor.saveSheet.copyComputerSub",
+              )}
             </span>
           </span>
         </button>
@@ -2505,7 +2518,7 @@ export function PhotoEditor({
 }
 
 /** One part of a side panel: its name (and its value, if it has one) over its controls. */
-function SideSection({
+export function SideSection({
   title,
   value,
   idle,
@@ -2890,7 +2903,7 @@ function Swatches({ value, onPick }: { value: string; onPick: (hex: string) => v
  * drag anywhere sets the value under the pointer; the editor's window-wide release folds
  * the whole drag into one undo entry.
  */
-function RulerSlider({
+export function RulerSlider({
   label,
   value,
   min,
@@ -2974,7 +2987,7 @@ const CROP_MARKER_BACKING = 1;
  * marker lies inside the rectangle with its outer edge on the frame, over a darker rim
  * that holds it against a bright photo.
  */
-function CropOverlay({
+export function CropOverlay({
   box,
   boundsW,
   boundsH,

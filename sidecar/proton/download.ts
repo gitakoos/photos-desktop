@@ -53,10 +53,11 @@ import { activeRevisionOf, nodeDurationMs, nodeName, toMillis } from "./nodes.ts
 import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
 import { decryptOriginalTo, metaGet, metaPut, originalGet, originalSize } from "./store.ts";
 import { guarded, writeChunk } from "./fileWrites.ts";
+import { openDownloader, type OpenedDownloader } from "./downloadSlots.ts";
 
 // Cap for in-memory video playback. A larger file would strain the sidecar heap
 // and the JSON-RPC channel, so past it the app offers a download instead.
-const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
+export const MAX_INMEMORY_VIDEO = 150 * 1024 * 1024;
 
 /**
  * The size at which the viewer stops handing originals over the RPC channel and
@@ -248,9 +249,12 @@ export async function getVideo(photos: any, uid: string): Promise<VideoBytes> {
   }
   const node = await photos.getNode(uid);
   const mime = (node as any).mediaType || "video/mp4";
-  const downloader = await photos.getFileDownloader(uid);
+  const { downloader, unused } = await openDownloader(photos, uid);
   const claimed = downloader.getClaimedSizeInBytes?.() ?? 0;
-  if (claimed && claimed > MAX_INMEMORY_VIDEO) throw new Error("VIDEO_TOO_LARGE");
+  if (claimed && claimed > MAX_INMEMORY_VIDEO) {
+    unused();
+    throw new Error("VIDEO_TOO_LARGE");
+  }
 
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -273,6 +277,7 @@ export async function getVideo(photos: any, uid: string): Promise<VideoBytes> {
 async function saveOne(photos: any, uid: string, destDir: string): Promise<boolean> {
   let dest: string | null = null;
   let file: ReturnType<typeof createWriteStream> | null = null;
+  let opened: OpenedDownloader | null = null;
   try {
     const node = await photos.getNode(uid);
     const name = uniqueFileName(
@@ -280,7 +285,8 @@ async function saveOne(photos: any, uid: string, destDir: string): Promise<boole
       withMediaExtension(safeFileName(nodeName(node) || uid), (node as any).mediaType),
     );
     dest = join(destDir, name);
-    const downloader = await photos.getFileDownloader(uid);
+    opened = await openDownloader(photos, uid);
+    const { downloader } = opened;
     file = guarded(createWriteStream(dest));
     const handle = file;
     const stream = new WritableStream<Uint8Array>({
@@ -312,6 +318,7 @@ async function saveOne(photos: any, uid: string, destDir: string): Promise<boole
     }
     return true;
   } catch {
+    opened?.unused();
     // Close our own write handle before deleting the partial file: on Windows an open
     // handle blocks the delete, so cleanup cannot lean on the SDK aborting the stream.
     if (file && !file.destroyed) {
@@ -595,6 +602,32 @@ export async function listForMount(
   return { items, total: mountUids.length };
 }
 
+/**
+ * The SHA-1 of each photo's current revision, as its uploader recorded it in the revision's
+ * encrypted extended attributes (`Common.Digests.SHA1`), lowercase hex. A revision Drive
+ * answered for without one is `null`; a photo it did not answer for is left out, so the host
+ * tells "no digest" from "not known" and never takes the second for the first. Host-only: the
+ * Explorer folder marks a downloaded copy in sync, or frees it, only on a matching digest.
+ */
+export async function mountDigests(photos: any, uids: string[]): Promise<Record<string, string | null>> {
+  const out: Record<string, string | null> = {};
+  const asked = new Set(uids);
+  if (uids.length === 0) return out;
+  try {
+    for await (const node of withStallGuard(photos.iterateNodes(uids), SDK_STALL_MS, "iterateNodes(digests)")) {
+      const n: any = node;
+      if (!n?.uid || !asked.has(n.uid)) continue;
+      const revision = activeRevisionOf(n);
+      if (!revision) continue;
+      const sha1 = revision.claimedDigests?.sha1;
+      out[n.uid] = typeof sha1 === "string" && /^[0-9a-f]{40}$/i.test(sha1) ? sha1.toLowerCase() : null;
+    }
+  } catch {
+    // What was answered before the failure stands; the rest stays unknown.
+  }
+  return out;
+}
+
 /** What became of a photo the Explorer folder kept a copy of, once it left the listing. */
 export type MountFate = "trashed" | "gone" | "hidden" | "present" | "unknown";
 
@@ -603,6 +636,11 @@ export type MountFate = "trashed" | "gone" | "hidden" | "present" | "unknown";
  * a positive answer. Leaving the listing is not one: a page that failed, a node that could
  * not be read for a moment, or a sidecar that restarted mid-fill drops photos from it just
  * the same. A photo the lookup never answered for stays "unknown", and the host does nothing.
+ *
+ * A hidden photo is asked about too: "hidden" means hidden and still on Drive, the one answer
+ * on which its copy leaves the plain folder whatever the mode. Hidden and in the trash answers
+ * "trashed", hidden and deleted for good "gone", as for any photo, so a copy that is all that
+ * is left of a hidden photo stays as the user's own.
  */
 export async function mountFates(
   photos: any,
@@ -610,20 +648,13 @@ export async function mountFates(
   hidden: (uid: string) => boolean = () => false,
 ): Promise<Record<string, MountFate>> {
   const out: Record<string, MountFate> = {};
-  const ask: string[] = [];
-  for (const uid of uids) {
-    if (hidden(uid)) out[uid] = "hidden";
-    else {
-      out[uid] = "unknown";
-      ask.push(uid);
-    }
-  }
-  if (ask.length === 0) return out;
+  for (const uid of uids) out[uid] = "unknown";
+  if (uids.length === 0) return out;
   try {
-    for await (const node of withStallGuard(photos.iterateNodes(ask), SDK_STALL_MS, "iterateNodes(fates)")) {
+    for await (const node of withStallGuard(photos.iterateNodes(uids), SDK_STALL_MS, "iterateNodes(fates)")) {
       const n: any = node;
       if (n?.missingUid && n.missingUid in out) out[n.missingUid] = "gone";
-      else if (n?.uid && n.uid in out) out[n.uid] = n.trashTime ? "trashed" : "present";
+      else if (n?.uid && n.uid in out) out[n.uid] = n.trashTime ? "trashed" : hidden(n.uid) ? "hidden" : "present";
     }
   } catch {
     // What was answered before the failure stands; the rest stays unknown.
@@ -670,7 +701,7 @@ export function startHydrate(photos: any, uid: string, dir?: string): { path: st
   const file = guarded(createWriteStream(dest, { fd: openSync(dest, "w", 0o600) }));
   void (async () => {
     try {
-      const downloader = await photos.getFileDownloader(uid);
+      const { downloader } = await openDownloader(photos, uid);
       const stream = new WritableStream<Uint8Array>({
         write(chunk) {
           // Refusing the next chunk is what stops a download nobody wants any more.
@@ -717,7 +748,7 @@ export async function hydrateFile(photos: any, uid: string, dir?: string): Promi
   const base = hydrateDir(dir);
   if (base !== tmpdir()) mkdirSync(base, { recursive: true, mode: 0o700 });
   const dest = join(base, `pfp-hyd-${randomUUID()}.bin`);
-  const downloader = await photos.getFileDownloader(uid);
+  const { downloader } = await openDownloader(photos, uid);
   const file = guarded(createWriteStream(dest));
   let total = 0;
   const stream = new WritableStream<Uint8Array>({
@@ -946,9 +977,14 @@ async function streamOriginal(
   const dest = join(VIEW_DIR, `${randomUUID()}.${ext}`);
   let file: ReturnType<typeof createWriteStream> | null = null;
   let buffered: Buffer[] | null = null;
+  let opened: OpenedDownloader | null = null;
   try {
-    const downloader = await photos.getFileDownloader(entry.uid);
-    if (viewing !== entry) return; // moved on while the downloader was being set up
+    opened = await openDownloader(photos, entry.uid);
+    const { downloader } = opened;
+    if (viewing !== entry) {
+      opened.unused(); // moved on while the downloader was being set up
+      return;
+    }
 
     const claimed = Number(downloader.getClaimedSizeInBytes?.() ?? 0);
     // Unknown size takes the file route: it is the one that cannot be caught out by
@@ -1019,6 +1055,7 @@ async function streamOriginal(
       `[view] original ready: ${total} bytes via ${buffered ? "memory" : "file"}\n`,
     );
   } catch {
+    opened?.unused();
     // Close our own write handle before deleting: on Windows an open handle blocks the
     // delete, so cleanup cannot lean on the SDK aborting the stream.
     if (file) {

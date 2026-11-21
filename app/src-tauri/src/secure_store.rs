@@ -36,7 +36,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
+use aes_gcm::aead::{Aead, Generate, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use tauri::{AppHandle, Manager};
 #[cfg(windows)]
@@ -92,7 +92,7 @@ pub fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 /// A fresh 32-byte key from the OS CSPRNG.
 fn rand_key() -> [u8; 32] {
-    let key = Aes256Gcm::generate_key(&mut OsRng);
+    let key = Key::<Aes256Gcm>::generate();
     let mut out = [0u8; 32];
     out.copy_from_slice(key.as_slice());
     out
@@ -120,15 +120,21 @@ fn keystore_get_or_create(
     let key = rand_key();
     let sealed = encrypt_data(&key, Scope::User, Some(entropy))
         .map_err(|e| format!("could not seal a key: {e}"))?;
-    fs::write(&path, sealed).map_err(|e| e.to_string())?;
+    write_atomic(&path, &sealed)?;
     Ok(key)
 }
 
-/// The non-Windows path stores the raw key in the OS keyring, which on a Linux desktop
-/// is the Secret Service (gnome-keyring / kwallet). It encrypts the key at rest, so the
-/// key never sits on disk in the clear, the same guarantee DPAPI gives above. The `file`
+/// The non-Windows path stores the key in the OS keyring, which on a Linux desktop is
+/// the Secret Service (gnome-keyring / kwallet) and on macOS the login Keychain. It
+/// encrypts the key at rest, so the key never sits on disk in the clear, the same
+/// guarantee DPAPI gives above. The `file`
 /// id names the keyring entry so the two keys stay distinct; `entropy` is unused here,
 /// because the keyring, not this app, binds the secret to the login session.
+///
+/// The key goes in as hex text. The Secret Service is handed every secret as text, and
+/// KWallet keeps it as text, so 32 raw bytes came back from it altered and the key was
+/// lost. Raw keys an earlier build stored in gnome-keyring, which keeps bytes as given,
+/// still open as they are.
 #[cfg(not(windows))]
 fn keystore_get_or_create(
     _app: &AppHandle,
@@ -138,27 +144,82 @@ fn keystore_get_or_create(
     let entry = keyring::Entry::new("eu.akoos.photos.desktop", file)
         .map_err(|e| format!("keyring entry: {e}"))?;
     match entry.get_secret() {
-        Ok(raw) => raw.try_into().map_err(|_| "stored key is corrupt".to_string()),
-        Err(keyring::Error::NoEntry) => {
-            let key = rand_key();
-            entry
-                .set_secret(&key)
-                .map_err(|e| format!("could not store a key in the keyring: {e}"))?;
-            Ok(key)
-        }
+        Ok(raw) => match decode_stored_key(&raw) {
+            Some(key) => Ok(key),
+            // The keyring altered the key it was given, so it cannot be had back. What was
+            // sealed under it reads as absent from here on: the settings start over and the
+            // vault starts clean, as after a sign-out.
+            None => {
+                eprintln!("[secure_store] the keyring entry {file} came back altered; a new key replaces it");
+                store_new_key(&entry)
+            }
+        },
+        Err(keyring::Error::NoEntry) => store_new_key(&entry),
         Err(e) => Err(format!("could not read a key from the keyring: {e}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn store_new_key(entry: &keyring::Entry) -> Result<[u8; 32], String> {
+    let key = rand_key();
+    entry
+        .set_password(&to_hex(&key))
+        .map_err(|e| format!("could not store a key in the keyring: {e}"))?;
+    Ok(key)
+}
+
+/// The key as the Linux keyring hands it back: the 64 hex characters this build stores,
+/// or the 32 raw bytes an earlier one stored. None for anything else, which is what a
+/// keyring that keeps secrets as text makes of 32 raw bytes.
+#[cfg(any(test, not(windows)))]
+fn decode_stored_key(raw: &[u8]) -> Option<[u8; 32]> {
+    if let Ok(key) = <[u8; 32]>::try_from(raw) {
+        return Some(key);
+    }
+    if raw.len() != 64 || !raw.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    for (byte, pair) in key.iter_mut().zip(raw.chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(key)
+}
+
+/// Lower-case hex, the text form a key takes in the keyring and on its way to the sidecar.
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A key from the platform keystore, kept in `slot` once it has loaded.
+///
+/// Unsealing is a DPAPI call, a Secret Service round trip or a Keychain read that a Mac may
+/// put to its owner as a prompt, so it happens once per run rather than at every caller. A
+/// failed read is not kept, so the next caller tries again. The lock also keeps two first
+/// callers from each creating a different key.
+fn cached_key(
+    slot: &std::sync::Mutex<Option<[u8; 32]>>,
+    app: &AppHandle,
+    file: &str,
+    entropy: &[u8],
+) -> Result<[u8; 32], String> {
+    let mut cached = slot.lock().unwrap_or_else(|e| e.into_inner());
+    match *cached {
+        Some(raw) => Ok(raw),
+        None => Ok(*cached.insert(keystore_get_or_create(app, file, entropy)?)),
     }
 }
 
 /// The AES data key, created on first use and sealed at rest by the platform keystore.
 fn data_key(app: &AppHandle) -> Result<Key<Aes256Gcm>, String> {
-    let raw = keystore_get_or_create(app, KEY_FILE, DPAPI_ENTROPY)?;
-    Ok(*Key::<Aes256Gcm>::from_slice(&raw))
+    static KEY: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
+    let raw = cached_key(&KEY, app, KEY_FILE, DPAPI_ENTROPY)?;
+    Key::<Aes256Gcm>::try_from(raw.as_slice()).map_err(|_| "bad key length".to_string())
 }
 
 fn seal(key: &Key<Aes256Gcm>, plain: &[u8]) -> Result<Vec<u8>, String> {
     let cipher = Aes256Gcm::new(key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = Nonce::generate();
     let mut out = nonce.to_vec();
     out.extend_from_slice(
         &cipher
@@ -174,7 +235,7 @@ fn unseal(key: &Key<Aes256Gcm>, blob: &[u8]) -> Result<Vec<u8>, String> {
     }
     let (nonce, ciphertext) = blob.split_at(NONCE_LEN);
     Aes256Gcm::new(key)
-        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .decrypt(&Nonce::try_from(nonce).map_err(|_| "bad nonce length".to_string())?, ciphertext)
         .map_err(|_| "decryption failed".to_string())
 }
 
@@ -237,25 +298,67 @@ const RENDERER_ENTRIES: &[&str] = &["settings"];
 /// Seal one text file into the app directory. Named directly, so callers inside the
 /// app (the mount's uid lists) can share this key without going through the
 /// WebView-facing name check, which exists to constrain what the renderer may name.
+///
+/// Written aside, flushed and renamed over the old file, so a reader never meets a half-written
+/// one and takes it for a file its key does not open.
 pub(crate) fn write_sealed(app: &AppHandle, file: &str, value: &str) -> Result<(), String> {
     let path = app_dir(app)?.join(file);
     let blob = seal(&data_key(app)?, value.as_bytes())?;
-    fs::write(path, blob).map_err(|e| e.to_string())
+    write_atomic(&path, &blob)
+}
+
+fn write_atomic(path: &std::path::Path, data: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = std::path::PathBuf::from(part);
+    let written = (|| {
+        let mut f = fs::File::create(&part)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&part, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    written.map_err(|e| e.to_string())
 }
 
 /// Read one sealed text file back. A blob that cannot be opened (tampered, or
 /// written under a different key) is reported as absent rather than as an error, so
 /// every caller falls back to its own empty state instead of failing: the app falls
-/// back to sign-in, and the mount to "nothing recorded yet".
+/// back to sign-in, and the mount to "nothing recorded yet". A key that cannot be had
+/// (the keyring did not answer) is an error, and nothing is touched.
 pub(crate) fn read_sealed(app: &AppHandle, file: &str) -> Result<Option<String>, String> {
     let path = app_dir(app)?.join(file);
     if !path.exists() {
         return Ok(None);
     }
+    let key = data_key(app)?;
+    open_or_set_aside(&path, &key)
+}
+
+/// Opens a sealed file with `key`. One that will not open is moved aside under a name that says
+/// so and kept, never deleted, so the next write does not land on it: the key it was sealed
+/// under (a keyring entry that comes back) may still open it.
+fn open_or_set_aside(path: &std::path::Path, key: &Key<Aes256Gcm>) -> Result<Option<String>, String> {
     let blob = fs::read(path).map_err(|e| e.to_string())?;
-    match unseal(&data_key(app)?, &blob) {
+    match unseal(key, &blob) {
         Ok(plain) => Ok(Some(String::from_utf8_lossy(&plain).into_owned())),
-        Err(_) => Ok(None),
+        Err(_) => {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(format!(".unreadable-{stamp}"));
+            if fs::rename(path, &aside).is_ok() {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                eprintln!("[secure_store] set aside a sealed file that would not open: {name}");
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -264,9 +367,16 @@ pub fn store_set(app: AppHandle, name: String, value: String) -> Result<(), Stri
     write_sealed(&app, &safe_name(&name)?, &value)
 }
 
+/// Read on a worker thread: the first read of a start asks the system keyring for the key (on
+/// Linux and macOS a round trip to another process, which can wait on a prompt), and a command
+/// that is not async runs on the main thread, where it would hold up the window. The writes stay
+/// on the main thread, so they keep the order the window sent them in and a read sent after a
+/// write always sees it.
 #[tauri::command]
-pub fn store_get(app: AppHandle, name: String) -> Result<Option<String>, String> {
-    read_sealed(&app, &safe_name(&name)?)
+pub async fn store_get(app: AppHandle, name: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || read_sealed(&app, &safe_name(&name)?))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -292,11 +402,15 @@ pub fn store_del(app: AppHandle, name: String) -> Result<(), String> {
 /// for them. It does not defend against code already running as this Windows user;
 /// only breaking the password-to-key binding would, and that would cost the vault's
 /// ability to verify a password locally at all.
+///
+/// Every sidecar start hands it over, and a replaced sidecar starts again, so it is kept in
+/// memory once loaded as the store key is.
 fn vault_meta_key(app: &AppHandle) -> Result<String, String> {
-    let raw = keystore_get_or_create(app, VAULT_KEY_FILE, VAULT_KEY_ENTROPY)?;
+    static KEY: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
+    let raw = cached_key(&KEY, app, VAULT_KEY_FILE, VAULT_KEY_ENTROPY)?;
     // Hex rather than base64: the JSON hop needs some text form, and hex costs no
     // dependency and cannot be confused with the base64 uids elsewhere in the logs.
-    Ok(raw.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(to_hex(&raw))
 }
 
 /// Handed to the sidecar over stdin at spawn: the app directory, and the key that
@@ -313,13 +427,13 @@ pub fn sidecar_init_params(app: &AppHandle) -> Result<serde_json::Value, String>
 
 #[cfg(test)]
 mod tests {
-    use super::{seal, unseal};
-    use aes_gcm::aead::{KeyInit, OsRng};
-    use aes_gcm::Aes256Gcm;
+    use super::{rand_key, seal, unseal};
+    use aes_gcm::aead::Generate;
+    use aes_gcm::{Aes256Gcm, Key};
 
     #[test]
     fn seal_unseal_round_trips() {
-        let key = Aes256Gcm::generate_key(&mut OsRng);
+        let key = Key::<Aes256Gcm>::generate();
         let plain = b"session tokens + key passphrases";
         let blob = seal(&key, plain).unwrap();
         assert_eq!(unseal(&key, &blob).unwrap(), plain);
@@ -327,7 +441,7 @@ mod tests {
 
     #[test]
     fn tampered_blob_is_rejected() {
-        let key = Aes256Gcm::generate_key(&mut OsRng);
+        let key = Key::<Aes256Gcm>::generate();
         let mut blob = seal(&key, b"secret").unwrap();
         let n = blob.len();
         blob[n - 1] ^= 0xff; // flip a tag byte
@@ -336,15 +450,87 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_closed() {
-        let a = Aes256Gcm::generate_key(&mut OsRng);
-        let b = Aes256Gcm::generate_key(&mut OsRng);
+        let a = Key::<Aes256Gcm>::generate();
+        let b = Key::<Aes256Gcm>::generate();
         let blob = seal(&a, b"data").unwrap();
         assert!(unseal(&b, &blob).is_err());
     }
 
     #[test]
+    fn a_file_that_will_not_open_is_set_aside_not_deleted() {
+        let dir = std::env::temp_dir().join(format!("pfp-sealed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings");
+        let old = rand_key();
+        let new = rand_key();
+        let old = Key::<Aes256Gcm>::try_from(old.as_slice()).unwrap();
+        let new = Key::<Aes256Gcm>::try_from(new.as_slice()).unwrap();
+        let blob = seal(&old, b"{\"theme\":\"dark\"}").unwrap();
+        std::fs::write(&path, &blob).unwrap();
+        assert_eq!(super::open_or_set_aside(&path, &old).unwrap().as_deref(), Some("{\"theme\":\"dark\"}"));
+        assert!(path.exists());
+        assert_eq!(super::open_or_set_aside(&path, &new).unwrap(), None);
+        assert!(!path.exists());
+        let aside: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), blob);
+        assert_eq!(super::open_or_set_aside(&aside[0], &old).unwrap().as_deref(), Some("{\"theme\":\"dark\"}"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sealed_write_replaces_the_file_whole_and_leaves_nothing_aside() {
+        let dir = std::env::temp_dir().join(format!("pfp-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.bin");
+        super::write_atomic(&path, b"first").unwrap();
+        super::write_atomic(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn truncated_blob_is_rejected() {
-        let key = Aes256Gcm::generate_key(&mut OsRng);
+        let key = Key::<Aes256Gcm>::generate();
         assert!(unseal(&key, &[0u8; 5]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stored_key_tests {
+    use super::{decode_stored_key, rand_key, to_hex};
+
+    #[test]
+    fn a_key_stored_as_hex_reads_back() {
+        let key = rand_key();
+        assert_eq!(decode_stored_key(to_hex(&key).as_bytes()), Some(key));
+        assert_eq!(decode_stored_key(to_hex(&key).to_uppercase().as_bytes()), Some(key));
+    }
+
+    #[test]
+    fn a_raw_key_an_earlier_build_stored_still_opens() {
+        let key = rand_key();
+        assert_eq!(decode_stored_key(&key), Some(key));
+    }
+
+    #[test]
+    fn a_key_the_keyring_kept_as_text_is_refused() {
+        // 32 raw bytes read as text: every byte that is not valid UTF-8 turns into U+FFFD.
+        let key: [u8; 32] = std::array::from_fn(|i| 0x80 + i as u8);
+        let altered = String::from_utf8_lossy(&key).into_owned();
+        assert_ne!(altered.len(), 32);
+        assert_eq!(decode_stored_key(altered.as_bytes()), None);
+    }
+
+    #[test]
+    fn anything_else_is_refused() {
+        assert_eq!(decode_stored_key(b""), None);
+        assert_eq!(decode_stored_key(&[7u8; 31]), None);
+        assert_eq!(decode_stored_key(&[b'a'; 63]), None);
+        assert_eq!(decode_stored_key(format!("+{}", "a".repeat(63)).as_bytes()), None);
+        assert_eq!(decode_stored_key("z".repeat(64).as_bytes()), None);
     }
 }

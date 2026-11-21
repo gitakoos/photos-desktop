@@ -23,8 +23,11 @@
 // The labels as the window lists them: found by part of a name, accents aside, and marked by how
 // many of the selected photos carry each.
 
-const fold = (text: string) =>
-  text.replace(/\s+/g, " ").trim().normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase();
+import { foldText } from "./searchQuery";
+
+/** A label's comparison key: blanks collapsed, trimmed, lower-cased and without accents. */
+export const labelKey = (text: string): string => foldText(text.replace(/\s+/g, " ").trim());
+const fold = labelKey;
 
 /** Two spellings of one label: case, accents and spacing aside. */
 export function sameLabel(a: string, b: string): boolean {

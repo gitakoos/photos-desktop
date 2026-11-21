@@ -200,11 +200,54 @@ pub fn app_taken_over(app: &AppHandle) {
 /// start, and the second process's own argv on a warm one. A switch is never a file, and
 /// a relative path would resolve against whichever process is asking, which on a warm
 /// launch is the wrong one, so only an absolute plain argument counts.
-fn launch_arg(argv: &[String]) -> Option<&str> {
-    argv.iter()
-        .skip(1)
-        .map(String::as_str)
-        .find(|a| !a.starts_with('-') && !a.starts_with('/') && Path::new(a).is_absolute())
+fn launch_arg(argv: &[String]) -> Option<String> {
+    argv.iter().skip(1).find_map(|a| file_arg(a))
+}
+
+/// One argument as a file to open. On Windows a `/` starts a switch, so only a path with a
+/// drive or a share counts.
+#[cfg(windows)]
+fn file_arg(a: &str) -> Option<String> {
+    (!a.starts_with('-') && !a.starts_with('/') && Path::new(a).is_absolute()).then(|| a.to_string())
+}
+
+/// One argument as a file to open. On Linux and macOS a path starts with `/`, and a file
+/// manager's "Open with" may hand over a `file://` URI instead (the Flatpak passes its
+/// document portal copy as one), which is read back to the path it names.
+#[cfg(not(windows))]
+fn file_arg(a: &str) -> Option<String> {
+    if a.starts_with('-') {
+        return None;
+    }
+    let path = match a.strip_prefix("file://") {
+        Some(rest) => uri_path(rest.strip_prefix("localhost").unwrap_or(rest))?,
+        None => a.to_string(),
+    };
+    Path::new(&path).is_absolute().then_some(path)
+}
+
+/// The path part of a `file://` URI with its `%XX` escapes read back; `None` for one that is
+/// not a local absolute path or does not decode.
+#[cfg(not(windows))]
+fn uri_path(rest: &str) -> Option<String> {
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(out).ok()?;
+    (!path.contains('\0')).then_some(path)
 }
 
 /// Show the file a launch argument named, and say whether there was one.
@@ -225,10 +268,10 @@ fn deliver(app: &AppHandle, argv: &[String], cold: bool) -> bool {
     };
     // A stale shortcut argument or the value of some future switch is not a request to
     // open anything. Only a file that is really there becomes one.
-    if !Path::new(candidate).is_file() {
+    if !Path::new(&candidate).is_file() {
         return false;
     }
-    let path = candidate.to_string();
+    let path = candidate;
     if cold {
         if let Some(flag) = app.try_state::<ViewerOnlyLaunch>() {
             flag.0.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -334,6 +377,12 @@ pub struct LocalFileInfo {
     /// Whether `rename_local_file` would accept this one, so the control can be absent
     /// rather than present and failing.
     can_rename: bool,
+    /// Whether `delete_local_file` can move this one to the trash, so the viewer can say it
+    /// cannot before asking rather than fail after.
+    can_trash: bool,
+    /// Whether an edited copy is written next to this file. Not beside the document portal's
+    /// copy of a file, where the editor asks where the copy goes instead.
+    saves_beside: bool,
 }
 
 /// Unix milliseconds from a filesystem timestamp. Dates before 1970 come back as the
@@ -577,7 +626,10 @@ pub async fn local_file_info(app: AppHandle, path: String) -> Result<LocalFileIn
         // A rename would either be refused outright or fail at the filesystem, and the
         // frontend would rather not offer it than show an error afterwards.
         let can_rename = !meta.permissions().readonly()
-            && !is_inside(&resolved, &crate::cloud_mount::sync_root_path());
+            && !is_inside(&resolved, &crate::cloud_mount::sync_root_path())
+            && !is_portal_copy(&resolved);
+        let can_trash = can_recycle(&resolved);
+        let saves_beside = !is_portal_copy(&resolved);
 
         Ok(LocalFileInfo {
             path: shown.to_string_lossy().into_owned(),
@@ -592,6 +644,8 @@ pub async fn local_file_info(app: AppHandle, path: String) -> Result<LocalFileIn
             camera: details.camera,
             needs_decode: needs_decode(&ext),
             can_rename,
+            can_trash,
+            saves_beside,
         })
     })
     .await
@@ -621,7 +675,7 @@ fn encode_uri_component(s: &str) -> String {
 
 /// The asset protocol's URL for one path. The Windows form is the one named in the CSP
 /// in tauri.conf.json, and the two have to keep saying the same thing.
-fn asset_url(path: &Path) -> String {
+pub(crate) fn asset_url(path: &Path) -> String {
     let encoded = encode_uri_component(&path.to_string_lossy());
     if cfg!(windows) {
         format!("http://asset.localhost/{encoded}")
@@ -919,9 +973,8 @@ fn decode_with_wic(_src: &Path, _dest: &Path, _orientation: u32) -> Result<(), S
 /// A name no other staged file can collide with, from the same source of randomness the
 /// store's keys come from.
 pub(crate) fn staged_name() -> String {
-    use aes_gcm::aead::rand_core::RngCore;
-    let mut raw = [0u8; 16];
-    aes_gcm::aead::OsRng.fill_bytes(&mut raw);
+    use aes_gcm::aead::Generate;
+    let raw = <[u8; 16]>::generate();
     let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     format!("local-{hex}.jpg")
 }
@@ -1046,6 +1099,9 @@ pub fn rename_local_file(app: AppHandle, path: String, new_name: String) -> Resu
     let resolved = checked_media_path(&app, &path)?;
     if is_inside(&resolved, &crate::cloud_mount::sync_root_path()) {
         return Err("files in the Proton Photos folder are renamed from the app".into());
+    }
+    if is_portal_copy(&resolved) {
+        return Err("a file opened from the file manager is renamed there".into());
     }
 
     let original_ext = resolved
@@ -1190,9 +1246,326 @@ mod recycle_tests {
     }
 }
 
+/// The desktop's trash, through GIO: the freedesktop trash in the home folder or at the top
+/// of the disk the file is on, and inside the Flatpak sandbox the trash portal, which moves
+/// it there from outside. GIO never falls back to deleting: where no trash can take the
+/// file, the call fails and the file stays where it is.
+///
+/// A file the file manager handed to the Flatpak arrives as the document portal's copy of
+/// it, and the trash portal refuses that copy. Its real file goes to the trash instead, when
+/// the sandbox can open it and it is the same file; otherwise nothing is touched.
+#[cfg(target_os = "linux")]
+pub(crate) fn recycle(path: &Path) -> Result<(), String> {
+    match trash_route(path, &document_roots()) {
+        TrashRoute::Direct => {
+            use gio::prelude::FileExt;
+            gio::File::for_path(path)
+                .trash(gio::Cancellable::NONE)
+                .map_err(|_| TRASH_ERR.to_string())?;
+        }
+        TrashRoute::Document(id) => {
+            let real = document_twin(path, id).ok_or(OUT_OF_REACH)?;
+            trash_through_portal(&real)?;
+        }
+        TrashRoute::Unreachable => return Err(OUT_OF_REACH.into()),
+    }
+    if path.exists() {
+        return Err(TRASH_ERR.into());
+    }
+    Ok(())
+}
+
+/// Whether `recycle` can take this file, asked before the delete is offered so the viewer
+/// can say so up front rather than fail after the question.
+#[cfg(target_os = "linux")]
+pub(crate) fn can_recycle(path: &Path) -> bool {
+    match trash_route(path, &document_roots()) {
+        TrashRoute::Direct => true,
+        TrashRoute::Document(id) => document_twin(path, id).is_some(),
+        TrashRoute::Unreachable => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn can_recycle(_path: &Path) -> bool {
+    true
+}
+
+/// Whether this is the document portal's copy of a file rather than the file itself. A
+/// rename there does not rename the real file: the portal moves it into a hidden file of
+/// its own beside it, so to the person the photo is simply gone.
+#[cfg(target_os = "linux")]
+pub(crate) fn is_portal_copy(path: &Path) -> bool {
+    trash_route(path, &document_roots()) != TrashRoute::Direct
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn is_portal_copy(_path: &Path) -> bool {
+    false
+}
+
+/// Where an edited copy of a document portal file goes, picked by the person in the save
+/// dialog (the file chooser portal inside the Flatpak), because a new file written beside
+/// the portal's copy lands as a hidden file of the portal's own. Opens in the original's real
+/// folder when the portal names it. "cancelled" when the dialog is dismissed. The path comes
+/// from the dialog, never from the page.
+pub(crate) fn pick_copy_place(
+    window: &tauri::WebviewWindow,
+    original: &Path,
+    name: &str,
+    ext: &str,
+    title: Option<&str>,
+) -> Result<PathBuf, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_parent(window)
+        .set_file_name(name)
+        .add_filter(ext, &[ext]);
+    if let Some(title) = title.filter(|t| !t.trim().is_empty()) {
+        dialog = dialog.set_title(title);
+    }
+    if let Some(folder) = portal_copy_real_folder(original) {
+        dialog = dialog.set_directory(folder);
+    }
+    let picked = dialog.blocking_save_file().ok_or("cancelled")?;
+    picked.into_path().map_err(|e| e.to_string())
+}
+
+/// Starts the error of a picked place whose name is already taken, so the page can say so
+/// and offer the save dialog again.
+pub(crate) const NAME_TAKEN: &str = "name taken";
+
+/// Create the picked file and fill it, refusing rather than overwriting: a name that is
+/// already there, the original's own included, is left as it is.
+pub(crate) fn write_picked_copy(
+    dest: &Path,
+    fill: impl FnOnce(std::fs::File) -> Result<(), String>,
+) -> Result<String, String> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                format!("{NAME_TAKEN}: a file with that name is already there, so nothing was written")
+            }
+            _ => format!("the copy could not be written: {e}"),
+        })?;
+    if let Err(e) = fill(file) {
+        // Only the file just created here, so no half-written copy is left behind.
+        let _ = std::fs::remove_file(dest);
+        return Err(e);
+    }
+    Ok(crate::strip_verbatim(dest.to_path_buf()).to_string_lossy().into_owned())
+}
+
+/// The real folder of a document portal file, where the portal can name it.
+#[cfg(target_os = "linux")]
+fn portal_copy_real_folder(path: &Path) -> Option<PathBuf> {
+    match trash_route(path, &document_roots()) {
+        TrashRoute::Document(id) => document_host_path(id)?.parent().map(Path::to_path_buf),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn portal_copy_real_folder(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// How a file reaches the trash on Linux.
+#[cfg(any(test, target_os = "linux"))]
+#[derive(Debug, PartialEq)]
+enum TrashRoute<'a> {
+    /// A path of its own, which GIO trashes.
+    Direct,
+    /// The document portal's copy of one file, by its document id.
+    Document(&'a str),
+    /// Anything else under the document portal, such as a file inside a shared folder.
+    Unreachable,
+}
+
+/// The route for `path`, given where the document portal is mounted. Only the exact
+/// `<root>/<id>/<name>` shape is one document's own file.
+#[cfg(any(test, target_os = "linux"))]
+fn trash_route<'a>(path: &'a Path, roots: &[PathBuf]) -> TrashRoute<'a> {
+    use std::path::Component;
+    let Some(rest) = roots.iter().find_map(|r| path.strip_prefix(r).ok()) else {
+        return TrashRoute::Direct;
+    };
+    let parts: Vec<Component> = rest.components().collect();
+    match parts.as_slice() {
+        [Component::Normal(id), Component::Normal(_)] => match id.to_str() {
+            Some(id) if is_document_id(id) => TrashRoute::Document(id),
+            _ => TrashRoute::Unreachable,
+        },
+        _ => TrashRoute::Unreachable,
+    }
+}
+
+/// A document id as the portal makes them: a short run of letters and digits, which keeps
+/// out its own folders such as `by-app`.
+#[cfg(any(test, target_os = "linux"))]
+fn is_document_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Where the document portal shows up in this process: `$XDG_RUNTIME_DIR/doc`, which inside
+/// the sandbox links to `/run/flatpak/doc`, the spelling a canonical path carries.
+#[cfg(target_os = "linux")]
+fn document_roots() -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/run/flatpak/doc")];
+    if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        let doc = PathBuf::from(run).join("doc");
+        if let Ok(real) = std::fs::canonicalize(&doc) {
+            roots.push(real);
+        }
+        roots.push(doc);
+    }
+    roots
+}
+
+/// The real file behind one document, opened for writing, when the sandbox can reach it and
+/// it is the file the viewer has open: a plain file of the same name, size and modification
+/// time. The document portal numbers its copies itself, so their inodes cannot be compared;
+/// the open file's own inode is what the trash portal checks the real path against.
+#[cfg(target_os = "linux")]
+fn document_twin(doc_path: &Path, id: &str) -> Option<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    let real = document_host_path(id)?;
+    if !real.is_absolute() || real.file_name() != doc_path.file_name() {
+        return None;
+    }
+    let shown = std::fs::metadata(doc_path).ok()?;
+    let link = std::fs::symlink_metadata(&real).ok()?;
+    if !shown.is_file() || !link.is_file() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(&real).ok()?;
+    let opened = file.metadata().ok()?;
+    let same = opened.is_file()
+        && opened.dev() == link.dev()
+        && opened.ino() == link.ino()
+        && opened.len() == shown.len()
+        && opened.mtime() == shown.mtime()
+        && opened.mtime_nsec() == shown.mtime_nsec();
+    same.then_some(file)
+}
+
+/// The real path of one document, from the document portal's `GetHostPaths` (version 5 of
+/// its interface). An older portal has no such call, and then the real file is out of reach.
+#[cfg(target_os = "linux")]
+fn document_host_path(id: &str) -> Option<PathBuf> {
+    use dbus::blocking::Connection;
+    use std::os::unix::ffi::OsStringExt;
+    let conn = Connection::new_session().ok()?;
+    let proxy = conn.with_proxy(
+        "org.freedesktop.portal.Documents",
+        "/org/freedesktop/portal/documents",
+        std::time::Duration::from_secs(5),
+    );
+    let (paths,): (std::collections::HashMap<String, Vec<u8>>,) = proxy
+        .method_call("org.freedesktop.portal.Documents", "GetHostPaths", (vec![id],))
+        .ok()?;
+    let mut bytes = paths.get(id)?.clone();
+    if bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    if bytes.is_empty() || bytes.contains(&0) {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// Hand an open file to the trash portal, which moves the file that descriptor is open on
+/// once it has checked that the file's path still names it.
+#[cfg(target_os = "linux")]
+fn trash_through_portal(file: &std::fs::File) -> Result<(), String> {
+    use dbus::blocking::Connection;
+    use std::os::unix::io::IntoRawFd;
+    let conn = Connection::new_session().map_err(|_| TRASH_ERR.to_string())?;
+    let proxy = conn.with_proxy(
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        std::time::Duration::from_secs(30),
+    );
+    let raw = file.try_clone().map_err(|_| TRASH_ERR.to_string())?.into_raw_fd();
+    // SAFETY: `raw` is a fresh duplicate nothing else owns, and the wrapper closes it.
+    let fd = unsafe { dbus::arg::OwnedFd::new(raw) };
+    let (done,): (u32,) = proxy
+        .method_call("org.freedesktop.portal.Trash", "TrashFile", (fd,))
+        .map_err(|_| TRASH_ERR.to_string())?;
+    if done != 1 {
+        return Err(TRASH_ERR.into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+const OUT_OF_REACH: &str =
+    "the app cannot reach that file where it is stored, so it was not moved to the trash and was left where it is";
+
+/// The Finder's Trash, through the file manager the Finder itself uses, which can put the
+/// file back. It fails rather than deleting when the volume has no Trash.
+#[cfg(target_os = "macos")]
+pub(crate) fn recycle(path: &Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager()
+        .trashItemAtURL_resultingItemURL_error(&url, None)
+        .map_err(|_| TRASH_ERR.to_string())?;
+    if path.exists() {
+        return Err(TRASH_ERR.into());
+    }
+    Ok(())
+}
+
 #[cfg(not(windows))]
-fn recycle(path: &Path) -> Result<(), String> {
-    std::fs::remove_file(path).map_err(|e| e.to_string())
+const TRASH_ERR: &str = "that file could not be moved to the trash, so it was left where it is";
+
+/// Proof that a delete lands in the trash, as on Windows: ignored by default because it puts
+/// one small file in the real trash and leaves it there. Run it by name after changing
+/// anything in `recycle`.
+#[cfg(all(test, not(windows)))]
+mod trash_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "puts a file in the real trash; run by name"]
+    fn a_deleted_file_lands_in_the_trash() {
+        // Under the home folder, whose own trash takes it whatever disk the temp folder is.
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let dir = home.join(".cache").join(format!("pfp-trash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pfp-trash-test.jpg");
+        std::fs::write(&path, b"not a real photo").unwrap();
+
+        recycle(&path).expect("the trash should have taken it");
+
+        assert!(!path.exists(), "the file should be gone from where it was");
+        #[cfg(target_os = "linux")]
+        {
+            let data = std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+                .unwrap();
+            let infos = std::fs::read_dir(data.join("Trash/info")).unwrap();
+            let noted = infos.flatten().any(|e| {
+                std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains("pfp-trash-test.jpg") && t.contains(&*dir.to_string_lossy()))
+            });
+            assert!(noted, "and the trash should know where it came from");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_the_trash_cannot_take_is_left_alone() {
+        // Nothing can be trashed that is not there, and nothing else is touched for it.
+        let missing = std::env::temp_dir().join(format!("pfp-not-there-{}.jpg", std::process::id()));
+        assert!(recycle(&missing).is_err());
+    }
 }
 
 /// Move a file, refusing rather than overwriting.
@@ -1311,26 +1684,52 @@ mod tests {
         assert_eq!(launch_arg(&argv(&[])), None);
         assert_eq!(launch_arg(&argv(&["photosforproton.exe"])), None, "the exe alone is not a request");
         assert_eq!(launch_arg(&argv(&["photosforproton.exe", "--update"])), None, "a switch is not a file");
-        assert_eq!(launch_arg(&argv(&["photosforproton.exe", "/S"])), None);
         assert_eq!(launch_arg(&argv(&["photosforproton.exe", "relative.jpg"])), None);
 
         #[cfg(windows)]
         {
-            assert_eq!(launch_arg(&argv(&["photosforproton.exe", r"C:\a\b.jpg"])), Some(r"C:\a\b.jpg"));
+            assert_eq!(launch_arg(&argv(&["photosforproton.exe", "/S"])), None);
+            assert_eq!(launch_arg(&argv(&["photosforproton.exe", r"C:\a\b.jpg"])).as_deref(), Some(r"C:\a\b.jpg"));
             // The exe is index 0 in both shapes, including the plugin's argv where it is
             // the SECOND process's own path.
             assert_eq!(
-                launch_arg(&argv(&[r"C:\install\photosforproton.exe", r"C:\a\b.jpg"])),
+                launch_arg(&argv(&[r"C:\install\photosforproton.exe", r"C:\a\b.jpg"])).as_deref(),
                 Some(r"C:\a\b.jpg")
             );
             assert_eq!(
-                launch_arg(&argv(&["photosforproton.exe", "--update", r"C:\a\b.jpg"])),
+                launch_arg(&argv(&["photosforproton.exe", "--update", r"C:\a\b.jpg"])).as_deref(),
                 Some(r"C:\a\b.jpg"),
                 "a switch does not hide the file behind it"
             );
             assert_eq!(
-                launch_arg(&argv(&["photosforproton.exe", r"C:\a\first.jpg", r"C:\a\second.jpg"])),
+                launch_arg(&argv(&["photosforproton.exe", r"C:\a\first.jpg", r"C:\a\second.jpg"])).as_deref(),
                 Some(r"C:\a\first.jpg")
+            );
+            assert_eq!(launch_arg(&argv(&["photosforproton.exe", "file:///C:/a/b.jpg"])), None);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let exe = "/app/bin/photosforproton";
+            assert_eq!(launch_arg(&argv(&[exe, "/home/a/b.jpg"])).as_deref(), Some("/home/a/b.jpg"));
+            assert_eq!(
+                launch_arg(&argv(&[exe, "--background", "/home/a/b.jpg"])).as_deref(),
+                Some("/home/a/b.jpg"),
+                "a switch does not hide the file behind it"
+            );
+            assert_eq!(
+                launch_arg(&argv(&[exe, "file:///run/user/1000/doc/1a2b/My%20Photo%20%282%29.jpg"])).as_deref(),
+                Some("/run/user/1000/doc/1a2b/My Photo (2).jpg"),
+                "a file manager's URI names the same file"
+            );
+            assert_eq!(launch_arg(&argv(&[exe, "file://localhost/home/a/b.jpg"])).as_deref(), Some("/home/a/b.jpg"));
+            assert_eq!(launch_arg(&argv(&[exe, "file://server/share/b.jpg"])), None, "only a file on this computer");
+            assert_eq!(launch_arg(&argv(&[exe, "file:///home/a/%2"])), None, "a broken escape is not a file");
+            assert_eq!(launch_arg(&argv(&[exe, "file:///home/a/%00.jpg"])), None);
+            assert_eq!(launch_arg(&argv(&[exe, "https://example.com/b.jpg"])), None);
+            assert_eq!(
+                launch_arg(&argv(&[exe, "/home/a/first.jpg", "/home/a/second.jpg"])).as_deref(),
+                Some("/home/a/first.jpg")
             );
         }
     }
@@ -1458,5 +1857,53 @@ mod tests {
         if let Some(sibling) = sibling {
             assert!(!is_inside(&sibling, &base));
         }
+    }
+
+    #[test]
+    fn a_picked_copy_never_overwrites_and_leaves_no_half_file() {
+        let dir = std::env::temp_dir().join(format!("pfp-picked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let taken = dir.join("taken.jpg");
+        std::fs::write(&taken, b"original").unwrap();
+
+        // The page reads "name taken:" to say so and offer the save dialog again.
+        let refused = write_picked_copy(&taken, |_| Ok(())).unwrap_err();
+        assert!(refused.starts_with("name taken:"), "{refused}");
+        assert_eq!(std::fs::read(&taken).unwrap(), b"original");
+
+        let failed = dir.join("failed.jpg");
+        let refused = write_picked_copy(&failed, |_| Err("disk full".into())).unwrap_err();
+        assert!(!refused.starts_with(NAME_TAKEN), "{refused}");
+        assert!(!failed.exists());
+
+        let fresh = dir.join("fresh.jpg");
+        let written = write_picked_copy(&fresh, |mut f| {
+            use std::io::Write;
+            f.write_all(b"edited").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&written).unwrap(), b"edited");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_one_documents_own_file_takes_the_document_route() {
+        let roots = [PathBuf::from("/run/flatpak/doc"), PathBuf::from("/run/user/1000/doc")];
+        fn route<'a>(p: &'a str, roots: &[PathBuf]) -> TrashRoute<'a> {
+            trash_route(Path::new(p), roots)
+        }
+
+        assert_eq!(route("/home/me/Pictures/a.jpg", &roots), TrashRoute::Direct);
+        assert_eq!(route("/run/flatpak/doc/22c2fe1f/b.jpg", &roots), TrashRoute::Document("22c2fe1f"));
+        assert_eq!(route("/run/user/1000/doc/9f5c145f/a b.jpg", &roots), TrashRoute::Document("9f5c145f"));
+        // The portal's own folders, a file inside a shared folder, and the bare mount are not
+        // one document's file, and a name that only starts the same way is not the mount.
+        assert_eq!(route("/run/flatpak/doc/by-app/eu.akoos.photos/22c2fe1f/b.jpg", &roots), TrashRoute::Unreachable);
+        assert_eq!(route("/run/flatpak/doc/22c2fe1f/Pictures/b.jpg", &roots), TrashRoute::Unreachable);
+        assert_eq!(route("/run/flatpak/doc/22c2fe1f", &roots), TrashRoute::Unreachable);
+        assert_eq!(route("/run/flatpak/doc", &roots), TrashRoute::Unreachable);
+        assert_eq!(route("/run/flatpak/doc/../doc/22c2fe1f/b.jpg", &roots), TrashRoute::Unreachable);
+        assert_eq!(route("/run/flatpak/docs/22c2fe1f/b.jpg", &roots), TrashRoute::Direct);
+        assert_eq!(route("/run/user/1000/doc/22c2fe1f/b.jpg", &roots), TrashRoute::Document("22c2fe1f"));
     }
 }

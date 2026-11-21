@@ -1,6 +1,6 @@
 [package]
 name = "setup"
-version = "1.3.0"
+version = "1.4.0"
 description = "Photos for Proton installer"
 authors = ["Akoos"]
 edition = "2021"
@@ -25,11 +25,11 @@ zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
 mslnk = "0.1"
 
 [target.'cfg(windows)'.dependencies]
-winreg = "0.52"
+winreg = "0.56"
 # Unregister the "Proton Photos" cloud sync root on uninstall (the API call notifies
 # the shell so Explorer drops the nav-pane entry; a raw registry delete does not).
-cloud-filter = "0.0.6"
-windows = { version = "0.61", features = [
+cloud-filter = "0.0.7"
+windows = { version = "0.62", features = [
     "Win32_System_Com",
     "Win32_Storage_FileSystem",
     "Win32_UI_Shell",

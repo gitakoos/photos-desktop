@@ -22,12 +22,40 @@
 
 // How people's names are told apart, the same rule as the phone's `personNameKey`.
 
+import { randomBytes } from "node:crypto";
+
 /**
  * Name compare for "is this the same name": spaces around it, how its letters are composed and their case
  * aside, accents kept, as on the phone. "adam" and "Adam" are one person, "Ádám" and "Adam" two.
  */
 export function foldPersonName(name: string): string {
   return name.trim().normalize("NFC").toLowerCase();
+}
+
+const HIDDEN_TOKEN = /^hidden[0-9a-f]{32}$/;
+const HIDDEN_TOKEN_PREFIX = "hidden";
+
+/**
+ * Whether `name` is the reserved label of an unnamed group that was hidden: it travels as an ordinary
+ * name so the group stays together on every device, and is never shown as one.
+ */
+export function isHiddenToken(name: string): boolean {
+  return HIDDEN_TOKEN.test(name);
+}
+
+/** Whether a typed name collides with the reserved labels, which no one can give. */
+export function isReservedName(name: string): boolean {
+  return name.startsWith(HIDDEN_TOKEN_PREFIX);
+}
+
+/** A fresh reserved label for an unnamed group about to be hidden. */
+export function newHiddenToken(): string {
+  return HIDDEN_TOKEN_PREFIX + randomBytes(16).toString("hex");
+}
+
+/** The name to show for `name`: null for no name and for a reserved label. */
+export function shownName(name: string | null): string | null {
+  return name && !isHiddenToken(name) ? name : null;
 }
 
 /** The key a piece of curation is kept under: its kind, the name as folded, and what it points at. */

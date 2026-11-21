@@ -30,9 +30,11 @@ import { arch, cpus, freemem, release, totalmem } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 
 import { scrubSecrets } from "../scrub.ts";
+import { keptCounts } from "./compression.ts";
 import { diag } from "./diag.ts";
 import { faceScanner } from "./faceScan.ts";
 import { labelList, labelStore } from "./labelStore.ts";
+import type { MissSummary } from "./scanMisses.ts";
 import { isReady, storeDir } from "./store.ts";
 import type { BackupStatus } from "./sharedBackup.ts";
 import { getUploadStatus } from "./upload.ts";
@@ -109,6 +111,8 @@ function stateLines(header: unknown[]): string[] {
     `Faces: ${f.state}, ${f.done} of ${f.total} photos, ${f.faces} faces, on ${f.accel ?? "-"}` +
       (f.search ? `; search index ${f.search.indexed} indexed, ${f.search.unreadable} unreadable, of ${f.search.total}` : ""),
   );
+  const misses = faceScanner.missSummary();
+  if (misses) lines.push(missLine(misses));
   const b = backupStatus();
   const ago = (at?: number | null) => (at ? `${Math.round((Date.now() - at) / 60_000)} min ago` : "never");
   lines.push(
@@ -131,7 +135,32 @@ function stateLines(header: unknown[]): string[] {
       (u.importing ? `; import ${u.importing.phase} ${u.importing.part}/${u.importing.parts}` : "") +
       (u.moveResult ? `; last move ${u.moveResult.moved} moved, ${u.moveResult.kept} kept` : ""),
   );
+  lines.push(keptLine(keptCounts()));
   return lines;
+}
+
+/**
+ * The photos the face and search scan could not read, in the phone's words, the causes largest first:
+ * "Scan misses: permanentSkipped=3 transientWaiting=1 skipCauses=undecodable:2,gaveUp:network:1 waitCauses=offline:1".
+ */
+export function missLine(m: MissSummary): string {
+  const causes = (key: string, counts: Record<string, number>) => {
+    const parts = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([cause, n]) => `${plain(cause)}:${n}`);
+    return parts.length ? ` ${key}=${parts.join(",")}` : "";
+  };
+  return (
+    `Scan misses: permanentSkipped=${m.skipped} transientWaiting=${m.waiting}` +
+    causes("skipCauses", m.skippedBy) +
+    causes("waitCauses", m.waitingBy)
+  );
+}
+
+/** The files compression left as they were, by kind and reason: "video hdr 12, photo not-smaller 3". */
+export function keptLine(counts: Record<string, number>): string {
+  const parts = Object.entries(counts).map(([key, n]) => `${key} ${n}`);
+  return `Compression kept as they were: ${parts.length ? parts.join(", ") : "none"}`;
 }
 
 /**

@@ -29,7 +29,7 @@ import {
   nameFaces,
   rejectFaces,
   dismissSuggestion,
-  listPeople,
+  hidePerson,
   personCandidates,
   mergePeople,
   notThisPerson,
@@ -37,12 +37,17 @@ import {
   removePhotosFromPerson,
   renamePerson,
   setPersonCover,
+  showPerson,
 } from "./facePeople.ts";
+import { diag } from "./diag.ts";
 import { faceScanner } from "./faceScan.ts";
 import { isScanSpeed } from "./scanPipeline.ts";
+import type { PeopleToken } from "./peopleFeed.ts";
 import { isReady } from "./store.ts";
 
 const str = (v: unknown, max = 500) => String(v ?? "").slice(0, max);
+const token = (v: any): PeopleToken | null =>
+  v && typeof v.epoch === "string" && typeof v.seq === "number" ? { epoch: v.epoch, seq: v.seq } : null;
 const ids = (v: unknown) =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 10_000) : [];
 
@@ -83,7 +88,18 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
     return faceScanner.getStatus();
   },
   faceSearchClear: () => faceScanner.clearSearch(),
-  facePeople: () => listPeople(store(), (link) => faceScanner.uidOfLink(link)),
+  // The whole list on a first read, after a restart or when the reader fell too far behind; else what changed since `since`.
+  facePeople: async (p) => {
+    const started = performance.now();
+    try {
+      const people = await faceScanner.peopleIndex.listAsync(store(), (link) => faceScanner.uidOfLink(link));
+      const feed = faceScanner.peopleFeed;
+      feed.update(people);
+      return feed.answer(token(p?.since));
+    } finally {
+      diag.record("faces", "list_people", performance.now() - started);
+    }
+  },
   facePersonRename: (p) => change(() => ({ id: renamePerson(store(), str(p?.id), str(p?.name, 100)) })),
   facePersonMerge: (p) => change(() => mergePeople(store(), str(p?.from), str(p?.into))),
   faceNameFaces: (p) => change(() => ({ id: nameFaces(store(), ids(p?.faceIds), str(p?.name, 100)) })),
@@ -106,5 +122,7 @@ export const faceHandlers: Record<string, (p: any) => unknown> = {
         Array.isArray(p?.uids) ? p.uids.filter((u: unknown) => typeof u === "string").slice(0, 10_000) : [],
       ),
     })),
+  facePersonHide: (p) => change(() => hidePerson(store(), str(p?.id))),
+  facePersonShow: (p) => change(() => showPerson(store(), str(p?.id))),
   facePersonCover: (p) => change(() => setPersonCover(store(), str(p?.id), str(p?.uid))),
 };

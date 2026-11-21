@@ -1,0 +1,208 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The sections of the viewer's details panel: file, camera, place, labels and people. */
+.dsec {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.dsec-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.dsec-h svg {
+  flex: none;
+  color: var(--fg-mute);
+  transition: transform 0.15s ease;
+}
+.dsec.closed .dsec-h svg {
+  transform: rotate(-90deg);
+}
+.dsec.closed .dsec-h {
+  padding-bottom: 0;
+}
+.dsec-h:focus-visible,
+.linkbtn:focus-visible,
+.chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.dsec-b {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* The first section sits right under the panel's title, with no rule above it. */
+.lbx-aside .lbx-details-head + .dsec {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.cam-model {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  overflow-wrap: anywhere;
+}
+.cam-sub {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+}
+.cam-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+  gap: 6px;
+}
+.cam-tile {
+  padding: 8px 4px;
+  border-radius: 10px;
+  background: var(--line-soft);
+  color: var(--fg-primary);
+  text-align: center;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.cam-tile small {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--fg-mute);
+}
+
+.placemap {
+  position: relative;
+  height: 132px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 0.5px solid var(--border);
+  background: var(--frame-bg);
+}
+.placemap-pinwrap {
+  background: transparent;
+  border: none;
+}
+.placemap-pin {
+  display: block;
+  width: 22px;
+  height: 30px;
+  background: var(--accent);
+  border: 2px solid #fff;
+  border-radius: 50% 50% 50% 0;
+  box-sizing: border-box;
+  transform: rotate(-45deg) scale(0.8);
+  transform-origin: 50% 100%;
+}
+.place-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--fg-primary);
+  overflow-wrap: anywhere;
+}
+.place-sub {
+  font-size: 12px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+.btnrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+}
+.linkbtn {
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.linkbtn:hover {
+  text-decoration: underline;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 8px 0 11px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip svg {
+  flex: none;
+  opacity: 0.75;
+}
+.chip.add {
+  padding: 0 11px 0 8px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--fg-dim);
+  font-weight: 500;
+}
+.chip.add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.chip:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

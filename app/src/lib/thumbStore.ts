@@ -53,6 +53,26 @@ export function disconnectThumbServer(): void {
   setServerBase(null);
 }
 
+/**
+ * Where the server streams a video for the viewer to play, a byte range at a time, or
+ * null while there is no server to ask.
+ */
+export function videoStreamUrl(uid: string): string | null {
+  return serverBase ? serverBase + encodeURIComponent(uid) + "/v" : null;
+}
+
+/**
+ * What follows a streamed video that failed: it is opened again, up to `retries` times, or
+ * fetched whole at once. A video the sidecar refused for good (too large to stream, kept
+ * offline over what is held in memory, no size from Proton, a signature that did not check
+ * out) goes straight to the whole file, where the older route plays it or says why it cannot.
+ */
+export async function afterStreamFailed(uid: string, tries: number, retries: number): Promise<"again" | "whole"> {
+  if (tries >= retries) return "whole";
+  const refused = await rpc<boolean>("videoNotStreamable", { uid }).catch(() => false);
+  return refused === true ? "whole" : "again";
+}
+
 /** A grid thumbnail's URL on the server, or null while there is no server to ask. */
 export function thumbUrl(uid: string): string | null {
   return serverBase ? serverBase + encodeURIComponent(uid) : null;

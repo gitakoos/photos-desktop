@@ -492,7 +492,9 @@ export function Shared({
                       </span>
                     )}
                   </div>
-                  <div className="g-album-name">{a.name || t("albums.untitled")}</div>
+                  <div className="g-album-name" title={a.name || undefined}>
+                    {a.name || t("albums.untitled")}
+                  </div>
                   <div className="g-album-count">
                     {t(
                       a.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other",

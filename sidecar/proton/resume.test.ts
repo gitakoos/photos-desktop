@@ -38,7 +38,7 @@ vi.mock("./api.ts", async (original) => ({
 }));
 
 import { ProtonSession } from "./session.ts";
-import { SESSION_FILE, initStore, readSealedOrDiscard, setDataKey, writeSealedAtomic } from "./store.ts";
+import { SESSION_FILE, initStore, readSealedOrSetAside, setDataKey, writeSealedAtomic } from "./store.ts";
 
 const saved = { uid: "u1", accessToken: "access-1", refreshToken: "refresh-1", username: "a", userKeyPassphrases: {}, method: "browser" };
 
@@ -54,7 +54,7 @@ describe("resuming a saved session", () => {
     void (session as any).resumeSession(saved, "");
     await new Promise((r) => setTimeout(r, 20));
 
-    const written = JSON.parse(readSealedOrDiscard(join(dir, SESSION_FILE))!.toString("utf8"));
+    const written = JSON.parse(readSealedOrSetAside(join(dir, SESSION_FILE))!.toString("utf8"));
     expect(written.refreshToken).toBe("refresh-2");
     expect(written.method).toBe("browser");
   });

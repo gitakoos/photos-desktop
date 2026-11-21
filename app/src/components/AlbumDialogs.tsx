@@ -36,6 +36,7 @@ import { filterAlbums } from "../lib/albumSearch";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { CloseIcon, ImageIcon, SearchIcon } from "./icons";
 import type { Album } from "../views/Albums";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/Confirm.css";
 import "../styles/AlbumDialogs.css";
 
@@ -82,10 +83,7 @@ export function NameDialog({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onCancel();
-      }}
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel" role="dialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">{title}</h3>
@@ -216,10 +214,7 @@ export function AlbumPicker({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onCancel();
-      }}
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel ad-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">
@@ -337,10 +332,7 @@ export function AlbumFreeUpDialog({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onKeep();
-      }}
+      {...backdropClose(onKeep)}
     >
       <div className="cf-panel" role="dialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">{t("albums.freeUpTitle")}</h3>
@@ -394,10 +386,7 @@ export function AlbumPhotoLossDialog({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onCancel();
-      }}
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel" role="alertdialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">

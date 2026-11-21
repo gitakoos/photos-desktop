@@ -152,3 +152,14 @@
   cursor: default;
   opacity: 0.5;
 }
+
+/* The picker's search, at the head's right before its close button. */
+.ap-search {
+  align-self: center;
+  flex: 0 1 420px;
+}
+/* The Labels page the picker's label chips open, over the picker, hung from its right corner. */
+.ap-labels {
+  z-index: 1300;
+  transform-origin: top right;
+}

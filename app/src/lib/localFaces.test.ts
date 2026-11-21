@@ -32,6 +32,7 @@ import {
   statusLine,
   type FaceScanStatus,
 } from "./localFaces";
+import { PeopleFeed, applyPeopleAnswer, tokenOf } from "../../../sidecar/proton/peopleFeed.ts";
 
 const status = (over: Partial<FaceScanStatus>): FaceScanStatus => ({
   state: "scanning",
@@ -113,5 +114,28 @@ describe("the scan speed in Settings", () => {
     expect(isScanSpeed("balanced")).toBe(true);
     expect(isScanSpeed("turbo")).toBe(false);
     expect(isScanSpeed(undefined)).toBe(false);
+  });
+});
+
+describe("reading the people as changes", () => {
+  it("applies what changed on top of the list held, and asks for the whole list when it does not follow on", () => {
+    const feed = new PeopleFeed("run");
+    const person = (id: string, uids: string[]) => ({ id, name: null, isOther: false, uids, cover: null });
+    const list = (unnamed: ReturnType<typeof person>[]) => ({
+      named: [],
+      unnamed,
+      hidden: [],
+      leftover: 0,
+      suggestions: [],
+      loose: { faces: [], total: 0 },
+    });
+    feed.update(list([person("a", ["1", "2"]), person("b", ["3", "4"])]));
+    const held = applyPeopleAnswer(null, feed.answer(tokenOf(null)))!;
+    feed.update(list([person("b", ["3", "4", "5"])]));
+    const answer = feed.answer(tokenOf(held));
+    expect(answer.full).toBe(false);
+    const next = applyPeopleAnswer(held, answer)!;
+    expect(next.list.unnamed).toEqual([person("b", ["3", "4", "5"])]);
+    expect(applyPeopleAnswer({ ...held, epoch: "other" }, answer)).toBeNull();
   });
 });

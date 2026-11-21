@@ -65,7 +65,7 @@ export function parseMvhdCreationTime(body: Buffer): Date | null {
  * null), or null. Reads only each box's header, then skips its length, so finding `mvhd`
  * costs a handful of tiny reads even in a huge file.
  */
-async function findBox(
+export async function findBox(
   fh: FileHandle,
   from: number,
   limit: number | null,

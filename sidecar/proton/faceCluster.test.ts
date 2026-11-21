@@ -24,13 +24,16 @@ import { describe, expect, it } from "vitest";
 import { direction, faceOf, seeded } from "./testFaces.ts";
 import {
   assignIncremental,
+  assignIncrementalAsync,
   attractToNamedClusters,
+  attractToNamedClustersAsync,
   clusterFaces,
   dot,
   meanDirection,
   resolveClusterNames,
   splitOutUnclaimedNames,
   suggestPersonMatches,
+  timeSlicer,
   type FaceSample,
 } from "./faceCluster.ts";
 
@@ -153,5 +156,96 @@ describe("suggestions", () => {
       [["u1", meanDirection([faceOf(a, rand)])], ["u2", direction(rand)]],
     );
     expect(out.map((s) => [s.named, s.unnamed])).toEqual([["anna", "u1"]]);
+  });
+});
+
+/** A library of `people` identities with `each` faces apiece, some weak, and some strays. */
+function crowd(seed: number, people: number, each: number, strays: number): FaceSample[] {
+  const rand = seeded(seed);
+  const out: FaceSample[] = [];
+  for (let p = 0; p < people; p++) {
+    const base = direction(rand);
+    for (let i = 0; i < each; i++) {
+      const weak = rand() < 0.2;
+      out.push(sample(faceOf(base, rand, weak ? 0.9 : 0.5), weak ? 0.6 + rand() * 0.1 : 0.8 + rand() * 0.2, !weak, rand() < 0.05));
+    }
+  }
+  for (let i = 0; i < strays; i++) out.push(sample(direction(rand), 0.7 + rand() * 0.3, rand() < 0.5));
+  // Shuffled, so the order the faces arrive in is not the order they were made in.
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/** Counts the turns the rest of the process got while `work` ran. */
+async function turnsDuring<T>(work: () => Promise<T>): Promise<{ out: T; turns: number }> {
+  let turns = 0;
+  let live = true;
+  const tick = () => {
+    if (!live) return;
+    turns++;
+    setImmediate(tick);
+  };
+  setImmediate(tick);
+  const out = await work();
+  live = false;
+  return { out, turns };
+}
+
+const never = () => undefined;
+
+describe("long face loops", () => {
+  it("give the rest of the process its turn while a large library is grouped, with the same groups", async () => {
+    const samples = crowd(40, 30, 40, 600);
+    const { out, turns } = await turnsDuring(() => clusterFaces(samples));
+    const straight = await clusterFaces(samples, undefined, undefined, undefined, never);
+    expect(turns).toBeGreaterThan(5);
+    expect(Array.from(out)).toEqual(Array.from(straight));
+    expect(new Set(Array.from(out).filter((g) => g >= 0)).size).toBeGreaterThan(20);
+  });
+
+  it("group alike however often the turn is given", async () => {
+    const samples = crowd(41, 12, 15, 40);
+    const straight = await clusterFaces(samples, undefined, undefined, undefined, never);
+    const { out, turns } = await turnsDuring(() => clusterFaces(samples, undefined, undefined, undefined, timeSlicer(0)));
+    expect(turns).toBeGreaterThan(100);
+    expect(Array.from(out)).toEqual(Array.from(straight));
+  });
+
+  it("run a short loop straight through", async () => {
+    let now = 0;
+    const slice = timeSlicer(8, () => now);
+    expect(slice()).toBeUndefined();
+    now = 7;
+    expect(slice()).toBeUndefined();
+    now = 8;
+    const turn = slice();
+    expect(turn).toBeInstanceOf(Promise);
+    await turn;
+    expect(slice()).toBeUndefined();
+  });
+
+  it("place new faces and pull them to named people alike while giving turns", async () => {
+    const rand = seeded(42);
+    const centroids = Array.from({ length: 40 }, () => direction(rand));
+    const faces = crowd(43, 40, 10, 100);
+    const placed = await turnsDuring(() => assignIncrementalAsync(faces, centroids, undefined, undefined, timeSlicer(0)));
+    expect(placed.turns).toBeGreaterThan(100);
+    expect(Array.from(placed.out)).toEqual(Array.from(assignIncremental(faces, centroids)));
+
+    const assignment = await clusterFaces(faces, undefined, undefined, undefined, never);
+    const names = new Map<number, string>([
+      [0, "Anna"],
+      [1, "Bela"],
+      [2, "Cili"],
+    ]);
+    const confirmed = faces.map((_, i) => (i % 37 === 0 ? "Anna" : null));
+    const blocked = faces.map((_, i) => (i % 11 === 0 ? new Set(["Bela"]) : undefined));
+    const args = [faces.map((f) => f.embedding), faces.map((f) => f.score), assignment, names, confirmed, 0.58, blocked] as const;
+    const pulled = await turnsDuring(() => attractToNamedClustersAsync(...args, timeSlicer(0)));
+    expect(pulled.turns).toBeGreaterThan(100);
+    expect(Array.from(pulled.out)).toEqual(Array.from(attractToNamedClusters(...args)));
   });
 });

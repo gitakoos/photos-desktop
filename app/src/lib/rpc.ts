@@ -59,6 +59,8 @@ const TIMEOUT_MS: Record<string, number> = {
   getAlbumPhotos: 5 * MINUTE,
   getAlbumPhotoUids: 5 * MINUTE,
   listTrashed: 5 * MINUTE,
+  // The same, behind the background lane's sweeps.
+  listTrashedAhead: 10 * MINUTE,
   getShared: 5 * MINUTE,
   // A batch of decrypts admitted below everything else, so the wait for the channel
   // can dwarf the work itself.
@@ -67,14 +69,24 @@ const TIMEOUT_MS: Record<string, number> = {
 
   // Whole files: a video crosses as one payload, and an update is an installer.
   getVideo: 15 * MINUTE,
+  // A Live Photo's clip, or the one cut out of a motion photo's file.
+  getMotionClip: 5 * MINUTE,
+  saveEditedMedia: 60 * MINUTE,
+  // The video editor following and stopping its own Drive download: short answers.
+  videoEditProgress: MINUTE,
+  videoEditCancel: MINUTE,
   downloadUpdate: 15 * MINUTE,
 
   // Mutations the SDK batches ten links at a time, over a selection with no ceiling on
   // it, plus the empty that walks the whole trash.
   trashPhotos: 15 * MINUTE,
+  // A chunk of duplicate groups: the same trashing, plus a check that each kept copy is still there.
+  duplicatesTrash: 15 * MINUTE,
   restorePhotos: 15 * MINUTE,
   deletePhotosForever: 15 * MINUTE,
   emptyTrash: 15 * MINUTE,
+  // Walks the trash's items, without reading them, while Proton empties it.
+  trashCount: 5 * MINUTE,
   setFavorite: 15 * MINUTE,
   addPhotosToAlbum: 15 * MINUTE,
   removePhotosFromAlbum: 15 * MINUTE,
@@ -83,9 +95,12 @@ const TIMEOUT_MS: Record<string, number> = {
   // Opening the account: the saved session, then the account keys. Giving up early here
   // costs the user their password a second time, so it is the most generous of the lot.
   unlock: 5 * MINUTE,
+  // The host first waits up to 90 s for the shared backup to save what sign-out deletes.
+  signOut: 3 * MINUTE,
 
   // Reads every chosen photo's node for the date editor; a big selection takes a while.
   dateEditInfo: 10 * MINUTE,
+  metaInfo: 10 * MINUTE,
 };
 
 /** Rejects if `work` has not settled within `ms`, and never leaves a timer behind. */
@@ -113,8 +128,8 @@ export type RpcOptions = {
    * not free just because its result is ignored: it still holds its place in the queue
    * and still spends the channel when it gets there, in front of whatever the user is
    * actually looking at. Aborting is what makes it stop costing anything: the call is
-   * never sent at all when the signal is already down, and is dropped from the host's
-   * queue when it is already on its way.
+   * never sent at all when the signal is already down, is dropped from the host's queue
+   * when it is already on its way, and is told to stop when the sidecar is already on it.
    *
    * An aborted call rejects. Every caller that passes a signal already treats a missing
    * answer the same as a failed one, which is what makes that safe.

@@ -35,6 +35,41 @@
   background: var(--surface);
   border: 1px solid var(--border);
   box-shadow: var(--menu-shadow);
+  max-height: calc(100vh - 110px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  /* Opens as the right-click menu does, from the corner it hangs from (the right one when
+     it is anchored at the right). */
+  transform-origin: top left;
+  animation: cm-in 0.13s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+/* Closing: it sinks back toward its corner as it fades, and takes no clicks while it does. */
+.fp.closing {
+  pointer-events: none;
+  animation: fp-out 0.12s ease-in both;
+}
+@keyframes fp-out {
+  to {
+    opacity: 0;
+    transform: scale(0.96) translateY(-4px);
+  }
+}
+
+/* A page turned to in the open panel slides in: the Labels page from the right, as a
+   person's side panel does, and the filters back from the left. */
+.fp-page-on {
+  animation: lib-findin 0.18s ease;
+}
+.fp-page-back {
+  animation: fp-back 0.18s ease;
+}
+@keyframes fp-back {
+  from {
+    transform: translateX(-24px);
+    opacity: 0;
+  }
 }
 
 .fp-head {
@@ -100,4 +135,72 @@
 
 .fp-chips + .fp-label {
   margin-top: 16px;
+}
+
+/* Any / All under the label chips, once two or more are picked. It opens its row as it
+   fades in, and folds it away as it goes. */
+.fp-seg {
+  width: fit-content;
+  margin-top: 12px;
+  overflow: hidden;
+  animation: fp-row-in 0.18s ease backwards;
+}
+.fp-seg.leaving {
+  pointer-events: none;
+  animation: fp-row-out 0.14s ease-in both;
+}
+@keyframes fp-row-in {
+  from {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+  }
+  to {
+    max-height: 44px;
+    margin-top: 12px;
+    opacity: 1;
+  }
+}
+@keyframes fp-row-out {
+  from {
+    max-height: 44px;
+  }
+  to {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+  }
+}
+
+/* A chip picked or let go changes colour as the app's other choices do. */
+.fp .g-chip {
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+/* The Labels page: a search, every label with its photo count, and the Show button. */
+.fp-search {
+  margin: 0 0 10px;
+}
+
+.fp-labellist {
+  max-height: min(360px, 50vh);
+  margin: 0 -8px;
+}
+
+.fp-show {
+  width: 100%;
+  height: 38px;
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fp,
+  .fp.closing,
+  .fp-page-on,
+  .fp-page-back,
+  .fp-seg,
+  .fp-seg.leaving {
+    animation: none;
+  }
 }

@@ -29,11 +29,10 @@
  * come out of a zip, and only after checking the disk can hold them.
  */
 
-import { createWriteStream } from "node:fs";
-import { mkdir, open, readFile, readdir, rm, stat, statfs } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm, stat, statfs, utimes, type FileHandle } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl";
 
@@ -42,9 +41,19 @@ import { MAX_SIDECAR_BYTES, SidecarIndex, albumFolderOf, parseSidecar, type Side
 /** Room left on the disk beyond the unpacked export, so unpacking never fills it up. */
 const FREE_SPACE_MARGIN = 1024 * 1024 * 1024;
 
+/**
+ * The staging folder's name. The host names the folder in `PFP_IMPORT_DIR` when it starts the
+ * sidecar: on Linux a folder on disk, as /tmp there is often a small RAM disk that a Takeout
+ * export does not fit in.
+ */
+const IMPORT_STAGING = "pfp-import";
+
 /** The folder every unpacked export lives in, and the only one an import may delete. */
 export function importStagingDir(): string {
-  return join(tmpdir(), "pfp-import");
+  const named = process.env.PFP_IMPORT_DIR;
+  return named && isAbsolute(named) && basename(named) === IMPORT_STAGING
+    ? named
+    : join(tmpdir(), IMPORT_STAGING);
 }
 
 /** Whether `path` is one of this app's unpacked exports, never anything of the user's. */
@@ -59,6 +68,24 @@ export async function discardStagedImport(root: string): Promise<void> {
   if (isStagedImport(root)) await rm(root, { recursive: true, force: true }).catch(() => {});
 }
 
+/** How old an unpacked export must be before a new import clears it as left behind. */
+const STALE_STAGING_MS = 24 * 3600_000;
+
+/**
+ * Deletes unpacked exports a crash or a forced quit left behind. Only ones older than a day go,
+ * so an import another window of this app is still preparing is never touched. On disk, unlike
+ * /tmp, nothing else would ever clear them.
+ */
+export async function sweepStaleStaging(now = Date.now()): Promise<void> {
+  const dir = importStagingDir();
+  const names = await readdir(dir).catch(() => [] as string[]);
+  for (const name of names) {
+    const root = join(dir, name);
+    const info = await stat(root).catch(() => null);
+    if (info && now - info.mtimeMs > STALE_STAGING_MS) await discardStagedImport(root);
+  }
+}
+
 /** One photo or video of an export, as it will upload. */
 export type ExportItem = {
   /** Full path on disk. */
@@ -68,6 +95,8 @@ export type ExportItem = {
   sidecar?: SidecarMeta;
   /** A Live Photo's video: uploaded with the photo as one item rather than on its own. */
   liveVideo?: string;
+  /** Other videos of the same still, from its copies in the export: each goes up on its own. */
+  moreVideos?: string[];
   /** The other albums the export holds a copy of this photo in; it joins those too. */
   alsoIn?: string[];
 };
@@ -247,13 +276,37 @@ async function mergeCopies(items: ExportItem[]): Promise<ExportItem[]> {
     }
     kept.sidecar = kept.sidecar ?? item.sidecar;
     if (item.sidecar?.favorited && kept.sidecar) kept.sidecar = { ...kept.sidecar, favorited: true };
-    kept.liveVideo = kept.liveVideo ?? item.liveVideo;
+    // A copy's own video goes up too unless it is the kept one: the review matches the bytes.
+    if (!kept.liveVideo) kept.liveVideo = item.liveVideo;
+    else if (item.liveVideo && item.liveVideo !== kept.liveVideo) kept.moreVideos = [...(kept.moreVideos ?? []), item.liveVideo];
   }
   return out;
 }
 
 /** Progress of an unpack, in bytes of the entries kept. */
 export type UnpackProgress = (done: number, total: number) => void;
+
+/** How many bytes of one entry are written between two progress reports. */
+const UNPACK_PROGRESS_STEP = 4 * 1024 * 1024;
+
+/**
+ * Creates `path` for writing, never over a file already there: two entries whose names differ
+ * only in case are one file on a disk that ignores case (APFS, NTFS), and the second would
+ * replace the first. The second becomes `name (2).ext`, the next `name (3).ext`, and so on.
+ */
+export async function openFresh(path: string): Promise<{ handle: FileHandle; path: string }> {
+  const ext = extname(path);
+  const stem = path.slice(0, path.length - ext.length);
+  for (let n = 1; n <= 10_000; n++) {
+    const candidate = n === 1 ? path : `${stem} (${n})${ext}`;
+    try {
+      return { handle: await open(candidate, "wx"), path: candidate };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    }
+  }
+  throw new Error("no free name to unpack an entry to");
+}
 
 /**
  * Unpacks the media and sidecars of one zip into a fresh folder under the staging
@@ -266,14 +319,15 @@ export async function unpackZip(
   onProgress: UnpackProgress = () => {},
   signal?: AbortSignal,
 ): Promise<string> {
-  const keep = (name: string, size: number) =>
+  const keep = (name: string | null, size: number): name is string =>
+    name !== null &&
     !name.endsWith("/") &&
     (isMedia(name) || (name.toLowerCase().endsWith(".json") && size <= MAX_SIDECAR_BYTES));
 
   // First the central directory alone, to know what unpacking will cost.
   let total = 0;
   await eachEntry(zipPath, async (entry) => {
-    if (keep(entry.fileName, entry.uncompressedSize)) total += entry.uncompressedSize;
+    if (keep(entryPath(entry), entry.uncompressedSize)) total += entry.uncompressedSize;
   });
   await ensureFreeSpace(total, "to unpack this export");
 
@@ -284,14 +338,31 @@ export async function unpackZip(
   try {
     await eachEntry(zipPath, async (entry, zip) => {
       if (signal?.aborted) throw new Error("cancelled");
-      if (!keep(entry.fileName, entry.uncompressedSize)) return;
-      // yauzl already refuses absolute names and `..`; this holds even if it ever stopped.
-      const dest = resolve(root, ...entry.fileName.split("/"));
+      const name = entryPath(entry);
+      if (!keep(name, entry.uncompressedSize)) return;
+      const dest = resolve(root, ...name.split("/"));
       if (!dest.startsWith(root + sep)) return;
       await mkdir(dirname(dest), { recursive: true });
-      const stream = await zip.openReadStreamPromise(entry);
-      await pipeline(stream, createWriteStream(dest));
-      done += entry.uncompressedSize;
+      const { handle, path: file } = await openFresh(dest);
+      const stream = await zip.openReadStreamPromise(entry).catch(async (e) => {
+        await handle.close();
+        throw e;
+      });
+      // Counted as it is written, so one large video does not hold the bar still until it ends.
+      const before = done;
+      let written = 0;
+      let reported = 0;
+      stream.on("data", (chunk: Buffer) => {
+        written += chunk.length;
+        if (written - reported >= UNPACK_PROGRESS_STEP) {
+          reported = written;
+          onProgress(before + Math.min(written, entry.uncompressedSize), total);
+        }
+      });
+      await pipeline(stream, handle.createWriteStream());
+      const modified = entryModified(entry);
+      if (modified) await utimes(file, modified, modified).catch(() => {});
+      done = before + entry.uncompressedSize;
       onProgress(done, total);
     });
   } catch (e) {
@@ -352,13 +423,36 @@ async function* walk(root: string): AsyncGenerator<string> {
   }
 }
 
+/**
+ * An entry's path inside the zip with any leading slashes dropped, or null when it is not one to
+ * unpack: a drive letter, or a `..` step out of the folder. A Dropbox download carries a `/` entry of
+ * its own, which the zip reader would otherwise refuse together with the whole archive.
+ */
+function entryPath(entry: yauzl.Entry): string | null {
+  const name = yauzl.getFileNameLowLevel(entry.generalPurposeBitFlag, entry.fileNameRaw, entry.extraFields, false);
+  const path = name.replace(/^\/+/, "");
+  if (!path || /^[a-zA-Z]:/.test(path) || path.split("/").includes("..")) return null;
+  return path;
+}
+
+/** 1980-01-02T00:00:00Z: a zip with no time stores 1 January 1980, which is no date at all. */
+const DOS_EPOCH_END_MS = 315_619_200_000;
+const FUTURE_SLACK_MS = 24 * 3600_000;
+
+/** When the entry was last changed by the zip's own record, or null when it holds no real time. */
+function entryModified(entry: yauzl.Entry, now = Date.now()): Date | null {
+  const when = entry.getLastModDate();
+  const ms = when.getTime();
+  return Number.isFinite(ms) && ms > DOS_EPOCH_END_MS && ms <= now + FUTURE_SLACK_MS ? when : null;
+}
+
 /** Visits a zip's entries one at a time, each awaited before the next is read. */
 function eachEntry(
   zipPath: string,
   visit: (entry: yauzl.Entry, zip: yauzl.ZipFile) => Promise<void>,
 ): Promise<void> {
   return new Promise((resolvePromise, reject) => {
-    yauzl.open(zipPath, { lazyEntries: true, autoClose: true }, (err, zip) => {
+    yauzl.open(zipPath, { lazyEntries: true, autoClose: true, decodeStrings: false }, (err, zip) => {
       if (err || !zip) {
         reject(err ?? new Error("could not open the zip"));
         return;

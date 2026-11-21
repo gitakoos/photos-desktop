@@ -20,12 +20,19 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
-import { cameraOf, editedName, locationOf } from "./editor.ts";
+import { addCopyToAlbum, cameraOf, editedName, joinSourceAlbum, locationOf, savedEditName } from "./editor.ts";
 
 describe("editedName", () => {
   const when = new Date(2026, 8, 5, 14, 3, 9); // 2026-09-05 14:03:09 local
+
+  it("names a copy that is not an edit by the stem it is given, without the edit tag", () => {
+    expect(savedEditName({ name: "Collage", fileStem: "Collage" }, when)).toBe("Collage_20260905_140309.jpg");
+    expect(savedEditName({ name: "beach.jpg" }, when)).toBe("beach_edit_20260905_140309.jpg");
+    expect(savedEditName({ name: "beach.jpg", fileStem: "../a/b:c" }, when)).toBe("..abc_20260905_140309.jpg");
+    expect(savedEditName({ name: "beach.jpg", fileStem: "  " }, when)).toBe("beach_edit_20260905_140309.jpg");
+  });
 
   it("keeps the stem and stamps a local timestamp with a .jpg extension", () => {
     expect(editedName("beach.HEIC", when)).toBe("beach_edit_20260905_140309.jpg");
@@ -94,5 +101,54 @@ describe("cameraOf", () => {
     expect(cameraOf(null)).toBeNull();
     expect(cameraOf({})).toBeNull();
     expect(cameraOf({ Camera: { Device: "   " } })).toBeNull();
+  });
+});
+
+describe("addCopyToAlbum", () => {
+  it("adds the saved copy, alone, to the album it was opened from", async () => {
+    const add = vi.fn(async () => [{ uid: "vol~copy", ok: true }]);
+    const added = await addCopyToAlbum(add, "vol~album", "vol~copy");
+    expect(added).toBe(true);
+    expect(add).toHaveBeenCalledWith("vol~album", ["vol~copy"]);
+  });
+
+  it("reports a copy the server refused to add", async () => {
+    const add = async () => [{ uid: "vol~copy", ok: false, error: "album is full" }];
+    expect(await addCopyToAlbum(add, "vol~album", "vol~copy")).toBe(false);
+  });
+
+  it("reports an add that came back with no answer for the copy", async () => {
+    const add = async () => [];
+    expect(await addCopyToAlbum(add, "vol~album", "vol~copy")).toBe(false);
+  });
+
+  it("reports a thrown add instead of failing the save", async () => {
+    const add = async (): Promise<{ uid: string; ok: boolean }[]> => {
+      throw new Error("Not signed in");
+    };
+    expect(await addCopyToAlbum(add, "vol~album", "vol~copy")).toBe(false);
+  });
+});
+
+describe("joinSourceAlbum", () => {
+  it("leaves a copy saved outside an album as it is, without asking to add it", async () => {
+    const add = vi.fn(async () => [{ uid: "vol~copy", ok: true }]);
+    const out = await joinSourceAlbum(add, { uid: "vol~copy", size: 10 }, null);
+    expect(out).toEqual({ uid: "vol~copy", size: 10 });
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("returns the saved copy unmarked once it is in the album", async () => {
+    const add = async () => [{ uid: "vol~copy", ok: true }];
+    expect(await joinSourceAlbum(add, { uid: "vol~copy" }, "vol~album")).toEqual({ uid: "vol~copy" });
+  });
+
+  it("keeps the saved copy and marks it when the album add fails", async () => {
+    const add = async () => [{ uid: "vol~copy", ok: false, error: "refused" }];
+    expect(await joinSourceAlbum(add, { uid: "vol~copy", size: 10 }, "vol~album")).toEqual({
+      uid: "vol~copy",
+      size: 10,
+      albumFailed: true,
+    });
   });
 });

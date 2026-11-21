@@ -20,7 +20,17 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { photoSpan } from "../lib/albumSpan";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
@@ -29,6 +39,24 @@ import { pinOffline, unpinOffline } from "../lib/offline";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { filterAlbums } from "../lib/albumSearch";
+import {
+  dragTo,
+  forSave,
+  gather,
+  linkOf,
+  moveOnto,
+  moveToEnd,
+  moveToStart,
+  newestOf,
+  nudge,
+  nudgeBlock,
+  orderPhotos,
+  sortAlbums,
+  viewerIndexAfterRemoval,
+  type AlbumLayout,
+  type AlbumPhotoOrder,
+  type AlbumSort,
+} from "../lib/albumView";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
 import { VirtualSections } from "../components/VirtualSections";
 import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
@@ -39,8 +67,11 @@ import { AlbumPicker, NameDialog } from "../components/AlbumDialogs";
 import { ShareDialog } from "../components/ShareDialog";
 import {
   CalendarIcon,
+  PlaceIcon,
+  CompressIcon,
   CloudIcon,
   DownloadIcon,
+  DragHandleIcon,
   FolderOpenIcon,
   HeartIcon,
   ImageIcon,
@@ -48,10 +79,13 @@ import {
   LibraryRemoveIcon,
   OfflinePinIcon,
   ShareIcon,
+  TextIcon,
   TrashIcon,
+  VisibilityOffIcon,
 } from "../components/icons";
 import { useT } from "../lib/i18n";
 import { isWindows } from "../lib/platform";
+import { locale } from "../lib/format";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
 
 const PREFETCH_RADIUS = 2;
@@ -63,8 +97,7 @@ export type Album = {
   coverUid: string | null;
   lastActivityTime: number;
 };
-/** How the album grid is ordered: the server's last-activity order, by name, or by size. */
-export type AlbumSort = "activity" | "name" | "count";
+export type { AlbumSort };
 export type AlbumPhoto = { uid: string; captureTime: number };
 
 /**
@@ -88,10 +121,27 @@ export function Albums({
   onPhotoUids,
   onSpan,
   onEditDate,
+  onEditPlace,
+  onEditMeta,
+  onCompress,
+  onMakeGif,
   onDateEditStarted,
   contentsRequest = 0,
+  slideshowRequest = 0,
   query = "",
   sort = "activity",
+  layout = "grid",
+  order = [],
+  onOrderChange,
+  arranging = false,
+  photoOrder = "newest",
+  arrangement,
+  photoOrderReady = true,
+  photoArranging = false,
+  arrangeCommand,
+  onArrangeState,
+  onArrangeSave,
+  onArrangeEnd,
   favoriteUids,
   onFavoriteChanged,
   hidden,
@@ -124,13 +174,44 @@ export function Albums({
   onSpan?: (span: [number, number] | null) => void;
   /** Opens the date editor for these photos. */
   onEditDate?: (uids: string[]) => void;
+  onEditPlace?: (uids: string[]) => void;
+  /** Opens the description and strip editor for these photos. */
+  onEditMeta?: (uids: string[], kind: "text" | "strip") => void;
+  onCompress?: (uids: string[]) => void;
+  onMakeGif?: (uid: string) => void;
   /** A date change its viewer started, for the caller to follow. */
-  onDateEditStarted?: () => void;
+  onDateEditStarted?: (kind?: "date" | "place" | "meta") => void;
   /** Raised by the album's More menu: opens the viewer on its first photo with the contents list. */
   contentsRequest?: number;
+  /** Goes up each time the album's menu asks to play it as a slideshow. */
+  slideshowRequest?: number;
   /** The album-list search query (filters by name) and the sort order, owned by the shell. */
   query?: string;
   sort?: AlbumSort;
+  /** The album list as cards or as rows. */
+  layout?: AlbumLayout;
+  /** The reader's own arrangement (album uids), which the "custom" sort follows. */
+  order?: string[];
+  /** The arrangement after a drag or a key move; the albums not on screen keep their place. */
+  onOrderChange?: (order: string[]) => void;
+  /** Whether the list is being rearranged: cards drag and the albums do not open. */
+  arranging?: boolean;
+  /** The open album's photo order. */
+  photoOrder?: AlbumPhotoOrder;
+  /** The open album's hand-made order (photo link ids), which "custom" follows. */
+  arrangement?: string[];
+  /** Whether the open album's order has been read; its photos wait for it, so they do not jump. */
+  photoOrderReady?: boolean;
+  /** Whether the open album's photos are being arranged: they drag, select on a click and do not open. */
+  photoArranging?: boolean;
+  /** A press on the masthead's arrange controls, answered once per `n`. */
+  arrangeCommand?: { kind: "start" | "end" | "done" | "cancel"; n: number };
+  /** How many photos the arranging has selected, and whether it moved any. */
+  onArrangeState?: (state: { selected: number; changed: boolean }) => void;
+  /** Saves the album's new order, photo link ids. */
+  onArrangeSave?: (order: string[]) => Promise<void>;
+  /** The arranging is over, saved or not. */
+  onArrangeEnd?: () => void;
   /**
    * The favourites the shell knows from the timeline. An album lists uids alone, so
    * this is how its menu and viewer tell which way the heart points; a photo found
@@ -149,10 +230,20 @@ export function Albums({
   const [albums, setAlbums] = useState<Album[]>(initial ?? []);
   const [allPhotos, setPhotos] = useState<AlbumPhoto[]>([]);
   const openHidden = !!open && !!hidden?.isAlbum(open.uid);
-  const photos = useMemo(
-    () => (hidden && !openHidden ? allPhotos.filter((p) => !hidden.isPhoto(p.uid)) : allPhotos),
-    [allPhotos, hidden, openHidden],
+  const ordered = useMemo(
+    () =>
+      photoOrderReady
+        ? orderPhotos(hidden && !openHidden ? allPhotos.filter((p) => !hidden.isPhoto(p.uid)) : allPhotos, photoOrder, arrangement)
+        : [],
+    [allPhotos, hidden, openHidden, photoOrder, arrangement, photoOrderReady],
   );
+  // While arranging, the grid shows the order being made; everything else keeps the saved one.
+  const [working, setWorking] = useState<string[] | null>(null);
+  const photos = useMemo(() => {
+    if (!working) return ordered;
+    const byUid = new Map(ordered.map((p) => [p.uid, p]));
+    return working.map((uid) => byUid.get(uid)).filter((p): p is AlbumPhoto => !!p);
+  }, [ordered, working]);
   // The list and the open album share this flag. Arriving straight into an album
   // has nothing warmed for it, so that always starts out loading; a warmed list
   // does not, and paints instead of shimmering. The reads below run either way.
@@ -201,6 +292,24 @@ export function Albums({
   }
 
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+  // Saving an edit writes a copy and reloads the album, whose list may then hold other photos at
+  // the viewer's position. Once the new list is in, the viewer goes to the copy if the album has
+  // it, and otherwise back to the photo it showed. Before the paint, so no other photo flashes up.
+  const editFocus = useRef<{ copy?: string; from: string; album: string | null; list: AlbumPhoto[] } | null>(null);
+  function handleEdited(copy?: string) {
+    const from = lightboxIdx !== null ? photos[lightboxIdx]?.uid : undefined;
+    if (from && onChanged) editFocus.current = { copy, from, album: open?.uid ?? null, list: allPhotos };
+    onChanged?.();
+  }
+  useLayoutEffect(() => {
+    const focus = editFocus.current;
+    if (!focus || focus.list === allPhotos) return;
+    editFocus.current = null;
+    if (lightboxIdx === null) return;
+    const at = focus.copy ? photos.findIndex((p) => p.uid === focus.copy) : -1;
+    const back = photos.findIndex((p) => p.uid === focus.from);
+    if (at >= 0 || back >= 0) setLightboxIdx(at >= 0 ? at : back);
+  }, [allPhotos, photos]);
   const [confirmTrash, setConfirmTrash] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -236,6 +345,161 @@ export function Albums({
       setSelectionBusy(false);
     }
   }, []);
+
+  // ---- Arranging the open album's photos ----
+  const arrangeStart = useRef<string[]>([]);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  useEffect(() => {
+    if (photoArranging && open) {
+      const start = ordered.map((p) => p.uid);
+      arrangeStart.current = start;
+      setWorking(start);
+    } else {
+      setWorking(null);
+      setConfirmDiscard(false);
+    }
+    sel.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photoArranging, open?.uid]);
+  // A photo added or taken away while arranging joins at the end or leaves the order being made.
+  useEffect(() => {
+    if (!working) return;
+    const have = new Set(ordered.map((p) => p.uid));
+    const kept = working.filter((u) => have.has(u));
+    const keptSet = new Set(kept);
+    const added = ordered.filter((p) => !keptSet.has(p.uid)).map((p) => p.uid);
+    if (added.length > 0 || kept.length !== working.length) setWorking([...kept, ...added]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ordered]);
+  const arrangeChanged =
+    !!working &&
+    (working.length !== arrangeStart.current.length || working.some((u, i) => u !== arrangeStart.current[i]));
+  useEffect(() => {
+    onArrangeState?.({ selected: photoArranging ? sel.selected.size : 0, changed: arrangeChanged });
+  }, [photoArranging, sel.selected.size, arrangeChanged, onArrangeState]);
+
+  const finishArranging = useCallback(async () => {
+    if (!working) return;
+    // A photo the album no longer holds leaves the stored order; one hidden here keeps its place.
+    const members = new Set(allPhotos.map((p) => linkOf(p.uid)));
+    const order = forSave(arrangement ?? [], working.map(linkOf), members);
+    try {
+      await onArrangeSave?.(order);
+      setToast(t("albums.arrangeSaved"));
+      onArrangeEnd?.();
+    } catch (e) {
+      setToast(String(e));
+    }
+  }, [working, allPhotos, arrangement, onArrangeSave, onArrangeEnd, t]);
+
+  const answeredCommand = useRef(arrangeCommand?.n ?? 0);
+  useEffect(() => {
+    if (!arrangeCommand || arrangeCommand.n === answeredCommand.current) return;
+    answeredCommand.current = arrangeCommand.n;
+    if (!working) return;
+    const moving = new Set(sel.selected);
+    if (arrangeCommand.kind === "start") setWorking(moveToStart(working, moving));
+    else if (arrangeCommand.kind === "end") setWorking(moveToEnd(working, moving));
+    else if (arrangeCommand.kind === "done") void finishArranging();
+    else if (arrangeChanged) setConfirmDiscard(true);
+    else onArrangeEnd?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [arrangeCommand]);
+
+  // Escape saves, as Done does, once nothing is selected (the first Escape lets the selection go).
+  // The arrow keys carry the selection one place earlier or later.
+  useEffect(() => {
+    if (!photoArranging || !working) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (confirmDiscard || (e.target as HTMLElement | null)?.closest("input, textarea, [contenteditable=true]")) return;
+      if (e.key === "Escape") {
+        if (sel.selected.size === 0) void finishArranging();
+        return;
+      }
+      const by = e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : 0;
+      if (by === 0 || sel.selected.size === 0) return;
+      e.preventDefault();
+      setWorking(nudgeBlock(working, new Set(sel.selected), by));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [photoArranging, working, sel.selected, confirmDiscard, finishArranging]);
+
+  // A photo is dragged by the pointer: the held one, or the whole selection when it is in it,
+  // which lands as one run before or after the photo it is dropped on.
+  const [photoDrag, setPhotoDrag] = useState<Set<string> | null>(null);
+  const [photoOver, setPhotoOver] = useState<string | null>(null);
+  const photoDragRef = useRef<{ uid: string; x: number; y: number; moved: boolean; px: number; py: number } | null>(null);
+  const dragFrame = useRef<number | null>(null);
+  const overAt = (x: number, y: number) => {
+    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-uid]");
+    return el && detailRef.current?.contains(el) ? (el.dataset.uid ?? null) : null;
+  };
+  const dragScroll = () => {
+    const d = photoDragRef.current;
+    const scroller = detailRef.current?.closest<HTMLElement>(".g-scroll");
+    if (!d?.moved || !scroller) {
+      dragFrame.current = null;
+      return;
+    }
+    const r = scroller.getBoundingClientRect();
+    const dy = d.py < r.top + 64 ? -Math.ceil((r.top + 64 - d.py) / 4) : d.py > r.bottom - 64 ? Math.ceil((d.py - r.bottom + 64) / 4) : 0;
+    if (dy === 0) {
+      dragFrame.current = null;
+      return;
+    }
+    scroller.scrollTop += dy;
+    setPhotoOver(overAt(d.px, d.py));
+    dragFrame.current = requestAnimationFrame(dragScroll);
+  };
+  const stopDragScroll = () => {
+    if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
+    dragFrame.current = null;
+  };
+  useEffect(() => stopDragScroll, []);
+  const arrangePointer = {
+    onPointerDown: (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      const cell = target.closest<HTMLElement>("[data-uid]");
+      if (!cell?.dataset.uid || target.closest(".g-seldot")) return;
+      photoDragRef.current = { uid: cell.dataset.uid, x: e.clientX, y: e.clientY, moved: false, px: e.clientX, py: e.clientY };
+    },
+    onPointerMove: (e: ReactPointerEvent<HTMLDivElement>) => {
+      const d = photoDragRef.current;
+      if (!d) return;
+      d.px = e.clientX;
+      d.py = e.clientY;
+      if (!d.moved) {
+        if (Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) return;
+        d.moved = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setPhotoDrag(sel.selected.has(d.uid) ? new Set(sel.selected) : new Set([d.uid]));
+      }
+      setPhotoOver(overAt(e.clientX, e.clientY));
+      if (dragFrame.current === null) dragFrame.current = requestAnimationFrame(dragScroll);
+    },
+    onPointerUp: (e: ReactPointerEvent<HTMLDivElement>) => endPhotoDrag(e, false),
+    onPointerCancel: (e: ReactPointerEvent<HTMLDivElement>) => endPhotoDrag(e, true),
+  };
+  const suppressCellClick = useRef(false);
+  function endPhotoDrag(e: ReactPointerEvent<HTMLDivElement>, cancelled: boolean) {
+    const d = photoDragRef.current;
+    photoDragRef.current = null;
+    stopDragScroll();
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    const moving = photoDrag;
+    const target = photoOver;
+    setPhotoDrag(null);
+    setPhotoOver(null);
+    if (!d?.moved) return;
+    suppressCellClick.current = true;
+    window.setTimeout(() => (suppressCellClick.current = false), 0);
+    if (cancelled || !moving || !target || moving.has(target) || !working) return;
+    setWorking(dragTo(gather(working, moving, d.uid), moving, target));
+  }
+  const arrangeCellClass = (uid: string) =>
+    photoDrag?.has(uid) ? "arr-drag" : photoOver === uid && photoDrag ? "arr-over" : "";
 
   // A brief confirmation toast (download results) that clears itself.
   useEffect(() => {
@@ -275,7 +539,11 @@ export function Albums({
   // down a fresh one, and that is no reason to refetch its photos.
   const openUid = open?.uid ?? null;
   useEffect(() => {
-    setLightboxIdx(null);
+    // The reload after a saved edit keeps the viewer open; see `editFocus`.
+    if (editFocus.current?.album !== openUid) {
+      editFocus.current = null;
+      setLightboxIdx(null);
+    }
     sel.clear();
     setError("");
     if (!openUid) {
@@ -291,6 +559,7 @@ export function Albums({
         setPhotos(list);
       } catch (e) {
         if (!cancelled) setError(String(e));
+        editFocus.current = null;
       }
       if (!cancelled) setLoading(false);
     })();
@@ -316,6 +585,16 @@ export function Albums({
     setLightboxIdx(0);
   }, [contentsRequest, loading, photos.length]);
 
+  // The slideshow asked for from the album's menu starts on the first photo, once they are read.
+  const [openWithSlideshow, setOpenWithSlideshow] = useState(false);
+  const answeredSlideshow = useRef(slideshowRequest);
+  useEffect(() => {
+    if (slideshowRequest === answeredSlideshow.current || loading || photos.length < 2) return;
+    answeredSlideshow.current = slideshowRequest;
+    setOpenWithSlideshow(true);
+    setLightboxIdx(0);
+  }, [slideshowRequest, loading, photos.length]);
+
   // Report the open album's count up to the top bar, which owns the header.
   useEffect(() => {
     onCount?.(!openUid || loading ? null : photos.length);
@@ -326,6 +605,38 @@ export function Albums({
   useEffect(() => {
     onPhotoUids?.(!openUid || loading ? [] : photos.map((p) => p.uid));
   }, [openUid, loading, photos, onPhotoUids]);
+
+  // The newest photo's capture time per album, read one album at a time the first time
+  // "newest photo" is the sort; an album whose size changed is read again.
+  const [newestTimes, setNewestTimes] = useState<Map<string, number>>(new Map());
+  const newestRead = useRef(new Map<string, number>());
+  useEffect(() => {
+    if (sort !== "newest" || open) return;
+    let cancelled = false;
+    (async () => {
+      for (const a of albums) {
+        if (cancelled) return;
+        if (newestRead.current.get(a.uid) === a.photoCount) continue;
+        try {
+          const list = await rpc<AlbumPhoto[]>("getAlbumPhotos", { uid: a.uid });
+          if (cancelled) return;
+          newestRead.current.set(a.uid, a.photoCount);
+          const at = newestOf(list);
+          setNewestTimes((prev) => {
+            const next = new Map(prev);
+            if (at === null) next.delete(a.uid);
+            else next.set(a.uid, at);
+            return next;
+          });
+        } catch {
+          /* the album keeps its place by activity */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sort, open, albums]);
 
   // Covers for the list cards; the open album's own cover is resolved by the shell for
   // the masthead, so an open album needs none here.
@@ -338,15 +649,86 @@ export function Albums({
           .filter((a) => !hidden.isAlbum(a.uid))
           .map((a) => (a.coverUid && hidden.isPhoto(a.coverUid) ? { ...a, coverUid: null } : a))
       : albums;
-    const base = filterAlbums(visible, query);
-    if (sort === "name") {
-      return [...base].sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+    return sortAlbums(filterAlbums(visible, query), sort, order, newestTimes);
+  }, [albums, query, sort, order, newestTimes, hidden]);
+
+  // The albums in the reader's arrangement, search aside: what a drag or a key move works on.
+  const arranged = useMemo(
+    () =>
+      sortAlbums(
+        hidden ? albums.filter((a) => !hidden.isAlbum(a.uid)) : albums,
+        "custom",
+        order,
+      ).map((a) => a.uid),
+    [albums, order, hidden],
+  );
+  const commitOrder = (moved: string[]) => {
+    const links = moved.map(linkOf);
+    const onScreen = new Set(links);
+    onOrderChange?.([...links, ...order.filter((id) => !onScreen.has(id))]);
+  };
+  const [dragUid, setDragUid] = useState<string | null>(null);
+  const [overUid, setOverUid] = useState<string | null>(null);
+  const drag = useRef<{ uid: string; x: number; y: number; moved: boolean } | null>(null);
+  const startDrag = (e: ReactPointerEvent<HTMLElement>, uid: string) => {
+    if (!arranging || e.button !== 0) return;
+    drag.current = { uid, x: e.clientX, y: e.clientY, moved: false };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const moveDrag = (e: ReactPointerEvent<HTMLElement>) => {
+    const d = drag.current;
+    if (!d) return;
+    if (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 6) return;
+    d.moved = true;
+    setDragUid(d.uid);
+    const target = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("[data-album-uid]");
+    setOverUid(target?.dataset.albumUid ?? null);
+    // The page scrolls while a card is held near its top or bottom edge.
+    const scroller = e.currentTarget.closest<HTMLElement>(".g-scroll");
+    if (scroller) {
+      const r = scroller.getBoundingClientRect();
+      if (e.clientY < r.top + 56) scroller.scrollBy(0, -18);
+      else if (e.clientY > r.bottom - 56) scroller.scrollBy(0, 18);
     }
-    if (sort === "count") {
-      return [...base].sort((a, b) => b.photoCount - a.photoCount);
+  };
+  const endDrag = (e: ReactPointerEvent<HTMLElement>, cancelled: boolean) => {
+    const d = drag.current;
+    drag.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    const target = overUid;
+    setDragUid(null);
+    setOverUid(null);
+    if (d?.moved) {
+      // The click that ends a drag must not open the album it ended on.
+      suppressOpen.current = true;
+      window.setTimeout(() => (suppressOpen.current = false), 0);
+      if (!cancelled && target && target !== d.uid) commitOrder(moveOnto(arranged, d.uid, target));
     }
-    return base;
-  }, [albums, query, sort, hidden]);
+  };
+  const suppressOpen = useRef(false);
+  const keyMove = (e: ReactKeyboardEvent<HTMLElement>, uid: string) => {
+    if (!arranging) return;
+    const by = e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : 0;
+    if (by === 0) return;
+    e.preventDefault();
+    commitOrder(nudge(arranged, uid, by));
+    // The card keeps the focus through its move, so the keys can carry on.
+    requestAnimationFrame(() =>
+      document.querySelector<HTMLElement>(`[data-album-uid="${CSS.escape(uid)}"]`)?.focus(),
+    );
+  };
+  const dragProps = (uid: string) => ({
+    "data-album-uid": uid,
+    onPointerDown: (e: ReactPointerEvent<HTMLElement>) => startDrag(e, uid),
+    onPointerMove: moveDrag,
+    onPointerUp: (e: ReactPointerEvent<HTMLElement>) => endDrag(e, false),
+    onPointerCancel: (e: ReactPointerEvent<HTMLElement>) => endDrag(e, true),
+    onKeyDown: (e: ReactKeyboardEvent<HTMLElement>) => keyMove(e, uid),
+  });
+  const openAlbum = (a: Album) => {
+    if (arranging || suppressOpen.current) return;
+    onOpenChange(a);
+  };
 
   const coverUids = useMemo(
     () => (open ? [] : shown.map((a) => a.coverUid).filter((u): u is string => !!u)),
@@ -384,6 +766,10 @@ export function Albums({
   sel.order.current = open ? photos.map((p) => p.uid) : [];
 
   function onCellClick(uid: string, e?: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) {
+    if (photoArranging) {
+      if (!suppressCellClick.current) sel.toggle(uid, e);
+      return;
+    }
     if (sel.wasDragging()) return;
     if (sel.selected.size > 0 || e?.shiftKey || e?.ctrlKey || e?.metaKey) sel.toggle(uid, e);
     else setLightboxIdx(photos.findIndex((p) => p.uid === uid));
@@ -577,11 +963,21 @@ export function Albums({
 
   function handleTrashed(uid: string) {
     removeLocally(new Set([uid]));
-    setLightboxIdx((i) => {
-      if (i === null) return null;
-      const remaining = photos.length - 1;
-      return remaining <= 0 ? null : Math.min(i, remaining - 1);
-    });
+    setLightboxIdx((i) => viewerIndexAfterRemoval(i, photos.length - 1));
+  }
+
+  /** The viewer took its photo out of the album; it stays in the library, so its preview is kept. */
+  function handleRemovedFromAlbum(uid: string) {
+    const rest = allPhotos.filter((p) => p.uid !== uid);
+    const shown = photos.filter((p) => p.uid !== uid);
+    const at = viewerIndexAfterRemoval(lightboxIdx, shown.length);
+    setPhotos(rest);
+    setLightboxIdx(at);
+    setToast(t("albums.removed", { count: 1 }));
+    // The reload that follows keeps the viewer on the photo now in this slot; see `editFocus`.
+    const stay = at === null ? undefined : shown[at]?.uid;
+    if (stay && onChanged) editFocus.current = { from: stay, album: open?.uid ?? null, list: rest };
+    onChanged?.();
   }
 
   /**
@@ -682,6 +1078,42 @@ export function Albums({
               },
             ]
           : []),
+        ...(onEditPlace
+          ? [
+              {
+                key: "editPlace",
+                label: t("selection.editPlace"),
+                icon: <PlaceIcon size={14} />,
+                onSelect: () => onEditPlace([...sel.selected]),
+              },
+            ]
+          : []),
+        ...(onEditMeta
+          ? [
+              {
+                key: "editText",
+                label: t("metaEdit.menuText"),
+                icon: <TextIcon size={14} />,
+                onSelect: () => onEditMeta([...sel.selected], "text"),
+              },
+              {
+                key: "stripMeta",
+                label: t("metaEdit.menuStrip"),
+                icon: <VisibilityOffIcon size={14} />,
+                onSelect: () => onEditMeta([...sel.selected], "strip"),
+              },
+            ]
+          : []),
+        ...(onCompress
+          ? [
+              {
+                key: "compress",
+                label: t("selection.compress"),
+                icon: <CompressIcon size={14} />,
+                onSelect: () => onCompress([...sel.selected]),
+              },
+            ]
+          : []),
         {
           key: "favorite",
           label: photoFavorite ? t("selection.unfavorite") : t("selection.favorite"),
@@ -752,10 +1184,14 @@ export function Albums({
   if (open) {
     const current = lightboxIdx !== null ? photos[lightboxIdx] : null;
     return (
-      <div ref={detailRef} {...sel.containerProps}>
-        {loading && photos.length === 0 && <PhotoGridSkeleton count={18} cellSize={cellSize} />}
+      <div
+        ref={detailRef}
+        className={photoArranging ? "g-arranging" : undefined}
+        {...(photoArranging ? arrangePointer : sel.containerProps)}
+      >
+        {(loading || !photoOrderReady) && photos.length === 0 && <PhotoGridSkeleton count={18} cellSize={cellSize} />}
 
-        {!loading && photos.length === 0 && (
+        {!loading && photoOrderReady && photos.length === 0 && (
           <div className="g-empty">
             <p className="g-empty-title">{t("albums.empty")}</p>
           </div>
@@ -772,12 +1208,28 @@ export function Albums({
               selected={sel.selected}
               onToggle={sel.toggle}
               onOpen={onCellClick}
-              onContext={onCellContext}
+              onContext={photoArranging ? undefined : onCellContext}
               offlineUids={offlineUids}
               localUids={localUids}
+              cellClass={photoArranging ? arrangeCellClass : undefined}
+              cellTitle={photoArranging ? t("albums.arrangeHint") : undefined}
             />
           )}
         />
+
+        {confirmDiscard && (
+          <Confirm
+            title={t("albums.arrangeDiscardTitle")}
+            message={t("albums.arrangeDiscardBody")}
+            confirmLabel={t("albums.arrangeDiscard")}
+            cancelLabel={t("albums.arrangeKeep")}
+            onConfirm={() => {
+              setConfirmDiscard(false);
+              onArrangeEnd?.();
+            }}
+            onCancel={() => setConfirmDiscard(false)}
+          />
+        )}
 
         {photoMenu && (
           <ContextMenu
@@ -798,7 +1250,7 @@ export function Albums({
 
         <Marquee rect={sel.marquee} />
         <SelectionBar
-          count={sel.selected.size}
+          count={photoArranging ? 0 : sel.selected.size}
           busy={selectionBusy}
           onCancel={sel.clear}
           onSetCover={
@@ -814,6 +1266,8 @@ export function Albums({
           }
           onAddToAlbum={() => setPickAlbum(true)}
           onEditDate={onEditDate ? () => onEditDate([...sel.selected]) : undefined}
+          onEditPlace={onEditPlace ? () => onEditPlace([...sel.selected]) : undefined}
+          onCompress={onCompress ? () => onCompress([...sel.selected]) : undefined}
           onRemoveFromAlbum={() => setConfirmRemove(true)}
           onTrash={() => setConfirmTrash(true)}
         />
@@ -879,12 +1333,18 @@ export function Albums({
             onClose={() => {
               setLightboxIdx(null);
               setOpenWithContents(false);
+              setOpenWithSlideshow(false);
             }}
             openWith={openWithContents ? "contents" : undefined}
+            startSlideshow={openWithSlideshow}
             onDateEditStarted={onEditDate ? onDateEditStarted : undefined}
+            onCompress={onCompress ? (uid) => onCompress([uid]) : undefined}
+            onMakeGif={onMakeGif}
             onTrashed={handleTrashed}
+            onRemovedFromAlbum={handleRemovedFromAlbum}
             onRenamed={() => {}}
-            onEdited={onChanged}
+            onEdited={handleEdited}
+            album={open?.uid}
             // Only a known favourite is passed on; otherwise the viewer's own lookup decides.
             isFavorite={favoriteUids?.has(current.uid) ? true : undefined}
             onFavoriteChanged={onFavoriteChanged}
@@ -970,61 +1430,115 @@ export function Albums({
     );
   }
 
+  const cover = (a: Album) =>
+    a.coverUid && covers[a.coverUid] ? (
+      <img src={covers[a.coverUid]!} alt="" draggable={false} />
+    ) : (
+      <div className="g-cell-ph" />
+    );
+  const contextOf = (a: Album) =>
+    onAlbumContext &&
+    ((e: MouseEvent) => {
+      e.preventDefault();
+      // This album's menu answers the click; the shell's document
+      // listener must not open its own on top of it.
+      e.stopPropagation();
+      onAlbumContext(a, e);
+    });
+  const countLabel = (a: Album) =>
+    t(a.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: a.photoCount });
+  const stateClass = (uid: string) =>
+    `${arranging ? " arranging" : ""}${dragUid === uid ? " drag" : ""}${overUid === uid && dragUid !== uid ? " over" : ""}`;
+
+  if (layout === "list") {
+    return (
+      <div className={`al-list${arranging ? " arranging" : ""}`}>
+        {!arranging && (
+          <button className="al-row al-row-new" onClick={() => setCreating(true)}>
+            <span className="th al-newbox">
+              <span className="g-album-newplus">+</span>
+            </span>
+            <span className="nm">{t("albums.newAlbum")}</span>
+            <span />
+            <span />
+          </button>
+        )}
+        {shown.map((a) => (
+          <button
+            className={`al-row${stateClass(a.uid)}`}
+            key={a.uid}
+            onClick={() => openAlbum(a)}
+            onContextMenu={contextOf(a)}
+            title={arranging ? t("albums.arrangeHint") : undefined}
+            {...dragProps(a.uid)}
+          >
+            <span className="handle" aria-hidden>
+              <DragHandleIcon size={18} />
+            </span>
+            <span className="th">{cover(a)}</span>
+            <span className="nm" title={arranging ? undefined : a.name || undefined}>
+              {a.name || t("albums.untitled")}
+            </span>
+            <span className="ct">{countLabel(a)}</span>
+            <span className="la">
+              {a.lastActivityTime ? new Date(a.lastActivityTime).toLocaleDateString(locale) : ""}
+            </span>
+          </button>
+        ))}
+
+        {nameDialog}
+
+        {toast && <div className="g-toast">{toast}</div>}
+      </div>
+    );
+  }
+
   return (
     <div
-      className="g-albums"
+      className={`g-albums${arranging ? " arranging" : ""}`}
       style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${albumCellSize}px, 1fr))` }}
     >
-      <button className="g-album g-album-new" onClick={() => setCreating(true)}>
-        <div className="g-album-newbox">
-          <span className="g-album-newplus">+</span>
-        </div>
-        <div className="g-album-name">{t("albums.newAlbum")}</div>
-      </button>
+      {!arranging && (
+        <button className="g-album g-album-new" onClick={() => setCreating(true)}>
+          <div className="g-album-newbox">
+            <span className="g-album-newplus">+</span>
+          </div>
+          <div className="g-album-name">{t("albums.newAlbum")}</div>
+        </button>
+      )}
 
       {shown.map((a) => (
         <button
-          className="g-album"
+          className={`g-album${stateClass(a.uid)}`}
           key={a.uid}
-          onClick={() => onOpenChange(a)}
-          onContextMenu={
-            onAlbumContext &&
-            ((e) => {
-              e.preventDefault();
-              // This album's menu answers the click; the shell's document
-              // listener must not open its own on top of it.
-              e.stopPropagation();
-              onAlbumContext(a, e);
-            })
-          }
+          onClick={() => openAlbum(a)}
+          onContextMenu={contextOf(a)}
+          title={arranging ? t("albums.arrangeHint") : undefined}
+          {...dragProps(a.uid)}
         >
           <div className="g-album-cover">
-            {a.coverUid && covers[a.coverUid] ? (
-              <img src={covers[a.coverUid]!} alt="" draggable={false} />
-            ) : (
-              <div className="g-cell-ph" />
+            {cover(a)}
+            {!arranging && (
+              <span
+                className={`g-album-sync${syncedAlbums.has(a.uid) ? " on" : ""}`}
+                role="button"
+                tabIndex={0}
+                title={
+                  syncedAlbums.has(a.uid) ? t("albums.keptDownloaded") : t("albums.keepDownloaded")
+                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void toggleSync(a.uid);
+                }}
+              >
+                <CloudIcon size={14} />
+              </span>
             )}
-            <span
-              className={`g-album-sync${syncedAlbums.has(a.uid) ? " on" : ""}`}
-              role="button"
-              tabIndex={0}
-              title={
-                syncedAlbums.has(a.uid) ? t("albums.keptDownloaded") : t("albums.keepDownloaded")
-              }
-              onClick={(e) => {
-                e.stopPropagation();
-                void toggleSync(a.uid);
-              }}
-            >
-              <CloudIcon size={14} />
-            </span>
           </div>
-          <div className="g-album-name">{a.name || t("albums.untitled")}</div>
-          <div className="g-album-count">
-            {t(a.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other", {
-              count: a.photoCount,
-            })}
+          <div className="g-album-name" title={arranging ? undefined : a.name || undefined}>
+            {a.name || t("albums.untitled")}
           </div>
+          <div className="g-album-count">{countLabel(a)}</div>
         </button>
       ))}
 

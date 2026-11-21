@@ -23,6 +23,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { rpc } from "../lib/rpc";
+import { afterStreamFailed, videoStreamUrl } from "../lib/thumbStore";
+import { knownName, learnNames, rememberName } from "../lib/photoNames";
 import { downloadPhotos, explorerMode } from "../lib/download";
 import { pinOffline, unpinOffline } from "../lib/offline";
 import { cachedPreview, dropPreview, loadPreview } from "../lib/previewStore";
@@ -37,20 +39,34 @@ import { ContextMenu, type MenuAction } from "./ContextMenu";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
 import {
   CalendarIcon,
+  PlaceIcon,
+  CompressIcon,
+  GifIcon,
   CloudIcon,
   DownloadIcon,
   FolderOpenIcon,
   HeartIcon,
   LibraryAddIcon,
+  LibraryRemoveIcon,
   OfflinePinIcon,
   PencilIcon,
   ShareIcon,
+  SlideshowIcon,
+  TextIcon,
   TrashIcon,
   VisibilityIcon,
   VisibilityOffIcon,
 } from "./icons";
 import { PhotoEditor } from "./PhotoEditor";
+import { Slideshow } from "./Slideshow";
+import { MotionClip } from "./MotionClip";
+import { CameraSection, DetailsSection, PlaceSection } from "./DetailsSections";
+import { motionKindOf, type ClipPayload } from "../lib/motion";
+import { nodeDevice, nodePlace } from "../lib/cameraFacts";
+import { VideoEditor } from "./VideoEditor";
 import { DateEditPanel } from "./DateEditPanel";
+import { PlaceEditPanel } from "./PlaceEditPanel";
+import { MetaEditPanel, PhotoDescription, type MetaKind } from "./MetaEditPanel";
 import { cloudEditorSource, isEditableImage, saveCloudEdit } from "../lib/cloudEditor";
 import { TAG, withFavorite } from "../lib/tags";
 import { useT } from "../lib/i18n";
@@ -86,10 +102,15 @@ type Props = {
   onClose: () => void;
   onTrashed: (uid: string) => void;
   onRenamed: (uid: string, name: string) => void;
-  /** A saved edit created a new timeline photo, so the caller reloads to show it. */
-  onEdited?: () => void;
+  /**
+   * A saved edit created a new timeline photo, so the caller reloads to show it. `copy` is the
+   * new photo's uid (the first one when several parts were saved), for the viewer to move to.
+   */
+  onEdited?: (copy?: string) => void;
   /** Whether the edit control is offered. Off for shared photos this account cannot edit. */
   editable?: boolean;
+  /** The album the viewer was opened in, which a saved edit joins. */
+  album?: string;
   /** Whether this photo is downloaded (hydrated), which drives Download vs Free up. */
   isLocal?: boolean;
   /** Whether the app holds its own encrypted copy, a different place from `isLocal`. */
@@ -123,12 +144,23 @@ type Props = {
   hiding?: { hidden: boolean; toggle: () => void };
   /** Opens with this side panel already out, as an album's "Contents" asks. */
   openWith?: "contents";
+  /** Opens straight into the slideshow, as an album's "Play slideshow" asks. */
+  startSlideshow?: boolean;
   /**
    * Where photos can be re-dated: the date editor opens beside the photo, and this is told once
    * a run has started, so the caller follows it; the viewer then closes, since the photo it shows
    * is being replaced by its corrected copy.
    */
-  onDateEditStarted?: () => void;
+  onDateEditStarted?: (kind?: "date" | "place" | "meta") => void;
+  /** Asks to compress this photo on Drive (the caller confirms and runs it). */
+  onCompress?: (uid: string) => void;
+  /** Opens the GIF maker for this video. */
+  onMakeGif?: (uid: string) => void;
+  /**
+   * Offers Remove from album for `album`, and is told once the photo has left it. Given only
+   * where the album is the reader's own, so a shared album never offers it.
+   */
+  onRemovedFromAlbum?: (uid: string) => void;
 };
 
 /**
@@ -148,6 +180,8 @@ type Props = {
  * always has.
  */
 const SETTLE_MS = 250;
+/** How many times a stream that failed while playing is opened again before the whole file is tried. */
+const STREAM_RETRIES = 2;
 
 /** Decode base64 video bytes (from the sidecar) into a playable Blob. */
 function b64ToBlob(b64: string, mime: string): Blob {
@@ -174,6 +208,7 @@ export function Lightbox({
   onRenamed,
   onEdited,
   editable = true,
+  album,
   isLocal = false,
   isOffline = false,
   kind,
@@ -185,7 +220,11 @@ export function Lightbox({
   detailsExtra,
   hiding,
   openWith,
+  startSlideshow = false,
   onDateEditStarted,
+  onCompress,
+  onMakeGif,
+  onRemovedFromAlbum,
 }: Props) {
   const t = useT();
   const neighbours = useCloudMedia(items, index, onJump);
@@ -196,14 +235,49 @@ export function Lightbox({
   const [original, setOriginal] = useState<{ uid: string; url: string | null } | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(true);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  // The video whose stream would not play, so it is fetched whole instead.
+  const [streamFailed, setStreamFailed] = useState<string | null>(null);
+  // A stream that failed while playing is opened again from where it was, up to
+  // STREAM_RETRIES times, before the whole file is tried.
+  const streamRetries = useRef<{ uid: string; n: number }>({ uid: "", n: 0 });
+  // The photo shown now, for an answer that lands after the viewer stepped on.
+  const shownUid = useRef(uid);
+  shownUid.current = uid;
+  const [resumeAt, setResumeAt] = useState<{ uid: string; at: number } | null>(null);
   const [videoState, setVideoState] = useState<"idle" | "loading" | "ready" | "toolarge" | "error">(
     "idle",
   );
   const [details, setDetails] = useState<Details | null>(null);
+  // The names of the open photo and those around it, asked of the sidecar's cache as the
+  // reader steps, so the title shows a photo's name the moment it opens rather than "…"
+  // until its details come back. Not let go of per step: the answer comes from a cache and
+  // is cheap, and one dropped at every step of a quick run would never land.
+  const [, setNamesLearned] = useState(0);
+  const namesGone = useRef<AbortController | null>(null);
+  useEffect(() => {
+    namesGone.current = new AbortController();
+    return () => namesGone.current?.abort();
+  }, []);
+  useEffect(() => {
+    const around = [uid];
+    if (items && index >= 0) {
+      for (let d = 1; d <= 3; d++) {
+        const next = items[index + d];
+        const prev = items[index - d];
+        if (next) around.push(next.uid);
+        if (prev) around.push(prev.uid);
+      }
+    }
+    void learnNames(around, namesGone.current?.signal, () => setNamesLearned((n) => n + 1));
+  }, [uid, index, items]);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [editingVideo, setEditingVideo] = useState(false);
+  // The last saved edit is a copy that did not get into `album`.
+  const missedAlbum = useRef(false);
   const [error, setError] = useState("");
   // Our own optimistic flip, which outranks both sources below until the uid
   // changes. Cleared on failure, so the heart falls back to the truth.
@@ -213,6 +287,13 @@ export function Lightbox({
   const [pickingAlbum, setPickingAlbum] = useState(false);
   // The photo the date editor is open for, beside the picture; closed on paging to another.
   const [dateFor, setDateFor] = useState<string | null>(null);
+  const [placeFor, setPlaceFor] = useState<string | null>(null);
+  // Where the slideshow started, while it runs. It walks `items`, so it needs more than one.
+  const canSlideshow = !!items && items.length > 1;
+  const [slideshowAt, setSlideshowAt] = useState<number | null>(() =>
+    startSlideshow && canSlideshow ? Math.max(index, 0) : null,
+  );
+  const [metaFor, setMetaFor] = useState<{ uid: string; kind: MetaKind } | null>(null);
   useEffect(() => {
     if (dateFor && dateFor !== uid) setDateFor(null);
   }, [uid, dateFor]);
@@ -225,6 +306,14 @@ export function Lightbox({
   // details as before (the fallback path fetches them on open).
   const isVideo =
     kind === "video" || (kind === undefined && (details?.mediaType ?? "").startsWith("video/"));
+  // The kind this photo was opened with. A caller that learns it only later, often from these
+  // very details, passes it on a later render: that is no new photo, and starting it over
+  // cleared the title and restarted a video as it began to play.
+  const opened = useRef<{ uid: string; kind: typeof kind }>({ uid, kind });
+  if (opened.current.uid !== uid) opened.current = { uid, kind };
+  const openKind = opened.current.kind;
+  const kindNow = useRef(kind);
+  kindNow.current = kind;
 
   // The caller's cached tags win when it has them (instant, and it is the state
   // the grid renders); callers without them fall back to the details lookup.
@@ -234,12 +323,22 @@ export function Lightbox({
 
   // The cloud editor opens what sharp can decode; HEIC and RAW keep only the viewer, so
   // the Edit control is hidden for those rather than offering an edit that would fail.
-  const canEdit = editable && !isVideo && !!details && isEditableImage(details.mediaType, details.name);
+  const canEditPhoto = editable && !isVideo && !!details && isEditableImage(details.mediaType, details.name);
+  // A video opens the video editor, which downloads it to a temporary file of its own.
+  const canEditVideo = editable && isVideo && !!details;
+  const canEdit = canEditPhoto || canEditVideo;
+  const startEdit = () => (isVideo ? setEditingVideo(true) : setEditing(true));
 
   useEffect(() => {
     setError("");
     setConfirming(false);
     setSharing(false);
+    if (streamRetries.current.uid !== uid) {
+      streamRetries.current = { uid, n: 0 };
+      setResumeAt(null);
+      // A stream that failed for another video is tried again for this one.
+      setStreamFailed((s) => (s === uid ? s : null));
+    }
     setDetails(null);
     setFavOverride(null);
     setVideoUrl(null);
@@ -287,7 +386,9 @@ export function Lightbox({
       // before the details have settled its type, and for a transfer that fails. In
       // every one of those the preview simply stays, which is what the viewer showed
       // before.
-      if (!cancelled && kind !== "video" && (await settled)) {
+      // Asked again after the settle: the caller may have learned meanwhile that it is a video.
+      const notVideo = () => kindNow.current !== "video";
+      if (!cancelled && notVideo() && (await settled) && notVideo()) {
         const full = await fetchOriginal(uid, () => cancelled);
         if (!cancelled) setOriginal({ uid, url: full });
       }
@@ -303,7 +404,11 @@ export function Lightbox({
       if (!(await settled)) return;
       try {
         const meta = await rpc<Details>("getNodeDetails", { uid });
-        if (!cancelled) setDetails(meta);
+        // An answer after the viewer closed is dropped whole: a lock in between forgot the
+        // names, and keeping this one would bring it back.
+        if (cancelled) return;
+        if (meta?.name) rememberName(uid, meta.name);
+        setDetails(meta);
       } catch (e) {
         if (!cancelled) setError(String(e));
       }
@@ -319,9 +424,14 @@ export function Lightbox({
       // drop, and the release knows it.
       releaseOriginal(uid);
     };
-  }, [uid, kind]);
+    // `openKind`, not `kind`: see where it is kept.
+  }, [uid, openKind]);
 
-  // A video: fetch its bytes (kept in memory) and wrap them in a Blob to play.
+  // A video: played from the thumbnail server, which hands the player each byte range as
+  // soon as it has arrived, so it starts before the whole file is in and seeks back at
+  // once. Only if that cannot play it (the server is not up, the video is too large to
+  // hold, or Proton does not say how large the file is) does it fall back to the older
+  // route: its bytes fetched whole through the channel and wrapped in a Blob.
   // Images skip this entirely and keep using the HD still above.
   //
   // Behind the same settle, and this is where it matters most: a video crosses the one
@@ -337,7 +447,13 @@ export function Lightbox({
     let url: string | null = null;
     let cancelled = false;
     setVideoState("loading");
+    const streamed = streamFailed === uid ? null : videoStreamUrl(uid);
     const settle = setTimeout(() => {
+      if (streamed) {
+        setVideoUrl(streamed);
+        setVideoState("ready");
+        return;
+      }
       void (async () => {
         try {
           const v = await rpc<{ base64: string; mime: string }>("getVideo", { uid });
@@ -351,13 +467,17 @@ export function Lightbox({
           }
         }
       })();
-    }, kind === "video" ? SETTLE_MS : 0);
+      // Waited for when it opened as a video, or when it is known as one before its details:
+      // either way it may be one being stepped past. Only off the details has it sat still.
+    }, openKind === "video" || details === null ? SETTLE_MS : 0);
     return () => {
       cancelled = true;
       clearTimeout(settle);
       if (url) URL.revokeObjectURL(url);
     };
-  }, [uid, isVideo, kind]);
+    // `details` is read, not followed: its arrival must not restart a video already starting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uid, isVideo, openKind, streamFailed]);
 
   async function trash() {
     if (busy) return;
@@ -374,6 +494,24 @@ export function Lightbox({
         dropPreview(uid);
         onTrashed(uid);
       }
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  }
+
+  async function removeFromAlbum() {
+    if (busy || !album || !onRemovedFromAlbum) return;
+    setBusy(true);
+    setError("");
+    try {
+      const results = await rpc<{ uid: string; ok: boolean; error?: string }[]>(
+        "removePhotosFromAlbum",
+        { albumUid: album, uids: [uid] },
+      );
+      const failure = results.find((r) => !r.ok);
+      if (failure) setError(failure.error ?? t("albums.removePartial", { ok: 0, failed: 1 }));
+      else onRemovedFromAlbum(uid);
     } catch (e) {
       setError(String(e));
     }
@@ -412,6 +550,7 @@ export function Lightbox({
     setError("");
     try {
       const res = await rpc<{ uid: string; name: string }>("renamePhoto", { uid, name });
+      rememberName(uid, res.name);
       setDetails((d) => (d ? { ...d, name: res.name } : d));
       onRenamed(uid, res.name);
     } catch (e) {
@@ -494,6 +633,7 @@ export function Lightbox({
   }
 
   const dims = dimensionsOf(details?.extra ?? null);
+  const motionKind = isVideo ? null : motionKindOf(details?.tags);
 
   // The photo, at the best quality that has arrived: the grid thumbnail the caller
   // already had, then the preview, then the full-resolution file. Each step waits until
@@ -508,10 +648,13 @@ export function Lightbox({
   const stage: ViewerStage = isVideo
     ? {
         kind: "video",
-        url: videoState === "ready" ? videoUrl : null,
+        // The editor shows the video itself, so the viewer's copy stops playing under it.
+        url: videoState === "ready" && !editingVideo ? videoUrl : null,
         poster: stillSrc,
-        note:
-          videoState === "toolarge"
+        startAt: resumeAt?.uid === uid ? resumeAt.at : undefined,
+        note: editingVideo
+          ? null
+          : videoState === "toolarge"
             ? t("viewer.videoTooLarge")
             : videoState === "error"
               ? t("viewer.videoError")
@@ -536,7 +679,7 @@ export function Lightbox({
             label: t("editor.edit"),
             icon: <PencilIcon size={14} />,
             disabled: busy,
-            onSelect: () => setEditing(true),
+            onSelect: startEdit,
           },
         ]
       : []),
@@ -612,21 +755,46 @@ export function Lightbox({
       textSource={{ uid }}
       initialSide={openWith}
       aside={
-        dateFor === uid && onDateEditStarted ? (
+        metaFor?.uid === uid && onDateEditStarted ? (
+          <MetaEditPanel
+            embedded
+            kind={metaFor.kind}
+            uids={[uid]}
+            status={null}
+            onStarted={() => {
+              setMetaFor(null);
+              onDateEditStarted("meta");
+              onClose();
+            }}
+            onClose={() => setMetaFor(null)}
+          />
+        ) : placeFor === uid && onDateEditStarted ? (
+          <PlaceEditPanel
+            embedded
+            uids={[uid]}
+            status={null}
+            onStarted={() => {
+              setPlaceFor(null);
+              onDateEditStarted("place");
+              onClose();
+            }}
+            onClose={() => setPlaceFor(null)}
+          />
+        ) : dateFor === uid && onDateEditStarted ? (
           <DateEditPanel
             embedded
             uids={[uid]}
             status={null}
             onStarted={() => {
               setDateFor(null);
-              onDateEditStarted();
+              onDateEditStarted("date");
               onClose();
             }}
             onClose={() => setDateFor(null)}
           />
         ) : undefined
       }
-      name={details?.name ?? ""}
+      name={details?.name ?? knownName(uid) ?? (items?.[index]?.uid === uid ? items[index].name : undefined) ?? ""}
       stage={stage}
       error={error}
       busy={busy}
@@ -641,12 +809,48 @@ export function Lightbox({
         onClose();
       }}
       onRename={rename}
-      onVideoError={() => setVideoState("error")}
+      onVideoError={(at) => {
+        const stream = videoStreamUrl(uid);
+        const streaming = !!videoUrl && !!stream && videoUrl.startsWith(stream) && streamFailed !== uid;
+        if (!streaming) {
+          setVideoState("error");
+          return;
+        }
+        const failed = uid;
+        const tries = streamRetries.current.uid === uid ? streamRetries.current.n : 0;
+        if (tries < STREAM_RETRIES) streamRetries.current = { uid, n: tries + 1 };
+        void afterStreamFailed(uid, tries, STREAM_RETRIES).then((next) => {
+          // Stepped on while the sidecar was asked: the answer is for a video no longer shown.
+          if (shownUid.current !== failed) return;
+          if (next === "again") {
+            // A retry that failed before it loaded says 0: the place from before stands.
+            setResumeAt((r) => (at > 0 || r?.uid !== failed ? { uid: failed, at } : r));
+            // A new address is a new element (keyed by it), and the sidecar opens the video
+            // afresh if its download broke.
+            setVideoUrl(`${stream}?again=${tries + 1}`);
+            return;
+          }
+          // The stream would not play: the whole file is tried once before saying so. The
+          // stream is let go of at once, so a second error from it cannot show before the
+          // whole file is in.
+          setVideoUrl(null);
+          setVideoState("loading");
+          setStreamFailed(failed);
+        });
+      }}
+      onVideoPlaying={() => {
+        // Playing again from the place kept: it is used up, so nothing later seeks back to it.
+        setResumeAt(null);
+      }}
       onContextMenu={(e) => setMenuAt({ x: e.clientX, y: e.clientY })}
       onKey={(e) => {
         if (e.key === "Delete") setConfirming(true);
         else if (e.key.toLowerCase() === "f") void toggleFavorite();
         else if (e.key.toLowerCase() === "s") setSharing(true);
+        else if (e.key === "F5" && canSlideshow) {
+          e.preventDefault();
+          setSlideshowAt(Math.max(index, 0));
+        }
       }}
       fileSize={details?.size ?? null}
       toolbar={
@@ -657,7 +861,7 @@ export function Lightbox({
             <button
               className="lbx-tbtn"
               disabled={busy}
-              onClick={() => setEditing(true)}
+              onClick={startEdit}
               title={t("editor.edit")}
             >
               <PencilIcon size={15} />
@@ -698,6 +902,16 @@ export function Lightbox({
           >
             <ShareIcon size={17} />
           </button>
+          {canSlideshow && (
+            <button
+              className="lbx-ibtn"
+              onClick={() => setSlideshowAt(Math.max(index, 0))}
+              title={t("slideshow.start")}
+              aria-label={t("slideshow.start")}
+            >
+              <SlideshowIcon size={17} />
+            </button>
+          )}
           <button
             className="lbx-ibtn danger"
             disabled={busy}
@@ -717,7 +931,55 @@ export function Lightbox({
                 label: t("selection.editDate"),
                 icon: <CalendarIcon size={14} />,
                 disabled: busy,
-                onSelect: () => setDateFor(uid),
+                onSelect: () => {
+                  setPlaceFor(null);
+                  setMetaFor(null);
+                  setDateFor(uid);
+                },
+              },
+              {
+                key: "editPlace",
+                label: t("selection.editPlace"),
+                icon: <PlaceIcon size={14} />,
+                disabled: busy,
+                onSelect: () => {
+                  setDateFor(null);
+                  setMetaFor(null);
+                  setPlaceFor(uid);
+                },
+              },
+              ...(["text", "strip"] as const).map((kind) => ({
+                key: kind === "text" ? "editText" : "stripMeta",
+                label: t(kind === "text" ? "metaEdit.menuText" : "metaEdit.menuStrip"),
+                icon: kind === "text" ? <TextIcon size={14} /> : <VisibilityOffIcon size={14} />,
+                disabled: busy,
+                onSelect: () => {
+                  setDateFor(null);
+                  setPlaceFor(null);
+                  setMetaFor({ uid, kind });
+                },
+              })),
+            ]
+          : []),
+        ...(onMakeGif && isVideo
+          ? [
+              {
+                key: "makeGif",
+                label: t("selection.makeGif"),
+                icon: <GifIcon size={14} />,
+                disabled: busy,
+                onSelect: () => onMakeGif(uid),
+              },
+            ]
+          : []),
+        ...(onCompress
+          ? [
+              {
+                key: "compress",
+                label: t("selection.compress"),
+                icon: <CompressIcon size={14} />,
+                disabled: busy,
+                onSelect: () => onCompress(uid),
               },
             ]
           : []),
@@ -728,53 +990,108 @@ export function Lightbox({
           disabled: busy,
           onSelect: () => void toggleOffline(),
         },
+        ...(album && onRemovedFromAlbum
+          ? [
+              {
+                key: "removeFromAlbum",
+                label: t("selection.removeFromAlbum"),
+                icon: <LibraryRemoveIcon size={14} />,
+                disabled: busy,
+                onSelect: () => setConfirmingRemove(true),
+              },
+            ]
+          : []),
       ]}
       details={
         !details ? (
           <p className="lbx-dim">{t("common.loading")}</p>
         ) : (
-          <dl>
-            <dt>{t("viewer.name")}</dt>
-            <dd>{details.name || "—"}</dd>
-            <dt>{t("viewer.type")}</dt>
-            <dd>{details.mediaType ?? details.type}</dd>
-            {dims && (
-              <>
-                <dt>{t("viewer.dimensions")}</dt>
-                <dd>{dims}</dd>
-              </>
-            )}
-            <dt>{t("viewer.taken")}</dt>
-            <dd>{formatDate(details.captureTime)}</dd>
-            <dt>{t("viewer.added")}</dt>
-            <dd>{formatDate(details.creationTime)}</dd>
-            <dt>{t("viewer.modified")}</dt>
-            <dd>{formatDate(details.modificationTime)}</dd>
-            <dt>{t("viewer.size")}</dt>
-            <dd>{formatBytes(details.size)}</dd>
-            <dt>{t("viewer.onServer")}</dt>
-            <dd>{formatBytes(details.storageSize)}</dd>
-            <dt>{t("viewer.albums")}</dt>
-            <dd>{details.albumCount}</dd>
-            <dt>{t("viewer.shared")}</dt>
-            <dd>
-              {details.isSharedPublicly
-                ? t("viewer.sharedPublic")
-                : details.isShared
-                  ? t("viewer.sharedPeople")
-                  : t("viewer.sharedNo")}
+          <>
+            <DetailsSection id="file" title={t("details.file")}>
+            <dl>
+              <dt>{t("viewer.name")}</dt>
+              <dd>{details.name || "\u2014"}</dd>
+              <PhotoDescription uid={uid} mediaType={isVideo ? null : details.mediaType} size={details.size} />
+              <dt>{t("viewer.type")}</dt>
+              <dd>
+              {details.mediaType ?? details.type}
+              {motionKind && `, ${t(motionKind === "live" ? "details.typeLive" : "details.typeMotion")}`}
             </dd>
-            {details.sha1 && (
-              <>
-                <dt>SHA-1</dt>
-                <dd className="lbx-mono">{details.sha1}</dd>
-              </>
-            )}
-          </dl>
+              {dims && (
+                <>
+                  <dt>{t("viewer.dimensions")}</dt>
+                  <dd>{dims}</dd>
+                </>
+              )}
+              <dt>{t("viewer.taken")}</dt>
+              <dd>{formatDate(details.captureTime)}</dd>
+              <dt>{t("viewer.added")}</dt>
+              <dd>{formatDate(details.creationTime)}</dd>
+              <dt>{t("viewer.modified")}</dt>
+              <dd>{formatDate(details.modificationTime)}</dd>
+              <dt>{t("viewer.size")}</dt>
+              <dd>{formatBytes(details.size)}</dd>
+              <dt>{t("viewer.onServer")}</dt>
+              <dd>{formatBytes(details.storageSize)}</dd>
+              <dt>{t("viewer.albums")}</dt>
+              <dd>{details.albumCount}</dd>
+              <dt>{t("viewer.shared")}</dt>
+              <dd>
+                {details.isSharedPublicly
+                  ? t("viewer.sharedPublic")
+                  : details.isShared
+                    ? t("viewer.sharedPeople")
+                    : t("viewer.sharedNo")}
+              </dd>
+              {details.sha1 && (
+                <>
+                  <dt>SHA-1</dt>
+                  <dd className="lbx-mono">{details.sha1}</dd>
+                </>
+              )}
+            </dl>
+            </DetailsSection>
+            <CameraSection
+              uid={uid}
+              nodeDevice={nodeDevice(details.extra)}
+              ready={!isVideo && original?.uid === uid}
+            />
+            <PlaceSection
+              place={nodePlace(details.extra)}
+              onChange={
+                onDateEditStarted
+                  ? () => {
+                      setDateFor(null);
+                      setPlaceFor(uid);
+                    }
+                  : undefined
+              }
+            />
+          </>
         )
       }
       detailsExtra={detailsExtra}
+      stageExtra={
+        motionKind ? (
+          <MotionClip
+            itemKey={uid}
+            kind={motionKind}
+            load={() => rpc<ClipPayload | null>("getMotionClip", { uid })}
+          />
+        ) : undefined
+      }
     >
+      {slideshowAt !== null && items && (
+        <Slideshow
+          items={items}
+          start={slideshowAt}
+          onExit={(stoppedAt) => {
+            setSlideshowAt(null);
+            if (stoppedAt !== index) onJump?.(stoppedAt);
+          }}
+        />
+      )}
+
       {menuAt && (
         <ContextMenu
           x={menuAt.x}
@@ -825,26 +1142,60 @@ export function Lightbox({
         />
       )}
 
+      {confirmingRemove && (
+        <Confirm
+          title={t("confirm.removeTitle")}
+          message={t("confirm.removeCount.one", { count: 1 })}
+          confirmLabel={t("confirm.removeConfirm")}
+          onCancel={() => setConfirmingRemove(false)}
+          onConfirm={() => {
+            setConfirmingRemove(false);
+            void removeFromAlbum();
+          }}
+        />
+      )}
+
       {/* Saving writes a NEW timeline photo carrying this one's date, place and camera;
           the original is left untouched. The caller reloads so the copy appears. */}
+      {editingVideo && details && (
+        <VideoEditor
+          source={{ kind: "drive", uid, name: details.name, album }}
+          onClose={() => setEditingVideo(false)}
+          onSaved={(saved, missedAlbum) => {
+            setEditingVideo(false);
+            if (missedAlbum) setError(t("editor.albumAddFailed"));
+            onEdited?.(saved[0]);
+          }}
+        />
+      )}
+
       {editing && details && (
         <PhotoEditor
           sourceKey={uid}
           loadSource={() => cloudEditorSource(uid)}
           saveTo="drive"
           saveEdit={(jpeg, src) =>
-            saveCloudEdit(jpeg, {
-              name: details.name,
-              captureTime: src.captureTime,
-              camera: src.camera,
-              latitude: src.latitude,
-              longitude: src.longitude,
-            }).then(() => null)
+            saveCloudEdit(
+              jpeg,
+              {
+                name: details.name,
+                captureTime: src.captureTime,
+                camera: src.camera,
+                latitude: src.latitude,
+                longitude: src.longitude,
+              },
+              album,
+            ).then((r) => {
+              missedAlbum.current = r.albumFailed === true;
+              return r.uid;
+            })
           }
           onClose={() => setEditing(false)}
-          onSaved={() => {
+          onSaved={(copy) => {
             setEditing(false);
-            onEdited?.();
+            if (missedAlbum.current) setError(t("editor.albumAddFailed"));
+            missedAlbum.current = false;
+            onEdited?.(copy ?? undefined);
           }}
         />
       )}

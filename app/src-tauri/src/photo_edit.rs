@@ -546,9 +546,11 @@ fn decode_full_res_to_jpeg(_src: &Path, _orientation: u32) -> Result<Vec<u8>, St
 #[tauri::command]
 pub async fn save_local_edit(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     src_path: String,
     image_base64: String,
     format: Option<String>,
+    pick_title: Option<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let format = OutFormat::parse(format.as_deref())?;
@@ -577,10 +579,62 @@ pub async fn save_local_edit(
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "photo".to_string());
+        if crate::local_file::is_portal_copy(&resolved) {
+            let name = edit_file_name(&stem, &stamp_str(&local_now()), 1, format.extension());
+            let dest = crate::local_file::pick_copy_place(
+                &window,
+                &resolved,
+                &name,
+                format.extension(),
+                pick_title.as_deref(),
+            )?;
+            return crate::local_file::write_picked_copy(&dest, |mut file| {
+                use std::io::Write;
+                file.write_all(&output)
+                    .map_err(|e| format!("the edited photo could not be written: {e}"))
+            });
+        }
         write_new_copy(parent, &stem, &local_now(), format.extension(), &output)
     })
     .await
     .map_err(|e| format!("saving that photo failed: {e}"))?
+}
+
+/// Ask where to put a finished image and write it there. The path comes from the native
+/// save dialog, never from the page, so a page cannot aim the write at a file the user did
+/// not pick. Returns the written path, or none when the dialog was dismissed.
+#[tauri::command]
+pub async fn save_image_as(
+    window: tauri::WebviewWindow,
+    default_name: String,
+    image_base64: String,
+    format: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let format = OutFormat::parse(Some(&format))?;
+    let bytes = decode_edited(&image_base64)?;
+    if !format.matches(&bytes) {
+        return Err(format!("the image is not a readable {}", format.extension()));
+    }
+    let ext = format.extension();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_file_name(&default_name)
+            .add_filter(ext, &[ext])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| format!("the save dialog failed: {e}"))?;
+    let Some(picked) = picked else { return Ok(None) };
+    let mut path = picked.into_path().map_err(|e| e.to_string())?;
+    if path.extension().is_none() {
+        path.set_extension(ext);
+    }
+    std::fs::write(&path, &bytes).map_err(|e| format!("the image could not be written: {e}"))?;
+    Ok(Some(crate::strip_verbatim(path).to_string_lossy().into_owned()))
 }
 
 /// What a copy is saved as: the editor encodes the pixels, this only checks and labels them.
@@ -1048,7 +1102,7 @@ fn patch_exif_app1(segment: &mut [u8], width: u32, height: u32) -> Result<(), St
 // ---- Naming and writing the new file ----
 
 /// A local wall-clock stamp for the saved copy's name.
-struct Stamp {
+pub(crate) struct Stamp {
     year: u16,
     month: u8,
     day: u8,
@@ -1060,7 +1114,7 @@ struct Stamp {
 /// The current local time. Local, not UTC, because the name is for a person reading their
 /// own folder.
 #[cfg(windows)]
-fn local_now() -> Stamp {
+pub(crate) fn local_now() -> Stamp {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let t = unsafe { GetLocalTime() };
     Stamp {
@@ -1090,7 +1144,7 @@ fn civil_from_days(z: i64) -> (i32, u32, u32) {
 }
 
 #[cfg(not(windows))]
-fn local_now() -> Stamp {
+pub(crate) fn local_now() -> Stamp {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1108,7 +1162,7 @@ fn local_now() -> Stamp {
 }
 
 /// The stamp as `yyyyMMdd_HHmmss`.
-fn stamp_str(s: &Stamp) -> String {
+pub(crate) fn stamp_str(s: &Stamp) -> String {
     format!(
         "{:04}{:02}{:02}_{:02}{:02}{:02}",
         s.year, s.month, s.day, s.hour, s.minute, s.second

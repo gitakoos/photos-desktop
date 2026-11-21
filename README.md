@@ -6,7 +6,7 @@
 
 <p align="center">
   End-to-end encrypted photo backup and browsing for your Proton Drive Photos library.<br />
-  <strong>Unofficial</strong> open-source desktop client for Windows and Linux, built on Proton's own Drive SDK by
+  <strong>Unofficial</strong> open-source desktop client for Windows, Linux and macOS (alpha), built on Proton's own Drive SDK by
   <a href="https://akoos.eu">Akoos</a>. Not affiliated with Proton AG.
 </p>
 
@@ -15,6 +15,7 @@
   <a href="https://github.com/gitakoos/photos-desktop/releases"><img src="https://img.shields.io/github/downloads/gitakoos/photos-desktop/total?label=downloads&color=8B7CFF" alt="Downloads" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License" /></a>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-orange" alt="Windows 10 and 11" />
+  <img src="https://img.shields.io/badge/macOS-13.5%2B%20alpha-orange" alt="macOS 13.5 or newer, alpha" />
   <img src="https://img.shields.io/badge/Linux-Flatpak-orange" alt="Linux, Flatpak" />
   <a href="https://www.photosforproton.eu"><img src="https://img.shields.io/badge/website-photosforproton.eu-8B7CFF" alt="Website" /></a>
 </p>
@@ -33,24 +34,32 @@
 | Area | What you get |
 | --- | --- |
 | **End-to-end encrypted** | Built on Proton's official Drive SDK, so photos and metadata are decrypted only on this device. Sign in on Proton's own page in the browser, where the password, the second factor and any captcha are entered, so the app never sees your password. |
-| **Browse & find** | The full timeline by month in a sidebar layout, with smooth zoom and a viewer that zooms around the cursor, a filmstrip and keyboard shortcuts. One search over photos, albums, people and labels, with dates, names, labels and categories as pills. A Collection of days and seasons from past years, and a map of where photos were taken with a searchable list of places. |
-| **People & search on this PC** | Face recognition groups photos by the people in them, and search finds photos by what they show ("dog in the snow"), both on this PC, each with its own switch and a Gentle, Balanced or Fast scan that goes Gentle on battery. |
-| **One backup with your phone** | With Automatic backup on, faces, names, labels, hidden photos and the search index stay the same on this PC and on phones with Photos for Proton 2.6.0 or newer; a later rename or merge wins on every device. |
-| **Albums & sharing** | Create, rename and delete albums, choose a cover, and add or remove photos. Share a photo by public link with an optional password and expiry, invite people to an album as viewer or editor, and accept or decline albums shared with you. |
+| **Browse & find** | The full timeline by month in a sidebar layout, with smooth zoom and a viewer that zooms around the cursor, a filmstrip and keyboard shortcuts. One search over photos, albums, people and labels, with dates, names, labels and categories as pills. A Collection of days and seasons from past years and of themes such as Food, Pets or Sunsets, a calendar of photos by day, a slideshow, Live Photos that play their clip, and a map of where photos were taken with a searchable list of places. |
+| **People & search on this PC** | Face recognition groups photos by the people in them, and search finds photos by what they show ("dog in the snow"), both on this PC, each with its own switch and a Gentle, Balanced or Fast scan that goes Gentle on battery. A person can be hidden from People without losing their photos. |
+| **One backup with your phone** | With Automatic backup on, faces, names, labels, hidden photos and the search index stay the same on this PC and on phones with Photos for Proton 2.6.0 or newer; a later rename or merge wins on every device. Changes from your other devices arrive within minutes, People and search work from what they saved even with scanning here turned off, and the theme, colours and album orders stay the same on your computers. |
+| **Albums & sharing** | Create, rename and delete albums, choose a cover, and add or remove photos. Sort albums by newest photo or in your own order as a grid or a list, and arrange the photos inside an album. Share a photo by public link with an optional password and expiry, invite people to an album as viewer or editor, and accept or decline albums shared with you. |
 | **Organize** | Selection with click, Ctrl and Shift and bulk actions, right-click menus, favourites, labels, renaming, hidden photos and albums, and a trash that restores, deletes for good, or empties. |
-| **Edit** | The Android app's editor: thirteen adjustments, curves and HSL, filters, crop, straighten and keystone, pen, text, redaction, Hide faces and frames. Edits are saved as a new copy that keeps the original's date, camera and place. |
-| **Fix dates** | Change the date of photos beside the photo or the grid (set, shift, or take it from the file name), or fix many at once on the Fix dates page; each photo is replaced by a corrected copy that keeps its albums, labels and faces. |
-| **Tools** | Copy text from photos, read on this PC, and a duplicate finder for identical and similar photos. |
-| **Upload & import** | Files, folders or drag and drop, with thumbnails, capture time, place and camera, and photos and videos made smaller on upload if you like. Import a Google Takeout or an Ente export with a review first, or bring photos over from My files; dates, places, albums, favourites and Live Photos are kept, and photos already in the library are skipped. |
-| **File Explorer** (Windows) | Optional. A Proton Photos folder in the Explorer sidebar that works both ways: copy photos in to upload them, make a folder under Albums for a new album, rename, move into Favorites, or delete to the Proton trash. Nothing takes space until it is opened, and Windows Search does not index the photos' dates, camera or places. Keep on this PC downloads new or every photo, with Pause and Resume. |
+| **Edit** | The Android app's editor: thirteen adjustments, curves and HSL, filters, crop, straighten and keystone, pen, text, redaction, Hide faces and frames. Edits are saved as a new copy that keeps the original's date, camera and place. A video editor (trim, split, crop, look, speed, sound and music, GIF or a still frame) and a collage maker for two to nine photos. |
+| **Dates, places & details** | Change the date of photos beside the photo or the grid (set, shift, or take it from the file name), or fix many at once on the Fix dates page. Change the place, add a description, an author and a copyright, or remove the location, camera details or text from JPEG and PNG photos. Each photo is replaced by a corrected copy that keeps its albums, labels and faces. |
+| **Tools** | Copy text from photos, read on this PC, a duplicate finder for identical and similar photos, and Compress on Drive, which replaces photos and videos already on Drive with lighter copies. |
+| **Upload & import** | Files, folders or drag and drop, with thumbnails, capture time, place and camera, and photos and videos made smaller on upload if you like; a dropped folder of folders makes an album per folder. Import a Google Takeout, an Ente export or any zip of photos such as a Dropbox download with a review first, or bring photos over from My files; dates, places, albums, favourites and Live Photos are kept, and photos already in the library are skipped. |
+| **File Explorer** (Windows) | Optional. A Proton Photos folder in the Explorer sidebar that works both ways: copy photos in to upload them, make a folder under Albums for a new album, rename, move into Favorites, or delete to the Proton trash. Nothing takes space until it is opened, and Windows Search does not index the photos' dates, camera or places. Keep on this PC downloads new or every photo, with Pause and Resume, Always keep on this device and Free up space work on single photos and album folders, and the folder can be moved to another folder on a drive in this PC. |
 | **File manager** (Linux) | Proton Photos in the file manager's sidebar (GNOME Files, KDE Dolphin): open photos from there, copy files in to upload them, or delete to the Proton trash. |
-| **Privacy & lock** | The session, the caches and any offline photos are sealed with AES-256-GCM on this PC, and locking discards the key. Hidden photos and the app lock open with Windows Hello, or on Linux with a password of your own. Keep photos available offline inside the app, readable by nothing else; started with no connection, the app opens on them. |
+| **Privacy & lock** | The session, the caches and any offline photos are sealed with AES-256-GCM on this PC, and locking discards the key. Hidden photos and the app lock open with Windows Hello, Touch ID on a Mac, or on Linux with a password of your own. Keep photos available offline inside the app, readable by nothing else; started with no connection, the app opens on them. |
 | **Hardened** | No telemetry, logs scrubbed of key material, and updates checked against the release's SHA-256 before they run. |
-| **Comfort** | On Windows it runs in the system tray and releases the renderer's memory there, starts with Windows if you like, updates itself with its progress shown, and opens photos and videos from Explorer straight into the viewer. On Linux it starts at login if you like and keeps running when its window is closed. 11 languages, light, dark and system themes with a pure-black option, and 11 colour palettes. |
+| **Comfort** | On Windows it runs in the system tray and releases the renderer's memory there, starts with Windows if you like, updates itself with its progress shown, and opens photos and videos from Explorer straight into the viewer. On Linux it starts at login if you like and keeps running when its window is closed, and on a Mac it keeps running in the menu bar. 11 languages, light, dark and system themes with a pure-black option, and 11 colour palettes. |
 
 ## Install
 
 **Windows 10 and 11:** download `Photos-for-Proton-Setup.exe` from the [releases page](https://github.com/gitakoos/photos-desktop/releases/latest) and run it. It installs for your account only and asks for no administrator rights. Windows SmartScreen may show "Windows protected your PC" the first time: choose **More info**, then **Run anyway**.
+
+**macOS 13.5 Ventura or newer (alpha)**, on Apple silicon and Intel Macs: download `Photos-for-Proton-macOS-alpha.dmg` from the same page, open it and drag **Photos for Proton** into **Applications**. The first time, macOS asks you to confirm that you want to open it:
+
+- **macOS 13 and 14:** in Applications, right click (or Control click) Photos for Proton, choose **Open**, then **Open** again.
+- **macOS 15 and newer:** open Photos for Proton once and close the message that appears. Then open **System Settings > Privacy & Security**, scroll down to Security, click **Open Anyway** next to Photos for Proton, and confirm with your password or Touch ID.
+- **If neither shows an Open button:** open Terminal and run `xattr -dr com.apple.quarantine "/Applications/Photos for Proton.app"`, then open the app as usual.
+
+From then on it opens like any other app. A later version installs the same way, over this one, keeping your sign-in and settings. When macOS then asks whether Photos for Proton may use its key in your keychain, enter your Mac password and choose **Always Allow**.
 
 **Linux:** download `photos-for-proton.flatpak` from the same page and install it with `flatpak install --user photos-for-proton.flatpak`. It uses the GNOME runtime from Flathub, which Flatpak fetches on its own. A later version installs the same way, over this one, keeping your sign-in and settings. To build it yourself: `bash flatpak/build-local.sh`.
 
@@ -82,15 +91,20 @@ app/
     ├── explorer_sync.rs, explorer_rules.rs   Changes made in Explorer, read and applied
     ├── files_drive.rs               Linux file-manager drive (local WebDAV)
     ├── secure_store.rs              Sealed store and the vault key
+    ├── video_edit.rs, video_compress.rs   The video editor and compression, on the app's own ffmpeg
+    ├── sync_location.rs             Moving the Proton Photos folder
     └── window_place.rs, notices.rs, file_assoc.rs, autostart.rs, …
 sidecar/
 ├── server.ts         JSON-RPC server
 ├── update.ts         Release check and verified download
 └── proton/           Session, library, upload, download, albums, sharing,
                       trash, import, search, faces, copy text, duplicates,
-                      the backup shared with the phone
+                      date, place and text edits, Compress on Drive, themes,
+                      the backup shared with the phone and your computers
 setup/                Installer (Tauri)
 flatpak/              Linux Flatpak manifest and local build
+ffmpeg/               The app's own ffmpeg, built from pinned sources
+.github/workflows/    The macOS build
 ```
 
 ## What's reused vs. what's built here

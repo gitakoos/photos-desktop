@@ -291,6 +291,11 @@ body {
 .pfp-veil .app-shell {
   visibility: hidden;
 }
+/* A dialog drawn at the page's top level (Confirm) is hidden with the rest: its text can name
+   a person or an album. */
+.pfp-veil .cf-backdrop {
+  visibility: hidden;
+}
 
 .app-shell {
   user-select: none;
@@ -322,6 +327,24 @@ body {
 :root[data-native-frame] .app-shell {
   border-radius: 0;
   border: none;
+}
+
+/* A Mac's traffic lights sit at the top left of the main window, centred 24 points down:
+   every bar that reaches that corner starts after them, and the window buttons are gone
+   from the right. */
+:root[data-mac-chrome] .titlebar {
+  height: 48px;
+  flex-basis: 48px;
+  padding-left: 88px;
+}
+:root[data-mac-chrome] .g-strip {
+  padding-left: 88px;
+  padding-right: 12px;
+}
+:root[data-mac-chrome] .lbx:not(.fullscreen) .lbx-bar,
+:root[data-mac-chrome] .lbx:not(.fullscreen) .ss-top,
+:root[data-mac-chrome] .ed-topbar {
+  padding-left: 88px;
 }
 
 /* ---- Sidebar layout ----

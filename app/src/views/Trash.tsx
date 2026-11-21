@@ -57,7 +57,7 @@ export function Trash({
   cellSize,
   reloadKey,
   initial,
-  onCount,
+  onListed,
   onRestored,
   onData,
 }: {
@@ -66,7 +66,8 @@ export function Trash({
   reloadKey: number;
   /** What the shell warmed, for the first paint only; the read below still runs. */
   initial?: TrashItem[] | null;
-  onCount?: (n: number | null) => void;
+  /** What the view lists (null while loading): the count and what Empty trash destroys. */
+  onListed?: (uids: string[] | null) => void;
   /** A restored photo is back in the timeline, so the shell reloads its data. */
   onRestored?: () => void;
   /** The fresh read, so the shell's snapshot keeps up with this view. */
@@ -131,13 +132,13 @@ export function Trash({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
-  // Report the count up to the top bar (null while loading), which owns the
+  const uids = useMemo(() => items.map((i) => i.uid), [items]);
+
+  // Report what is listed up to the top bar (null while loading), which owns the
   // count badge and the empty-trash button.
   useEffect(() => {
-    onCount?.(loading ? null : items.length);
-  }, [loading, items.length, onCount]);
-
-  const uids = useMemo(() => items.map((i) => i.uid), [items]);
+    onListed?.(loading ? null : uids);
+  }, [loading, uids, onListed]);
   const thumbs = useThumbnails(uids);
 
   // A trashed album is restorable like anything else here, so it is listed and

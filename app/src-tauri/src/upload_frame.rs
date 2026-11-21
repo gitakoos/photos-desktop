@@ -47,7 +47,10 @@
 // asks for the upload and passes them along with it, so Windows-specific code stays in
 // Rust, Proton-specific code stays in the sidecar, and no new channel exists.
 //
-// Off Windows the same two answers come from GStreamer, the framework a Linux desktop
+// On macOS they come from the app's own ffmpeg, the one it compresses videos with, which also
+// draws a HEIC or HEIF still; a DNG gives its embedded preview there too.
+//
+// On Linux the same two answers come from GStreamer, the framework a Linux desktop
 // already plays these files with; inside the Flatpak that is the runtime's copy and the
 // decoders it and its codecs extension carry. The trade is the same one: nothing is
 // decoded by code shipped here, and a file the machine cannot play gets no frame. Unlike
@@ -111,6 +114,7 @@ pub struct FramePrep {
 ///
 /// A zero means the shell had no answer, which is not a duration of nothing.
 /// Rounded to the millisecond, which is every bit of precision anything here displays.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn duration_seconds(hundred_ns: u64) -> Option<f64> {
     if hundred_ns == 0 {
         return None;
@@ -177,9 +181,8 @@ fn frame_dir() -> PathBuf {
 /// A name no other staged frame can collide with, from the same source of randomness the
 /// store's keys come from.
 fn frame_name() -> String {
-    use aes_gcm::aead::rand_core::RngCore;
-    let mut raw = [0u8; 16];
-    aes_gcm::aead::OsRng.fill_bytes(&mut raw);
+    use aes_gcm::aead::Generate;
+    let raw = <[u8; 16]>::generate();
     let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     format!("frame-{hex}.jpg")
 }
@@ -448,7 +451,7 @@ fn run_jobs(jobs: &[FrameJob]) -> Vec<(bool, MediaInfo)> {
 
 /// The same workers off Windows, under the same bound on how many files are decoded at
 /// once: a video asked of GStreamer, and each of the three stills of its own decoder.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn run_jobs(jobs: &[FrameJob]) -> Vec<(bool, MediaInfo)> {
     let mut out = vec![(false, MediaInfo::default()); jobs.len()];
     if jobs.is_empty() {
@@ -478,8 +481,61 @@ fn run_jobs(jobs: &[FrameJob]) -> Vec<(bool, MediaInfo)> {
     out
 }
 
+/// The same workers on macOS: a video, and a HEIC or HEIF still, drawn by the app's own
+/// ffmpeg (video_compress.rs), and a DNG from the preview it embeds.
+#[cfg(target_os = "macos")]
+fn run_jobs(jobs: &[FrameJob]) -> Vec<(bool, MediaInfo)> {
+    let mut out = vec![(false, MediaInfo::default()); jobs.len()];
+    if jobs.is_empty() {
+        return out;
+    }
+    let chunk = jobs.len().div_ceil(FRAME_WORKERS.min(jobs.len()).max(1));
+    std::thread::scope(|scope| {
+        for (jobs, out) in jobs.chunks(chunk).zip(out.chunks_mut(chunk)) {
+            scope.spawn(move || {
+                for (job, slot) in jobs.iter().zip(out.iter_mut()) {
+                    *slot = match local_file::extension_of(&job.src.to_string_lossy()).as_str() {
+                        "dng" => still_media::dng(&job.src, &job.dest),
+                        "heic" | "heif" => (crate::video_compress::picture(&job.src, &job.dest, FRAME_EDGE as u32, 0.0), MediaInfo::default()),
+                        _ => ff_video_frame(&job.src, &job.dest),
+                    };
+                    if !slot.0 {
+                        let _ = std::fs::remove_file(&job.dest);
+                    }
+                }
+            });
+        }
+    });
+    out
+}
+
+/// A video's picture and description on macOS, both from the app's own ffmpeg. Described
+/// first and kept whatever the picture does, as on the other systems. The picture is taken a
+/// tenth of the way in and never later than a second, past the black of a fade-in, as
+/// GStreamer takes it on Linux.
+#[cfg(target_os = "macos")]
+fn ff_video_frame(src: &Path, dest: &Path) -> (bool, MediaInfo) {
+    let mut info = MediaInfo::default();
+    let mut at = 0.0;
+    if let Ok(read) = crate::video_compress::probe(&src.to_string_lossy()) {
+        let side = |key: &str| read[key].as_u64().and_then(|v| u32::try_from(v).ok()).filter(|v| *v > 0);
+        if let (Some(width), Some(height)) = (side("width"), side("height")) {
+            let turned = matches!(read["rotation"].as_u64(), Some(90 | 270));
+            let (width, height) = if turned { (height, width) } else { (width, height) };
+            info.width = Some(width);
+            info.height = Some(height);
+        }
+        let ms = read["durationMs"].as_u64().unwrap_or(0);
+        if ms > 0 {
+            info.duration_sec = Some(ms as f64 / 1000.0);
+            at = (ms as f64 / 10_000.0).min(1.0);
+        }
+    }
+    (crate::video_compress::picture(src, dest, FRAME_EDGE as u32, at), info)
+}
+
 /// What GStreamer can say about one file, and the picture it can draw of it.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 mod gst_media {
     use std::path::Path;
 
@@ -605,8 +661,11 @@ mod gst_media {
 mod still_media {
     use std::path::Path;
 
-    use super::{dng, fit, MediaInfo};
+    #[cfg(target_os = "linux")]
+    use super::fit;
+    use super::{dng, MediaInfo};
 
+    #[cfg(target_os = "linux")]
     /// A HEIC or HEIF still: the primary image, decoded upright (libheif applies the
     /// container's rotation and mirroring), fitted to `FRAME_EDGE` and written as a JPEG.
     /// Its size is the one after those transformations, the size every viewer draws.
@@ -663,6 +722,7 @@ mod still_media {
         (made, info)
     }
 
+    #[cfg(target_os = "linux")]
     /// Tightly packed RGB rows out of a plane whose rows may be padded, as a JPEG.
     fn write_jpeg(dest: &Path, data: &[u8], stride: usize, width: u32, height: u32) -> Option<()> {
         let (w, h) = (u16::try_from(width).ok()?, u16::try_from(height).ok()?);
@@ -678,7 +738,7 @@ mod still_media {
 
 /// A size scaled down, never up, so its longer edge is at most `FRAME_EDGE`: the same
 /// ceiling the shell is asked for, since the larger upload thumbnail is that size.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn fit(width: u32, height: u32) -> (u32, u32) {
     let edge = FRAME_EDGE as u64;
     let long = width.max(height) as u64;
@@ -938,7 +998,7 @@ mod dng {
 /// Whether an `image-orientation` tag turns the picture a quarter, which swaps its edges.
 /// A phone held upright records a landscape frame and a rotate-90 tag, and the size stored
 /// has to be the one every viewer draws, as the shell's already-turned size is.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn quarter_turned(orientation: &str) -> bool {
     matches!(orientation, "rotate-90" | "rotate-270" | "flip-rotate-90" | "flip-rotate-270")
 }
@@ -1187,7 +1247,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_quarter_turn_swaps_the_edges_and_nothing_else_does() {
         for tag in ["rotate-90", "rotate-270", "flip-rotate-90", "flip-rotate-270"] {
@@ -1198,7 +1258,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_still_is_fitted_down_to_the_frame_edge_and_never_up() {
         assert_eq!(fit(4032, 3024), (1920, 1440));
@@ -1338,7 +1398,7 @@ mod tests {
     /// an HEVC encoder is present (the Flatpak runtime's codecs extension carries one),
     /// and AV1 otherwise, which goes through the same container and decode. Where libheif
     /// writes the requested quarter turn into the file, the size must come back turned.
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn libheif_decodes_a_heif_still_upright_to_a_jpeg() {
         use libheif_rs::{
@@ -1396,7 +1456,7 @@ mod tests {
 
     /// End to end on this machine's GStreamer: a short clip is encoded, then described and
     /// pictured by the same code the upload runs.
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn gstreamer_describes_and_pictures_a_real_clip() {
         use gstreamer as gst;

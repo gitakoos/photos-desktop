@@ -25,6 +25,7 @@
 // people. It runs in the background, a few photos at a time as its speed allows, writing down what
 // it found in the library's order, and picks up where it stopped.
 
+import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 
 import { cropRegion, decodeLikePhone, letterbox, type Decoded } from "./phoneDecode.ts";
@@ -41,12 +42,11 @@ import {
 } from "./faceAlign.ts";
 import {
   Stopped,
-  autoMerge,
-  groupMergeOwed,
-  mergeSplitGroups,
+  autoMergeAsync,
+  groupAfterPass,
   placeNew,
   reconsiderLeftovers,
-  regroupAll,
+  settleTakenIn,
   takeHeldOver,
 } from "./facePeople.ts";
 import { FACE_EMBEDDING_DIM, FACE_SUGGEST_THRESHOLD, dot, meanDirection } from "./faceCluster.ts";
@@ -63,10 +63,13 @@ import {
   type FaceHit,
 } from "./faces.ts";
 import { FaceStore, MAX_FACE_INDEX, type FaceRecord } from "./faceStore.ts";
-import { adoptScanned, applyCopy, compareWithPhone, copyFits, copyForDrive, describeComparison } from "./faceSync.ts";
+import { adoptScannedAsync, applyCopyAsync, compareWithPhoneAsync, copyFits, copyForDrive, describeComparison } from "./faceSync.ts";
 import type { FaceCopy, FaceCopyToWrite, SearchCopyToWrite } from "./driveData.ts";
 import { markGpuFailed, openModel, type Accel } from "./inference.ts";
+import { ModelWorkerGone, tensor, type OrtSession } from "./ortSession.ts";
 import { pinnedModel, type PinnedModelStatus } from "./pinnedModel.ts";
+import { PeopleFeed } from "./peopleFeed.ts";
+import { PeopleIndex } from "./peopleIndex.ts";
 import {
   SearchStore,
   clipInputFrom,
@@ -77,10 +80,11 @@ import {
   CLIP_SIDE,
 } from "./searchIndex.ts";
 import { EMBEDDING_DIM, SEARCH_MODEL_ID, type SearchCopy } from "./semantic.ts";
-import { markFreshInstall, readBackupFlags, writeBackupFlags } from "./backupFlags.ts";
+import { readBackupFlags, writeBackupFlags } from "./backupFlags.ts";
 import { installDeviceId } from "./deviceId.ts";
 import { diag } from "./diag.ts";
 import { isReady } from "./store.ts";
+import { ScanMissBook, missFor, type MissSummary, type ScanMiss } from "./scanMisses.ts";
 import {
   PowerWatch,
   SPEED_LEVELS,
@@ -98,6 +102,19 @@ import {
   type SpeedLevel,
   type StageTimes,
 } from "./scanPipeline.ts";
+
+/**
+ * Times one step of a scan pass into the diagnostics, as `diag.time` does an awaited one:
+ * counted every time, written to the log only when slow or with detailed logging on.
+ */
+function recordStep<T>(name: string, run: () => T): T {
+  const started = performance.now();
+  try {
+    return run();
+  } finally {
+    diag.record("faces", name, performance.now() - started);
+  }
+}
 
 /** The phone's recognition model, pinned to the release's bytes. */
 export const EMBED_MODEL = {
@@ -134,12 +151,10 @@ export function deviceLabel(): string {
 
 /** How long a finished scan waits before looking for new photos. */
 const RECHECK_MS = 15 * 60_000;
-/**
- * Above this many faces the whole-library regroup is left out: it grows with the faces times the
- * groups, and the people the scan formed as it went stand as they are.
- */
-const FULL_REGROUP_MAX_FACES = 60_000;
-
+/** The soonest a finished scan looks again for a photo whose wait ends: the ladder's first step. */
+const RECHECK_MIN_MS = 5 * 60_000;
+/** How often the skipped photos' files are compared with Drive, to read again those that changed. */
+const STAMP_CHECK_MS = 6 * 3_600_000;
 /** Where the scan reads the library from. */
 export type ScanSource = {
   /** Every photo of the library. */
@@ -147,12 +162,15 @@ export type ScanSource = {
   /**
    * What the models read for these photos: the full-resolution original of a photo, as the
    * phone reads it, else its large preview (a video, or a format this side cannot decode);
-   * null for one that has neither. A photo missing from the answer is asked for again later.
-   * `ahead` is how many downloads may run at once.
+   * null for one that has neither. `miss` says why a photo gave nothing to read: one that may
+   * read later waits and is asked for again. A photo missing from the answer is asked for again
+   * on the next pass. `ahead` is how many downloads may run at once.
    */
-  pictures(uids: string[], ahead?: number): AsyncIterable<{ uid: string; bytes: Buffer | null }>;
+  pictures(uids: string[], ahead?: number): AsyncIterable<{ uid: string; bytes: Buffer | null; miss?: ScanMiss }>;
   /** The photos in the Drive trash, by link id, which keep their faces; throws when they cannot be read. */
   listTrashed(): Promise<Set<string>>;
+  /** What identifies each photo's file now, its revision, by uid; a photo not answered is left as it is. */
+  stamps?(uids: string[]): Promise<Map<string, string>>;
   /** Which photos are hidden: they are not scanned, and their faces never go to Drive. */
   hiddenTest(): (uid: string) => boolean;
 };
@@ -217,14 +235,13 @@ async function detectIn(
   detector: any,
   times?: StageTimes,
 ): Promise<FaceHit[]> {
-  const ort = await import("onnxruntime-node");
   const { input, scale, padX, padY } = timedSync(times, "detectPrep", () => {
     const part =
       region.x === 0 && region.y === 0 && region.w === img.width && region.h === img.height
         ? img
         : cropRegion(img, region.x, region.y, region.w, region.h);
     const boxed = letterbox(part, FACE_INPUT, PAD_GREY);
-    return { ...boxed, input: new ort.Tensor("float32", toPlanes(boxed.square), [1, 3, FACE_INPUT, FACE_INPUT]) };
+    return { ...boxed, input: tensor("float32", toPlanes(boxed.square), [1, 3, FACE_INPUT, FACE_INPUT]) };
   });
   const result = await timed(times, "detect", () => detector.run({ [detector.inputNames[0]]: input }));
   const inv = 1 / scale;
@@ -282,7 +299,6 @@ export async function analyzeImage(
   sensitive = false,
   times?: StageTimes,
 ): Promise<FaceRecord[]> {
-  const ort = await import("onnxruntime-node");
   const { rgb, width, height } = img;
   if (width < MIN_SIDE || height < MIN_SIDE) return [];
 
@@ -311,11 +327,11 @@ export async function analyzeImage(
       const aligned = warpAligned(rgb, width, height, similarityTransform(points));
       const blur = alignedBlur(aligned);
       if (blur < MIN_SHARPNESS) return null;
-      return { blur, tensor: new ort.Tensor("float32", embedInput(aligned), [1, ALIGNED, ALIGNED, 3]) };
+      return { blur, input: tensor("float32", embedInput(aligned), [1, ALIGNED, ALIGNED, 3]) };
     });
     if (!prepared) continue;
-    const { blur, tensor } = prepared;
-    const out = await timed(times, "embed", () => models.embedder.run({ [models.embedder.inputNames[0]]: tensor }));
+    const { blur, input } = prepared;
+    const out = await timed(times, "embed", () => models.embedder.run({ [models.embedder.inputNames[0]]: input }));
     const embedding = normalizeInPlace(Float32Array.from(out[models.embedder.outputNames[0]].data as Float32Array));
     if (embedding.length !== FACE_EMBEDDING_DIM) continue;
     faces.push({
@@ -334,11 +350,25 @@ export async function analyzeImage(
 
 export class FaceScanner {
   readonly store = new FaceStore();
+  /** The people list as last handed to the window, which then reads only what changed. */
+  peopleFeed = new PeopleFeed(randomUUID());
+  /** The people list kept between reads, worked out again only where it changed. */
+  peopleIndex = new PeopleIndex();
   /** The search by what a photo shows, indexed in the same pass over the library. */
   readonly search = new SearchStore();
+  /** The photos the scan could not read: those waiting to be tried again and those skipped. */
+  readonly misses = new ScanMissBook();
+  /** When the skipped photos' files were last compared with Drive. */
+  private stampsCheckedAt = 0;
+  /** The library as last read, which the waiting photos are counted among. */
+  private listed: Set<string> | undefined;
+  /** Whether the last run ended in an error, so the next comes after the ladder's first step. */
+  private lastRunFailed = false;
+  /** How often each photo was being read when the model thread was lost, in this process. */
+  private workerLosses = new Map<string, number>();
   /** Index the photos for the search too; runs with face recognition off as well. */
   private indexing = false;
-  private clip: { session: any; accel: Accel } | null = null;
+  private clip: { session: OrtSession; accel: Accel } | null = null;
   private searchCounts: { version: number; counts: { indexed: number; unreadable: number } } | null = null;
   /** Photos in the library as last listed. */
   private libraryCount = 0;
@@ -371,6 +401,8 @@ export class FaceScanner {
   private running: Promise<void> | null = null;
   /** A start asked for while a run was still ending, made once it has. */
   private startAfter = false;
+  /** What the last run set out to do: a switch turned on after it started is left to the next run. */
+  private ran = { faces: false, index: false };
   /** Bumped by every stop; a run that sees a newer one ends. */
   private generation = 0;
   private status: ScanStatus = {
@@ -392,7 +424,7 @@ export class FaceScanner {
   private models: Models | null = null;
   /** The models being opened, so photos read side by side open them once. */
   private modelsOpening: Promise<Models> | null = null;
-  private clipOpening: Promise<{ session: any; accel: Accel }> | null = null;
+  private clipOpening: Promise<{ session: OrtSession; accel: Accel }> | null = null;
   /** The speed chosen in Settings; null for the one this machine starts at. */
   private speedChoice: ScanSpeed | null = null;
   private readonly power: PowerWatch;
@@ -500,15 +532,19 @@ export class FaceScanner {
     const syncOn = syncing && !this.syncing;
     this.syncing = syncing;
     if (syncOn) {
-      this.setPhoneCopies(this.phoneCopies);
+      void this.setPhoneCopies(this.phoneCopies, this.readingBack);
       this.takeInSearch();
       this.scheduleSave();
     }
     const turnedOn = autoMerging && !this.autoMerging;
     this.autoMerging = autoMerging;
     this.findingMore = findingMore;
-    if (turnedOn && this.store.isLoaded()) this.mergeLikely();
+    if (turnedOn && this.store.isLoaded()) void this.mergeLikely();
+    const facesOn = on && !this.enabled;
     this.enabled = on;
+    // The copies read while face recognition was off were held, not taken in: they are now, this
+    // install's own read back among them, so the names it saved before a sign-out come back.
+    if (facesOn && !syncOn && this.sharing && this.phoneCopies.length > 0) void this.setPhoneCopies(this.phoneCopies, this.readingBack);
     if (this.wanted) {
       this.paused = false;
       this.kick();
@@ -539,6 +575,7 @@ export class FaceScanner {
     this.running = this.run(generation)
       .catch((e) => {
         if (e instanceof Stopped) return;
+        this.lastRunFailed = true;
         this.status.state = "failed";
         this.status.error = (e as Error)?.message ?? "failed";
         process.stderr.write(`[faces] the scan stopped: ${(e as Error)?.name ?? "error"}\n`);
@@ -548,25 +585,97 @@ export class FaceScanner {
         this.releaseModels();
         this.saveQuietly();
         if (this.searchDirty()) this.onDriveChange?.();
-        // A source set again, or a switch turned, while this run was ending starts the next one now.
-        if (this.startAfter && this.generation !== generation) this.kick();
+        // A source set again, or a switch turned on that this run did not do, starts the next one now.
+        const missed = (this.enabled && !this.ran.faces) || (this.indexing && !this.ran.index);
+        if (this.startAfter && (this.generation !== generation || missed)) this.kick();
         else if (this.generation === generation && this.wanted && !this.paused && this.source) {
           this.startAfter = false;
-          this.recheck = setTimeout(() => this.kick(), RECHECK_MS);
+          this.recheck = setTimeout(() => this.kick(), this.recheckDelay());
         }
       });
+  }
+
+  /** How long until the next run: the usual pause, or less when a photo's wait ends sooner. */
+  private recheckDelay(now = Date.now()): number {
+    if (this.lastRunFailed) return RECHECK_MIN_MS;
+    const due = this.misses.isLoaded() ? this.misses.nextDue(now) : null;
+    return due === null ? RECHECK_MS : Math.min(RECHECK_MS, Math.max(RECHECK_MIN_MS, due - now));
+  }
+
+  /**
+   * Lets the skipped photos due another try go, and drops what marks them as looked at, so this pass
+   * reads them: those whose file changed since, compared with Drive at most every `STAMP_CHECK_MS`,
+   * and those given up on a week ago. A photo that has faces or a vector meanwhile keeps them.
+   */
+  private async releaseSkipped(source: ScanSource, library: string[]): Promise<void> {
+    const skipped = this.misses.skippedAmong(library);
+    if (skipped.length === 0) return;
+    const now = Date.now();
+    let stamps = new Map<string, string>();
+    if (source.stamps && now - this.stampsCheckedAt >= STAMP_CHECK_MS) {
+      this.stampsCheckedAt = now;
+      stamps = await source.stamps(skipped).catch(() => new Map<string, string>());
+    }
+    const released = this.misses.release(stamps, now);
+    if (released.length === 0) return;
+    // Both parts, also one switched off now, so neither keeps it marked as looked at; a part opened
+    // only for this is let go again, so nothing else starts using it while its switch is off.
+    for (const part of [this.store, this.search] as (FaceStore | SearchStore)[]) {
+      const opened = !part.isLoaded();
+      if (opened) part.load();
+      for (const uid of released) {
+        const unread = part instanceof FaceStore ? part.has(uid) && part.facesOf(uid).length === 0 : part.get(uid) === null;
+        if (unread) part.forget(uid);
+      }
+      if (opened) {
+        part.flush();
+        part.unload();
+      }
+    }
+  }
+
+  /** Opens the book of photos the scan could not read when it is not yet; false while the store is locked. */
+  private missesReady(): boolean {
+    try {
+      if (!this.misses.isLoaded()) {
+        if (!isReady()) return false;
+        this.misses.load();
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** How many photos the scan could not read, by the kind of error; null while the store is locked. */
+  missSummary(): MissSummary | null {
+    return this.missesReady() ? this.misses.summary(this.listed) : null;
+  }
+
+  /**
+   * The photos this computer's face copy leaves out: the hidden ones, and, as on the phone, those it
+   * skipped, so no other device takes them as looked at.
+   */
+  private notCarried(): (uid: string) => boolean {
+    const hidden = this.source?.hiddenTest() ?? (() => false);
+    const book = this.missesReady() ? this.misses : null;
+    return (uid) => hidden(uid) || (book !== null && book.skippedFor(uid) !== null);
   }
 
   /** Ends the current run. `forget` also drops what is held, for a sign-out or a lock. */
   stop(forget: boolean): void {
     this.generation++;
+    if (forget) this.lettingGo++;
     if (this.recheck) clearTimeout(this.recheck);
     this.recheck = null;
     if (forget) {
       // Now, while the store's key is still here: a run finishing later writes nothing.
-      this.saveQuietly();
+      this.saveNow();
       this.store.unload();
       this.search.unload();
+      this.misses.unload();
+      this.peopleFeed = new PeopleFeed(randomUUID());
+      this.peopleIndex = new PeopleIndex();
     }
   }
 
@@ -581,38 +690,65 @@ export class FaceScanner {
    * well the two agree goes into the log: how many faces are on both, and how alike their
    * numbers came out. Counts only, never a name or a photo.
    */
-  setPhoneCopies(copies: FaceCopy[], readingBack = false): void {
+  setPhoneCopies(copies: FaceCopy[], readingBack = false): Promise<void> {
     this.readingBack = readingBack;
     copies = this.afterWipes(copies, readingBack);
     this.phoneCopies = copies;
-    if (!this.store.isLoaded() || copies.length === 0) return;
+    if (!this.store.isLoaded() || copies.length === 0) return this.takingIn;
+    const lettingGo = this.lettingGo;
+    return this.inTurn(() => this.takeIn(copies, readingBack, lettingGo));
+  }
+
+  /**
+   * The take-ins of the other devices' copies, one after another: each gives the rest of the
+   * process its turn as it goes, so the window keeps answering while a large library comes in.
+   */
+  private takingIn: Promise<void> = Promise.resolve();
+
+  /** Counts the stores let go: a take-in asked for before one went stops there. */
+  private lettingGo = 0;
+
+  /** Runs `work` once the take-ins before it are through. */
+  private inTurn<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.takingIn.then(work);
+    this.takingIn = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  }
+
+  private async takeIn(copies: FaceCopy[], readingBack: boolean, lettingGo: number): Promise<void> {
+    const gone = () => this.lettingGo !== lettingGo || !this.store.isLoaded();
+    if (gone()) return;
     if (!this.compared) {
-      const report = compareWithPhone(this.store, copies.filter(copyFits));
+      const report = await diag.time("faces", "compare_phone", () => compareWithPhoneAsync(this.store, copies.filter(copyFits)));
       if (report.pairs > 0) {
         this.compared = true;
         process.stderr.write(`[faces] phone copy compared: ${describeComparison(report)}\n`);
       }
     }
-    if (!this.sharing || !this.enabled) return;
-    let changed = this.adoptPhoneScans() > 0;
+    if (gone() || !this.sharing || !this.enabled) return;
+    let changed = (await this.adoptPhoneScans()) > 0;
     for (const copy of copies) {
-      const result = applyCopy(this.store, copy, this.readingBack);
+      if (gone()) return;
+      const result = await diag.time("faces", "take_in_copy", () => applyCopyAsync(this.store, copy, readingBack));
       if (!result) continue;
       changed = true;
       // Counts only: what the copy brought, never a name or a photo.
       process.stderr.write(
         `[faces] took in a copy: ${result.renamed} renamed, ${result.named} named, ${result.added} added, ${result.rejected} left out, ` +
-          `${result.marked} marked, ${result.conflicts} kept as named here\n`,
+          `${result.marked} marked, ${result.conflicts} kept as named here, ${result.adopted} photos set as there, ${result.hiddenChanged} hidden or shown\n`,
       );
     }
-    if (!changed) return;
-    void placeNew(this.store)
-      .then(() => {
-        if (this.autoMerging) autoMerge(this.store);
-        reconsiderLeftovers(this.store);
-      })
-      .catch(() => {})
-      .finally(() => this.changed());
+    if (!changed || gone()) return;
+    try {
+      await settleTakenIn(this.store, this.autoMerging);
+    } catch {
+      /* placed by the next pass */
+    } finally {
+      this.changed();
+    }
   }
 
   /**
@@ -689,10 +825,12 @@ export class FaceScanner {
    * Takes the photos the other devices' face scans finished as done here, while the faces are
    * shared and scanned here; answers how many were taken. Needs the library listed first.
    */
-  private adoptPhoneScans(): number {
+  private async adoptPhoneScans(): Promise<number> {
     if (!this.sharing || !this.enabled || this.uidByLink.size === 0 || !this.store.isLoaded()) return 0;
     let adopted = 0;
-    for (const copy of this.phoneCopies) adopted += adoptScanned(this.store, copy, this.uidByLink, this.readingBack);
+    for (const copy of this.phoneCopies) {
+      adopted += await adoptScannedAsync(this.store, copy, this.uidByLink, this.readingBack);
+    }
     if (adopted > 0) process.stderr.write(`[faces] took ${adopted} photos the other device already scanned\n`);
     return adopted;
   }
@@ -856,6 +994,14 @@ export class FaceScanner {
     return this.uidByLink.get(link);
   }
 
+  /**
+   * Whether the face copies read from Drive are taken in now. Off, they are only held: this
+   * install's own copy read back after a sign-out must then be read back again later.
+   */
+  takesCopies(): boolean {
+    return this.enabled && this.sharing;
+  }
+
   /** This install's id, once one has been made: its own copy is never read back as another's. */
   ownDeviceId(): string | null {
     return this.store.isLoaded() ? this.store.people.deviceId : null;
@@ -868,13 +1014,15 @@ export class FaceScanner {
 
   /** Writes the faces' copy to Drive. Throws when it could not, for the backup to report. */
   async saveFaces(all = false): Promise<boolean> {
+    // A copy being taken in is in the people only in part: the copy saved waits for it.
+    await this.takingIn;
     const writer = this.driveWriter;
     if (!writer || !this.facesDirty(all)) return false;
     const version = this.status.version;
     const wipe = this.knownWipe();
     try {
       const at = Date.now();
-      const copy = copyForDrive(this.store, deviceLabel(), at, wipe, this.source?.hiddenTest() ?? (() => false));
+      const copy = copyForDrive(this.store, deviceLabel(), at, wipe, this.notCarried());
       const wrote = await writer(copy, all);
       if (wrote) process.stderr.write(`[faces] saved the copy to Drive: ${copy.faces.length} faces, ${copy.markers.length} photos\n`);
       this.saveQuietly();
@@ -966,8 +1114,10 @@ export class FaceScanner {
     let lastPlace = Date.now();
     for (let i = 0; i < todo.length; i += BATCH) {
       if (!live()) throw new Stopped();
-      for await (const { uid, bytes } of source.pictures(todo.slice(i, i + BATCH))) {
+      for await (const { uid, bytes, miss } of source.pictures(todo.slice(i, i + BATCH))) {
         if (!live()) throw new Stopped();
+        // Not read this time: looked at again on a later sweep.
+        if (miss?.kind === "transient") continue;
         let faces: FaceRecord[] = [];
         if (bytes) {
           try {
@@ -990,7 +1140,7 @@ export class FaceScanner {
       }
     }
     await placeNew(this.store);
-    reconsiderLeftovers(this.store);
+    await reconsiderLeftovers(this.store);
     this.saveQuietly();
     this.status.version++;
   }
@@ -1021,7 +1171,7 @@ export class FaceScanner {
     return true;
   }
 
-  private async openClip(): Promise<{ session: any; accel: Accel }> {
+  private async openClip(): Promise<{ session: OrtSession; accel: Accel }> {
     if (this.clip) return this.clip;
     this.clipOpening ??= openModel(imageModel.path(), true, "basic")
       .then((clip) => {
@@ -1037,11 +1187,10 @@ export class FaceScanner {
 
   /** The photo's vector for the search, at half precision, as the phone stores it. */
   private async embedForSearch(img: Decoded, times?: StageTimes): Promise<Uint16Array> {
-    const ort = await import("onnxruntime-node");
     const input = timedSync(times, "clipPrep", () => clipInputFrom(img));
-    const run = async ({ session }: { session: any }) => {
+    const run = async ({ session }: { session: OrtSession }) => {
       const out = await timed(times, "clip", () =>
-        session.run({ [session.inputNames[0]]: new ort.Tensor("float32", input, [1, 3, CLIP_SIDE, CLIP_SIDE]) }),
+        session.run({ [session.inputNames[0]]: tensor("float32", input, [1, 3, CLIP_SIDE, CLIP_SIDE]) }),
       );
       return timedSync(times, "clipPrep", () => toHalves(out[session.outputNames[0]].data as Float32Array));
     };
@@ -1049,7 +1198,7 @@ export class FaceScanner {
     try {
       return await run(clip);
     } catch (e) {
-      if (clip.accel !== "gpu") throw e;
+      if (clip.accel !== "gpu" || e instanceof ModelWorkerGone) throw e;
       markGpuFailed((e as Error)?.name ?? "run failed");
       // A photo read beside this one may have replaced the session already.
       if (this.clip === clip) this.releaseClip();
@@ -1094,10 +1243,45 @@ export class FaceScanner {
     this.releaseClip();
   }
 
+  /**
+   * Writes what changed, a part at a time, giving the rest of the process its turn between the
+   * parts. A save asked for while one runs follows it.
+   */
   private saveQuietly(): void {
+    if (this.saving) {
+      this.saveAgain = true;
+      return;
+    }
+    this.saving = (async () => {
+      do {
+        this.saveAgain = false;
+        try {
+          await this.store.flushSliced();
+          this.search.flush();
+          this.misses.flush();
+        } catch (e) {
+          process.stderr.write(`[faces] could not save: ${(e as NodeJS.ErrnoException).code ?? "unknown"}\n`);
+        }
+      } while (this.saveAgain);
+    })().finally(() => {
+      this.saving = null;
+    });
+  }
+
+  private saving: Promise<void> | null = null;
+  private saveAgain = false;
+
+  /** Writes at once what a save under way has yet to write, for a process about to end. */
+  finishSaving(): void {
+    if (this.saving) this.saveNow();
+  }
+
+  /** Writes what changed at once, for a store about to be let go. */
+  private saveNow(): void {
     try {
       this.store.flush();
       this.search.flush();
+      this.misses.flush();
     } catch (e) {
       process.stderr.write(`[faces] could not save: ${(e as NodeJS.ErrnoException).code ?? "unknown"}\n`);
     }
@@ -1105,39 +1289,65 @@ export class FaceScanner {
 
   private async run(generation: number): Promise<void> {
     this.status.error = null;
+    this.lastRunFailed = false;
     // What this run does is fixed at its start; a switch changed meanwhile starts the next one.
     const faces = this.enabled;
     const index = this.indexing;
-    if (!(await this.ensureModels(generation, faces, index))) return;
-    if (faces) this.store.load();
-    if (index) this.search.load();
+    this.ran = { faces, index };
+    if (!(await diag.time("faces", "models", () => this.ensureModels(generation, faces, index)))) return;
+    if (faces) {
+      // A large library's faces take seconds to read: the window's calls are answered meanwhile.
+      await diag.time("faces", "load_faces", () => this.store.loadSliced());
+      if (!this.active(generation)) return;
+      // Let go meanwhile (a lock), or never read: as a straight read always did.
+      this.store.load();
+    }
+    if (index) {
+      await diag.time("faces", "load_search", () => this.search.loadSliced());
+      if (!this.active(generation)) return;
+      this.search.load();
+    }
+    this.misses.load();
     const source = this.source!;
     this.status.state = "waiting";
-    const library = await source.listUids();
+    const library = await diag.time("faces", "list_library", () => source.listUids());
     if (!this.active(generation)) return;
     const present = new Set(library);
+    this.listed = present;
     this.uidByLink = new Map(library.map((uid) => [uid.slice(uid.indexOf("~") + 1), uid]));
     if (faces) {
       // A photo in the Drive trash can come back, with its faces and names; a trash that cannot be
       // read leaves every photo as it is this time.
-      const trashed = await source.listTrashed().catch(() => null);
+      const trashed = await diag.time("faces", "list_trash", () => source.listTrashed()).catch(() => null);
       if (!this.active(generation)) return;
-      if (trashed && this.store.keepOnly(present, trashed) > 0) this.status.version++;
+      if (trashed && recordStep("keep_only", () => this.store.keepOnly(present, trashed)) > 0) this.status.version++;
     }
     const hidden = source.hiddenTest();
     if (index) {
-      this.search.keepOnly(present);
-      this.takeInSearch();
+      recordStep("search_keep_only", () => this.search.keepOnly(present));
+      recordStep("search_take_in", () => this.takeInSearch());
     }
     // The photos another device already scanned count as done here, with its faces.
-    if (faces && this.adoptPhoneScans() > 0) {
-      await placeNew(this.store);
-      if (this.autoMerging) this.mergeLikely();
+    if (faces && (await diag.time("faces", "adopt_phone_scans", () => this.inTurn(() => this.adoptPhoneScans()))) > 0) {
+      await diag.time("faces", "place_adopted", () => placeNew(this.store));
+      if (this.autoMerging) await this.mergeLikely();
       this.status.version++;
     }
+    await this.releaseSkipped(source, library);
+    if (!this.active(generation)) return;
     const needsFaces = (uid: string) => faces && !this.store.has(uid) && !hidden(uid);
     const needsVector = (uid: string) => index && !this.search.has(uid);
-    const todo = library.filter((uid) => needsFaces(uid) || needsVector(uid));
+    const listedAt = Date.now();
+    // A photo whose read failed for now sits the passes out until its wait is over.
+    const todo: string[] = [];
+    const done: string[] = [];
+    recordStep("todo", () => {
+      for (const uid of library) {
+        if (!needsFaces(uid) && !needsVector(uid)) done.push(uid);
+        else if (this.misses.isDue(uid, listedAt)) todo.push(uid);
+      }
+    });
+    this.misses.settled(done);
     this.libraryCount = library.length;
     // The faces' own progress: a pass that only builds the search index leaves it where it is.
     this.status.total = library.length;
@@ -1150,12 +1360,13 @@ export class FaceScanner {
 
     let pending = 0;
     let lastFlush = Date.now();
+    const skippedNow: string[] = [];
     const place = async () => {
       if (pending === 0) return;
       pending = 0;
       takeHeldOver(this.store);
       await placeNew(this.store);
-      if (this.autoMerging) this.mergeLikely();
+      if (this.autoMerging) await this.mergeLikely();
       this.status.version++;
     };
 
@@ -1171,7 +1382,15 @@ export class FaceScanner {
       times,
     );
 
-    type Found = { facesHere: boolean; vectorHere: boolean; found: FaceRecord[]; vector: Uint16Array | null; read: boolean; ms: number };
+    type Found = {
+      facesHere: boolean;
+      vectorHere: boolean;
+      found: FaceRecord[];
+      vector: Uint16Array | null;
+      read: boolean;
+      miss: ScanMiss | null;
+      ms: number;
+    };
     await runInOrder(
       stream,
       () => this.speed().level.photos,
@@ -1186,8 +1405,16 @@ export class FaceScanner {
         const started = Date.now();
         const facesHere = needsFaces(uid);
         const vectorHere = needsVector(uid);
+        const miss = item.picture.miss ?? null;
+        if (miss?.kind === "transient") return { facesHere, vectorHere, found: [], vector: null, read: false, miss, ms: 0 };
+        const had = !!item.picture.bytes;
         const read = await this.readPhoto(item.picture, facesHere, vectorHere, times);
-        return { facesHere, vectorHere, ...read, ms: Date.now() - started };
+        const unread = read.modelFailed
+          ? missFor(read.modelFailed)
+          : read.read
+            ? null
+            : (miss ?? missFor(had ? "undecodable" : "unavailable"));
+        return { facesHere, vectorHere, ...read, miss: unread, ms: Date.now() - started };
       },
       async (item, out) => {
         if (item.kind === "end" || !out) {
@@ -1214,6 +1441,13 @@ export class FaceScanner {
           return;
         }
         const { uid } = item.picture;
+        if (out.miss && this.misses.miss(uid, out.miss) === "wait") return;
+        if (out.miss) {
+          skippedNow.push(uid);
+          diag.log("faces", "photo_skipped", { cause: this.misses.skippedFor(uid) });
+        } else {
+          this.misses.read(uid);
+        }
         timedSync(times, "store", () => {
           if (out.facesHere) {
             this.store.put(uid, out.found);
@@ -1231,6 +1465,9 @@ export class FaceScanner {
       () => new Stopped(),
       (item) => item.kind === "picture",
     );
+    if (skippedNow.length > 0 && source.stamps) {
+      this.misses.stamp(await source.stamps(skippedNow).catch(() => new Map<string, string>()));
+    }
     if (index) this.setPhoneSearch(this.phoneSearch);
     if (todo.length > 0) {
       diag.log("faces", "pass_end", { photos: todo.length, s: Math.round((Date.now() - passStarted) / 1000), faces: this.status.faces });
@@ -1243,24 +1480,16 @@ export class FaceScanner {
     takeHeldOver(this.store, (uid) => present.has(uid) && !hidden(uid));
     pending++;
     await place();
-    const faceCount = this.store.allFaces().length;
-    if (!this.store.people.grouped && faceCount > 0) {
-      if (faceCount <= FULL_REGROUP_MAX_FACES) {
+    const grouped = await groupAfterPass(
+      this.store,
+      () => this.active(generation),
+      () => {
         this.status.state = "grouping";
         this.releaseModels();
-        await regroupAll(this.store, () => this.active(generation));
-        // More groups than the regroup's own merge takes: folded on their directions, as the phone does.
-        if (groupMergeOwed(this.store)) await mergeSplitGroups(this.store, () => this.active(generation));
-        if (this.autoMerging) this.mergeLikely();
-      } else {
-        // Too many faces to regroup at once: the groups the scan formed as it went are folded where they
-        // are one person, the closing step of the phone's batched grouping.
-        this.status.state = "grouping";
-        this.releaseModels();
-        await mergeSplitGroups(this.store, () => this.active(generation));
-        this.store.people.grouped = true;
-        this.store.markPeople();
-      }
+      },
+    );
+    if (grouped) {
+      if (grouped === "regrouped" && this.autoMerging) await this.mergeLikely();
       this.status.version++;
     }
     if (this.findingMore && this.store.people.people.some((x) => x.name)) {
@@ -1277,7 +1506,7 @@ export class FaceScanner {
       } catch (e) {
         if (!(e instanceof Stopped) || !this.active(generation)) throw e;
       }
-      if (this.autoMerging) this.mergeLikely();
+      if (this.autoMerging) await this.mergeLikely();
       this.status.total = library.length;
       this.status.done = library.length;
     }
@@ -1296,17 +1525,20 @@ export class FaceScanner {
     facesHere: boolean,
     vectorHere: boolean,
     times: StageTimes,
-  ): Promise<{ found: FaceRecord[]; vector: Uint16Array | null; read: boolean }> {
+  ): Promise<{ found: FaceRecord[]; vector: Uint16Array | null; read: boolean; modelFailed: "model" | "memory" | null }> {
     const { uid } = picture;
     let bytes = picture.bytes;
     picture.bytes = null;
     let img: Decoded | null = null;
+    let modelFailed: "model" | "memory" | null = null;
     if (bytes) {
       try {
         const held = bytes;
         img = await timed(times, "decode", () => decodeLikePhone(held));
-      } catch {
+      } catch (e) {
         img = null;
+        // Out of memory says nothing about the picture: it is tried again.
+        if (e instanceof RangeError || /memory|allocat/i.test(String((e as Error)?.message ?? ""))) modelFailed = "memory";
       }
     }
     bytes = null;
@@ -1315,21 +1547,44 @@ export class FaceScanner {
       try {
         found = await this.analyze(img, uid, false, times);
       } catch (e) {
-        if (e instanceof Stopped) throw e;
-        // A picture the models cannot take is passed over, and counted as looked at.
+        // A lost model thread is no answer about the picture: the pass stops with it unrecorded.
+        if (e instanceof ModelWorkerGone) this.workerLost(uid, facesHere, vectorHere);
+        if (e instanceof Stopped || e instanceof ModelWorkerGone) throw e;
+        // Tried again later, as the phone does, and passed over once it keeps failing.
         found = [];
+        modelFailed = "model";
       }
     }
     let vector: Uint16Array | null = null;
     if (vectorHere && img) {
       try {
         vector = await this.embedForSearch(img, times);
-      } catch {
-        // Unreadable, and kept as such, so it is not fetched again on every pass.
+      } catch (e) {
+        if (e instanceof ModelWorkerGone) {
+          this.workerLost(uid, facesHere, vectorHere);
+          throw e;
+        }
+        // Tried again later, as the phone does, and kept as unreadable once it keeps failing.
         vector = null;
+        modelFailed = "model";
       }
     }
-    return { found, vector, read: !!img };
+    if (img && !modelFailed) this.workerLosses.delete(uid);
+    return { found, vector, read: !!img, modelFailed };
+  }
+
+  /**
+   * The model thread was lost while this photo was read. Once is taken for the machine (a driver
+   * reset); a photo read again at the next loss is counted as a model failure, so one that keeps
+   * taking the thread down is given up on like any other instead of stopping every pass.
+   */
+  private workerLost(uid: string, facesHere: boolean, vectorHere: boolean): void {
+    const losses = (this.workerLosses.get(uid) ?? 0) + 1;
+    this.workerLosses.set(uid, losses);
+    if (losses < 2 || this.misses.miss(uid, missFor("model")) === "wait") return;
+    this.workerLosses.delete(uid);
+    if (facesHere) this.store.put(uid, []);
+    if (vectorHere) this.search.put(uid, null);
   }
 
   private async analyze(img: Decoded, uid: string, sensitive = false, times?: StageTimes): Promise<FaceRecord[]> {
@@ -1337,7 +1592,7 @@ export class FaceScanner {
     try {
       return await analyzeImage(img, models, uid, sensitive, times);
     } catch (e) {
-      if (models.accel !== "gpu" || !isRuntimeError(e)) throw e;
+      if (models.accel !== "gpu" || !isRuntimeError(e) || e instanceof ModelWorkerGone) throw e;
       // The card failed mid-run (a driver reset): the rest goes to the processor. A photo read
       // beside this one may have replaced the models already.
       markGpuFailed((e as Error)?.name ?? "run failed");
@@ -1355,6 +1610,9 @@ export class FaceScanner {
           if (!this.store.isLoaded()) this.store.load();
           this.store.clear();
           this.store.flush();
+          if (!this.misses.isLoaded()) this.misses.load();
+          this.misses.clear();
+          this.misses.flush();
         } catch {
           /* written on the next save */
         }
@@ -1378,7 +1636,7 @@ export class FaceScanner {
     if (!this.loadStore()) throw new Error("Locked");
     this.store.clear();
     this.store.flush();
-    markFreshInstall();
+    writeBackupFlags({ ownTaken: false });
     this.compared = false;
     this.status.version++;
     this.kick();
@@ -1427,8 +1685,8 @@ export class FaceScanner {
   }
 
   /** The automatic merge, written and announced when it merged anything. */
-  private mergeLikely(): void {
-    if (autoMerge(this.store) > 0) {
+  private async mergeLikely(): Promise<void> {
+    if ((await autoMergeAsync(this.store)) > 0) {
       this.saveQuietly();
       this.status.version++;
     }

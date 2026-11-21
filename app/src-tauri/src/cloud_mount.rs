@@ -29,21 +29,58 @@
 
 use std::path::PathBuf;
 
-const FOLDER_NAME: &str = "Proton Photos";
+#[cfg(windows)]
+mod empty_folders;
+#[cfg(windows)]
+mod identity;
+#[cfg(windows)]
+mod relocate;
+#[cfg(windows)]
+mod verify;
 
-/// `%USERPROFILE%\Proton Photos` — a stable, top-level per-user location, the same
-/// pattern OneDrive uses for its own folder.
-pub fn sync_root_path() -> PathBuf {
+pub(crate) const FOLDER_NAME: &str = "Proton Photos";
+
+/// `%USERPROFILE%\Proton Photos`, a stable, top-level per-user location, the same
+/// pattern OneDrive uses for its own folder. Where the folder lives until another place
+/// is chosen in Settings.
+pub(crate) fn default_sync_root() -> PathBuf {
     PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join(FOLDER_NAME)
+}
+
+/// Where the folder is: the place chosen in Settings, else the default.
+pub fn sync_root_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        crate::sync_location::current().path
+    }
+    #[cfg(not(windows))]
+    {
+        default_sync_root()
+    }
+}
+
+/// Whether the folder's drive is there. A folder chosen on a drive that is gone, or on another
+/// disk that took its letter, is left alone: nothing is created, registered or deleted for it.
+pub fn sync_root_available() -> bool {
+    #[cfg(windows)]
+    {
+        crate::sync_location::available()
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 /// Create the folder if it is missing. Cheap and idempotent; safe on every launch.
 pub fn ensure_folder() {
-    let _ = std::fs::create_dir_all(sync_root_path());
+    if sync_root_available() {
+        let _ = std::fs::create_dir_all(sync_root_path());
+    }
 }
 
 #[cfg(windows)]
-const PREF_KEY: &str = "Software\\PhotosForProton";
+pub(crate) const PREF_KEY: &str = "Software\\PhotosForProton";
 #[cfg(windows)]
 const PREF_VALUE: &str = "ShowInExplorer";
 
@@ -118,6 +155,89 @@ pub fn set_show_in_explorer(enabled: bool) {
     }
     #[cfg(not(windows))]
     let _ = enabled;
+}
+
+/// Where the folder is, and whether its drive is there.
+#[derive(Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocationInfo {
+    path: String,
+    is_default: bool,
+    available: bool,
+    moving: bool,
+}
+
+/// What `check_explorer_location` says about a picked folder: the place the folder would go to
+/// and the room its drive has, or the reason it cannot.
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocationCheck {
+    ok: bool,
+    reason: Option<&'static str>,
+    path: String,
+    free: Option<u64>,
+    adjusted: bool,
+}
+
+#[derive(serde::Serialize)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub struct LocationMoved {
+    path: String,
+    /// Files the user had put in the old folder, which stay there.
+    left: u64,
+}
+
+#[tauri::command]
+pub fn explorer_location() -> LocationInfo {
+    #[cfg(windows)]
+    {
+        relocate::info()
+    }
+    #[cfg(not(windows))]
+    LocationInfo {
+        path: default_sync_root().to_string_lossy().into_owned(),
+        is_default: true,
+        available: true,
+        moving: false,
+    }
+}
+
+/// Whether the folder could go to the picked place.
+#[tauri::command]
+pub async fn check_explorer_location(path: String) -> LocationCheck {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || relocate::check(&path)).await.unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        LocationCheck::default()
+    }
+}
+
+/// Moves the folder to the picked place. The error is a code the window words.
+#[tauri::command]
+pub async fn move_explorer_location(app: tauri::AppHandle, path: String) -> Result<LocationMoved, String> {
+    #[cfg(windows)]
+    {
+        tauri::async_runtime::spawn_blocking(move || relocate::move_folder(&app, std::path::Path::new(&path)))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (app, path);
+        Err("unsupported".into())
+    }
+}
+
+/// Starts watching the folder's drive, so a drive that was away is picked up again.
+pub fn watch_drive(app: tauri::AppHandle) {
+    #[cfg(windows)]
+    relocate::watch_drive(app);
+    #[cfg(not(windows))]
+    let _ = app;
 }
 
 #[cfg(windows)]
@@ -323,32 +443,89 @@ pub fn set_explorer_edits(enabled: bool) {
 #[cfg(windows)]
 pub fn mount(app: tauri::AppHandle) {
     std::thread::spawn(move || {
-        use cloud_filter::root::Session;
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-        // The Storage Provider (register) APIs need an initialized COM apartment.
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        }
-        let log = app.clone();
-        match try_register_sync_root() {
-            Ok(()) => crate::note(&log, "[cloud] sync root registered"),
-            Err(e) => crate::note(&log, &format!("[cloud] register skipped: {e}")),
-        }
-        let folder = sync_root_path();
-        let app_for_sync = app.clone();
-        match Session::new().connect(&folder, ProtonSyncFilter { app }) {
-            // Leak the connection so it stays connected for the process lifetime
-            // (dropping it would disconnect the sync engine).
-            Ok(connection) => {
-                crate::note(&log, "[cloud] sync engine connected");
-                std::mem::forget(connection);
-                start_hydrated_scanner();
-                crate::keep_all::start(app_for_sync.clone());
-                crate::explorer_sync::start(app_for_sync, folder.clone());
-            }
-            Err(e) => crate::note(&log, &format!("[cloud] connect failed: {e:?}")),
-        }
+        com_init();
+        let _life = crate::sync_location::lifecycle();
+        attach(&app);
     });
+}
+
+/// The Storage Provider (register) APIs need an initialized COM apartment.
+#[cfg(windows)]
+fn com_init() {
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+}
+
+/// The engine's connection to the folder. Kept so it can be let go of when the folder moves or
+/// its drive goes away; dropping it disconnects.
+#[cfg(windows)]
+struct Held {
+    _connection: cloud_filter::root::Connection<ProtonSyncFilter>,
+}
+
+// SAFETY: the connection is a key, a channel and a thread handle. It is only ever dropped, by
+// whichever thread ends the mount, and never used through this static.
+#[cfg(windows)]
+unsafe impl Send for Held {}
+
+#[cfg(windows)]
+static CONNECTION: std::sync::Mutex<Option<Held>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+fn mounted() -> bool {
+    CONNECTION.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+}
+
+/// Registers the folder, connects the engine and starts what watches over the folder. Nothing
+/// happens while the folder's drive is not there, and nothing twice. True once connected.
+#[cfg(windows)]
+fn attach(app: &tauri::AppHandle) -> bool {
+    use cloud_filter::root::Session;
+    if mounted() {
+        // Still connected after a move that stopped part way: the watcher is there again too.
+        crate::explorer_sync::start(app.clone(), sync_root_path());
+        return true;
+    }
+    if !sync_root_available() {
+        crate::note(app, "[cloud] the drive of the folder is not connected, waiting");
+        return false;
+    }
+    match try_register_sync_root(app) {
+        Ok(()) => crate::note(app, "[cloud] sync root registered"),
+        Err(e) => crate::note(app, &format!("[cloud] register skipped: {e}")),
+    }
+    let folder = sync_root_path();
+    match Session::new().connect(&folder, ProtonSyncFilter { app: app.clone() }) {
+        Ok(connection) => {
+            crate::note(app, "[cloud] sync engine connected");
+            *CONNECTION.lock().unwrap_or_else(|p| p.into_inner()) = Some(Held { _connection: connection });
+            start_hydrated_scanner();
+            crate::keep_all::start(app.clone());
+            crate::explorer_sync::start(app.clone(), folder);
+            true
+        }
+        Err(e) => {
+            crate::note(app, &format!("[cloud] connect failed: {e:?}"));
+            false
+        }
+    }
+}
+
+/// Stops watching the folder and disconnects the engine. The registration stays.
+#[cfg(windows)]
+fn detach() -> Result<(), String> {
+    if !crate::explorer_sync::stop() {
+        return Err("the folder's watcher did not stop".into());
+    }
+    let held = CONNECTION.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(held) = held {
+        // Disconnecting reports a failure by panicking.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(held)))
+            .map_err(|_| "the sync engine did not disconnect".to_string())?;
+    }
+    Ok(())
 }
 
 /// Sweep our own leftovers out of the system temp dir at startup.
@@ -385,26 +562,75 @@ pub fn reap_temp_leftovers() {
     // the folder, so a copy an earlier run left behind is only a stray.
     let _ = std::fs::remove_dir_all(std::env::temp_dir().join("pfp-drop"));
 
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-        return;
-    };
+    // %TEMP% can hold tens of thousands of entries, so it is scanned off the startup path.
+    // A hydration of this run may already be staging there, so only older files go.
+    let started = std::time::SystemTime::now();
+    std::thread::spawn(move || {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let ours = is_hydrate_leftover(&name)
+                || (name.starts_with("pfp-uninstall-old-") && name.ends_with(".exe"))
+                || (name.starts_with("pfp-cleanup-") && name.ends_with(".ps1"));
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|modified| modified < started);
+            if ours && stale {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    });
+}
+
+/// Linux sweeps only the first kind above: the downloads the sidecar stages in the temp folder
+/// (the video editor's go to its own staging folder, swept with it). Each is plaintext a crash
+/// left behind.
+#[cfg(not(windows))]
+pub fn reap_temp_leftovers() {
+    sweep_hydrate_leftovers(&std::env::temp_dir());
+}
+
+/// A decrypted download the sidecar staged: `pfp-hyd-<id>.bin`.
+fn is_hydrate_leftover(name: &str) -> bool {
+    name.starts_with("pfp-hyd-") && name.ends_with(".bin")
+}
+
+/// Deletes the staged downloads in `dir`, and nothing else there.
+#[cfg_attr(windows, allow(dead_code))]
+fn sweep_hydrate_leftovers(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let ours = (name.starts_with("pfp-hyd-") && name.ends_with(".bin"))
-            || (name.starts_with("pfp-uninstall-old-") && name.ends_with(".exe"))
-            || (name.starts_with("pfp-cleanup-") && name.ends_with(".ps1"));
-        if ours {
+        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+        if is_file && is_hydrate_leftover(&entry.file_name().to_string_lossy()) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
-#[cfg(not(windows))]
-pub fn reap_temp_leftovers() {}
+#[cfg(test)]
+mod leftover_tests {
+    #[test]
+    fn only_staged_downloads_are_swept() {
+        let dir = std::env::temp_dir().join(format!("pfp-hyd-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pfp-hyd-folder.bin")).unwrap();
+        for name in ["pfp-hyd-0b9c.bin", "pfp-hyd-1.bin", "pfp-hyd-2.txt", "photo.bin", "pfp-view.bin"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        super::sweep_hydrate_leftovers(&dir);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, vec!["pfp-hyd-2.txt", "pfp-hyd-folder.bin", "pfp-view.bin", "photo.bin"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 #[cfg(windows)]
-fn try_register_sync_root() -> Result<(), String> {
+fn try_register_sync_root(app: &tauri::AppHandle) -> Result<(), String> {
     use cloud_filter::root::{is_supported, SecurityId, SyncRootIdBuilder};
 
     let folder = sync_root_path();
@@ -426,13 +652,25 @@ fn try_register_sync_root() -> Result<(), String> {
     // executable, which was renamed. Nothing else re-reads that value, so without a
     // bump the entry keeps naming a file that no longer exists and the folder loses
     // its icon for good.
-    const POLICY_VERSION: u32 = 4;
+    //
+    // 5: pinning is allowed, so Explorer shows "Always keep on this device" and "Free up
+    // space" on the folder's photos and albums.
+    const POLICY_VERSION: u32 = 5;
     let registered = id.is_registered().map_err(|e| format!("{e:?}"))?;
-    if registered && policy_version() == POLICY_VERSION {
+    // A registration of another place (a move that stopped half way) is no use for this one.
+    let elsewhere = registered
+        && crate::sync_location::own_registered_root()
+            .is_some_and(|root| !crate::sync_location::same_place(&root, &folder));
+    if registered && !elsewhere && policy_version() == POLICY_VERSION {
         return Ok(());
     }
     if registered {
-        let _ = id.unregister(); // stale policy -> refresh with the current one
+        if !elsewhere {
+            // The unregister turns this folder's downloaded copies into plain files, which are
+            // the photos' own copies, not files put there to upload.
+            crate::explorer_sync::note_seen(app, &downloaded_copies_under(&folder));
+        }
+        let _ = id.unregister(); // stale policy or place -> refresh with the current ones
     }
 
     // Point the nav-pane icon at the app executable's embedded icon (index 0).
@@ -443,6 +681,34 @@ fn try_register_sync_root() -> Result<(), String> {
     register_with_insync_policy(&id, &folder, &format!("{icon},0")).map_err(|e| format!("{e:?}"))?;
     set_policy_version(POLICY_VERSION);
     Ok(())
+}
+
+/// The folder-relative paths of the downloaded placeholders in a folder, at any depth. Only a
+/// file holding its data is opened, for its placeholder record: a directory listing does not
+/// always show a placeholder's reparse point (before the engine connects it did not).
+#[cfg(windows)]
+fn downloaded_copies_under(root: &std::path::Path) -> Vec<String> {
+    use std::os::windows::fs::MetadataExt;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file()
+                && meta.file_attributes() & RECALL_ON_DATA_ACCESS == 0
+                && identity::read(&entry.path()).is_some()
+            {
+                if let Some(rel) = crate::explorer_sync::relative(root, &entry.path()) {
+                    out.push(rel);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Register the sync root directly through cloud-filter's own `windows` (0.58) so we
@@ -476,11 +742,11 @@ fn register_with_insync_policy(
     info.SetHydrationPolicy(StorageProviderHydrationPolicy::Full)?;
     info.SetPopulationPolicy(StorageProviderPopulationPolicy::AlwaysFull)?;
     info.SetInSyncPolicy(StorageProviderInSyncPolicy::PreserveInsyncForSyncEngine)?;
-    // Manage hydration ONLY from the app: disallowing pinning makes Explorer hide its
-    // "Always keep on this device" / "Free up space" menu, so the user cannot get a
-    // file stuck via the shell's (broken-for-us) free-up path. The app's Download /
-    // Free up buttons drive hydration directly (CfHydratePlaceholder / CfDehydratePlaceholder).
-    info.SetAllowPinning(false)?;
+    // Explorer's "Always keep on this device" and "Free up space" only mark a file pinned
+    // or unpinned; the folder's watcher sees the mark and downloads or frees the copy
+    // through the app's own Download and Free up (`apply_pin_marks`), so no file is left
+    // waiting on Windows to act.
+    info.SetAllowPinning(true)?;
     info.SetShowSiblingsAsGroup(false)?;
     info.SetProtectionMode(StorageProviderProtectionMode::Unknown)?;
     info.SetVersion(&HSTRING::from("1.0.0"))?;
@@ -524,12 +790,35 @@ pub fn unmount(app: tauri::AppHandle) {
         };
         let id = SyncRootIdBuilder::new("ProtonPhotos").user_security_id(sid).build();
         if id.is_registered().unwrap_or(false) {
+            let _life = crate::sync_location::lifecycle();
+            let registered = crate::sync_location::own_registered_root();
             match id.unregister() {
-                Ok(()) => crate::note(&app, "[cloud] unmounted (opt-out)"),
+                Ok(()) => {
+                    crate::note(&app, "[cloud] unmounted (opt-out)");
+                    remove_left_folders(&app, registered.as_deref());
+                }
                 Err(e) => crate::note(&app, &format!("[cloud] unmount failed: {e:?}")),
             }
         }
     });
+}
+
+/// After the registration is gone: the fill's folders it left empty go, in the folder that
+/// was registered and only when that is the folder the app uses now and its drive is there.
+/// Asked twice, a little apart, in case Windows is still taking placeholders away the first
+/// time.
+#[cfg(windows)]
+fn remove_left_folders(app: &tauri::AppHandle, registered: Option<&std::path::Path>) {
+    let root = sync_root_path();
+    let ours = registered.is_some_and(|r| crate::sync_location::same_place(r, &root));
+    if !ours || !sync_root_available() {
+        crate::note(app, "[cloud] left the folders as they are (not the folder in use)");
+        return;
+    }
+    let mut removed = empty_folders::remove_empty_app_folders(&root);
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    removed.extend(empty_folders::remove_empty_app_folders(&root));
+    crate::note(app, &format!("[cloud] opt-out: {}", empty_folders::summary(&removed)));
 }
 
 #[cfg(not(windows))]
@@ -613,8 +902,34 @@ fn mount_index() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
     MOUNT_INDEX.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Record one placeholder path (relative to the sync root) for a photo. The first
-/// path recorded is its primary (`Photos\`) copy — the one Download hydrates.
+/// The index and sizes a fill is building, uid to paths and uid to size. They are put in place
+/// whole when the fill has placed everything (`publish_index`), so whatever reads the index
+/// meanwhile (Free up, Download, the watcher) sees the previous fill's, never a part of this
+/// one's; a fill that fails part way leaves the previous one in place.
+#[cfg(windows)]
+type IndexBuild = (std::collections::HashMap<String, Vec<String>>, std::collections::HashMap<String, u64>);
+
+#[cfg(windows)]
+static NEXT_INDEX: std::sync::Mutex<Option<IndexBuild>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+fn begin_index() {
+    *NEXT_INDEX.lock().unwrap_or_else(|p| p.into_inner()) = Some(Default::default());
+}
+
+/// Puts the index the fill built in place of the one before, in one step.
+#[cfg(windows)]
+fn publish_index() {
+    let Some((index, sizes)) = NEXT_INDEX.lock().unwrap_or_else(|p| p.into_inner()).take() else {
+        return;
+    };
+    *mount_sizes().lock().unwrap() = sizes;
+    *mount_index().lock().unwrap() = index;
+}
+
+/// Record one placeholder path (relative to the sync root) for a photo, in the index the fill
+/// is building. The first path recorded is its primary (`Photos\`) copy, the one Download
+/// hydrates.
 ///
 /// Only ever called for a path this process created or adopted, never for one that
 /// merely bears the right name. Everything that acts on a photo acts through this
@@ -623,12 +938,17 @@ fn mount_index() -> &'static std::sync::Mutex<std::collections::HashMap<String, 
 /// all, which is what leaves the colliding file untouched.
 #[cfg(windows)]
 fn index_push(uid: &str, rel: &str) {
-    mount_index()
-        .lock()
-        .unwrap()
-        .entry(uid.to_string())
-        .or_default()
-        .push(rel.to_string());
+    if let Some((index, _)) = NEXT_INDEX.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+        index.entry(uid.to_string()).or_default().push(rel.to_string());
+    }
+}
+
+/// The cloud file's size for a photo, in the index the fill is building.
+#[cfg(windows)]
+fn size_push(uid: &str, size: u64) {
+    if let Some((_, sizes)) = NEXT_INDEX.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+        sizes.insert(uid.to_string(), size);
+    }
 }
 
 /// uid -> the size the cloud file has, as the last populate listed it. Recorded for
@@ -650,12 +970,12 @@ fn cloud_size(uid: &str) -> Option<u64> {
     mount_sizes().lock().unwrap().get(uid).copied()
 }
 
-/// Keep one file on the device as a proper in-sync placeholder, whatever state it is
-/// in. A cloud placeholder is hydrated in place (its data downloaded) and re-marked
-/// in-sync; a plain file that has lost its placeholder status (e.g. after a provider
-/// disconnect across app restarts, which strands it "waiting to sync" and un-freeable)
-/// is converted to an in-sync placeholder with its data preserved and its uid blob
-/// restored, so Explorer shows the green check and a later Free up still works.
+/// Keep one file on the device as a placeholder of this photo, whatever state it is in. A
+/// cloud placeholder carrying this photo's uid is hydrated in place (its data downloaded; the
+/// download marks it in sync once its bytes check out). A plain file that has lost its
+/// placeholder status (e.g. after a provider disconnect across app restarts) is converted to a
+/// placeholder with its data preserved and its uid restored, so a later Free up can find it;
+/// it stays out of sync until Free up has compared its bytes with the cloud file's.
 /// Returns whether it ended up local.
 #[cfg(windows)]
 fn keep_offline_one(
@@ -666,25 +986,29 @@ fn keep_offline_one(
 ) -> bool {
     use cloud_filter::placeholder::OpenOptions;
     let path = base.join(rel);
-    // If it is a cloud placeholder, hydrate it in place. `info()` is None for a plain
-    // (non-placeholder) file. The oplock handle is dropped at the end of this match,
-    // before any conversion, because CfConvertToPlaceholder needs a plain Win32 handle.
-    match OpenOptions::new().write_access().open(&path) {
-        Ok(mut ph) => {
-            if ph.info().ok().flatten().is_some() {
-                if ph.hydrate(..).is_ok() {
-                    let _ = ph.mark_in_sync(true, None);
-                    return true;
-                }
-                return false;
-            }
+    // Read without opening it for its data: a placeholder of another photo under this name
+    // would download that photo.
+    if let Some(info) = identity::read(&path) {
+        if !uid.is_some_and(|uid| info.is(uid)) {
+            crate::note(app, "[keep] the file at this name is another photo's, left alone");
+            return false;
         }
-        Err(_) => return false,
+        // The oplock handle is dropped at the end of this block.
+        return match OpenOptions::new().write_access().open(&path) {
+            Ok(mut ph) => ph.hydrate(..).is_ok(),
+            Err(_) => false,
+        };
     }
-    // A regular file that lost its placeholder status: convert it back (data kept, no
-    // dehydrate), re-attaching the uid so a future free-up / re-hydrate can find it.
-    match convert_file_to_placeholder(&path, uid.unwrap_or(""), false) {
-        Ok(()) => true,
+    if file_attribute_data(&path).is_none() {
+        return false;
+    }
+    match convert_file_to_placeholder(&path, uid.unwrap_or("")) {
+        Ok(()) => {
+            if let (Some(uid), Some(entry)) = (uid, file_attribute_data(&path)) {
+                verify::want(app, &path, uid, stamp_of(&entry));
+            }
+            true
+        }
         Err(e) => {
             // No file name / uid in the log — just the outcome and the OS error.
             crate::note(app, &format!("[keep] convert failed: {e}"));
@@ -705,7 +1029,7 @@ fn keep_offline_one(
 #[cfg(windows)]
 #[derive(PartialEq)]
 enum Existing {
-    /// Ours, and this pass fixed it up (marked in sync, or converted back).
+    /// Ours, and this pass fixed it up (given this photo's identity, or converted back).
     Adopted,
     /// Ours, and there was nothing to do.
     Ours,
@@ -713,89 +1037,84 @@ enum Existing {
     Foreign,
 }
 
-/// Bring a file left on disk by a previous install back into the sync engine.
+/// Bring a file already sitting at one of the fill's names into the sync engine, as this
+/// photo's, or say it is not.
 ///
-/// `PlaceholderFile::create` fails on a name collision, so after a reinstall the
-/// kept-offline photos already sitting in `Photos\` / `Albums\` are skipped and
-/// left as plain files — Explorer shows them "waiting to sync" and the app never
-/// badges them as offline. Converting the on-disk file to an in-sync placeholder
-/// (data preserved, NOT dehydrated) carrying its uid blob fixes both: the green
-/// check returns and a later free-up / re-hydrate can still find the photo. If the
-/// file is already a placeholder, convert fails and re-asserting in-sync is enough.
+/// `PlaceholderFile::create` fails on a name collision, so every fill after the first meets
+/// its own placeholders here, and after a reinstall the downloaded copies left as plain files.
+/// The index the fill builds names a path for this photo only when the file there carries this
+/// photo's uid, because the uid is what the file opens, and everything else (delete, rename,
+/// move, free up) acts through the index. Same-named photos are named `IMG.jpg`, `IMG (2).jpg`
+/// in listing order, so the photo at a name can change between fills.
 #[cfg(windows)]
 fn reconcile_existing(
     app: &tauri::AppHandle,
     path: &std::path::Path,
     uid: &str,
     size: u64,
+    filetime: i64,
 ) -> Existing {
-    use cloud_filter::placeholder::OpenOptions;
     const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-    // Decide from the directory entry, BEFORE opening anything.
-    //
-    // A cloud-only placeholder is already exactly what populate would have created,
-    // so there is nothing here to reconcile. That matters far more than the wasted
-    // work: every open below goes through `CfOpenFileWithOplock`, the crate offers
-    // no no-recall flag, and to the Cloud Filter driver an open with write access is
-    // a data access. So opening one to ask "are you alright?" downloads it.
-    //
-    // Every populate after the first hits this path for the WHOLE library, because
-    // by then every placeholder exists and `create` fails on all of them. That is
-    // what made "Sync now" pull the entire library: not a download the button asked
-    // for, just the inspection itself.
+    // Decide from the directory entry and the placeholder's own record, both read without
+    // opening the file for its data: to the Cloud Filter driver any other open of a cloud-only
+    // placeholder is a data access, and asking it "are you alright?" would download it. Every
+    // fill after the first asks this of the whole library.
     let Some(entry) = file_attribute_data(path) else {
         return Existing::Foreign; // unreadable: nothing may act on it
     };
+    let placeholder = identity::read(path);
     if entry.dwFileAttributes & RECALL_ON_DATA_ACCESS != 0 {
-        // Cloud-only: already exactly what populate would have created, so there is
-        // no work to do. It is still ours, and saying otherwise is what stopped
-        // Download and Free up finding anything on the second and every later run.
+        // Cloud-only: no bytes here, so whichever photo it stood for, nothing is lost by making
+        // it stand for this one. It is retargeted rather than adopted as it is, or the name
+        // would lead to this photo while the file opens another.
+        return match placeholder {
+            Some(info) if info.is(uid) => Existing::Ours,
+            Some(_) => match identity::retarget_cloud_only(path, uid, size, filetime) {
+                Ok(()) => Existing::Adopted,
+                Err(e) => {
+                    crate::note(app, &format!("[reconcile] retarget failed: {e}"));
+                    Existing::Foreign
+                }
+            },
+            None => Existing::Foreign,
+        };
+    }
+    if let Some(info) = placeholder {
+        // One of ours holding data: this photo's only if it carries this photo's uid. Another
+        // photo's copy under a name this one now takes keeps its bytes and its own identity,
+        // and stays out of the index under this photo. Its in-sync state is left as the driver
+        // keeps it: only a check of the bytes may set it, which an out-of-sync copy is handed
+        // to (`verify`).
+        if !info.is(uid) {
+            return Existing::Foreign;
+        }
+        if !info.in_sync {
+            verify::want(app, path, uid, stamp_of(&entry));
+        }
         return Existing::Ours;
     }
-    // It holds data, so an open cannot recall anything. Probe with the crate's oplock
-    // handle: an existing hydrated placeholder just needs to read in-sync so it is not
-    // stranded on "waiting to sync". The handle is dropped before any conversion —
-    // CfConvertToPlaceholder needs a plain Win32 handle instead of the oplock one.
-    match OpenOptions::new().write_access().open(path) {
-        Ok(mut ph) => {
-            if let Some(info) = ph.info().ok().flatten() {
-                // It carries placeholder state, so it is one of ours holding data, and it
-                // is this photo's only if it carries this photo's uid: another photo's
-                // copy under a name this one now takes is left alone rather than handed
-                // this photo's identity. The uid reads back cut short at the front (see
-                // `downloaded_uid`), so it is matched by its end.
-                let tail = String::from_utf8_lossy(info.blob()).into_owned();
-                if !uid.ends_with(tail.as_str()) || uid.len() - tail.len() > 16 {
-                    return Existing::Foreign;
-                }
-                // The in-sync mark is cosmetic (it settles Explorer's status column),
-                // and failing to set it does not make the photo someone else's.
-                let _ = ph.mark_in_sync(true, None);
-                return Existing::Ours;
-            }
-        }
-        Err(_) => return Existing::Foreign,
-    }
-    // A plain file holding data, sharing a name with one of the cloud photos. It is
-    // either our own copy left behind by an earlier install, or a file the user put
-    // here that merely collides: camera names repeat constantly, which is the whole
-    // reason `unique_name` exists.
-    //
-    // Adopting the wrong one is unrecoverable. The uid goes on, the file joins the
-    // mount index, and the next free-up dehydrates it, discarding bytes that were
-    // never in Proton, under a button that promises the photos stay there. So a shared
-    // name is not proof of ownership; the exact byte size matching the cloud file as
-    // well is close enough. Anything else is left completely alone: a stray "waiting
-    // to sync" badge is cosmetic, destroying someone's only copy is not.
+    // A plain file holding data, sharing a name with one of the cloud photos. It is either our
+    // own copy left behind by an earlier install, or a file the user put here that merely
+    // collides: camera names repeat constantly, which is the whole reason `unique_name` exists.
+    // A size other than the cloud file's is not that copy, and is left completely alone. One of
+    // the same size gets this photo's uid but stays out of sync, the same size being no proof of
+    // the same bytes: an edit of the date in place keeps the size. It is marked in sync once its
+    // SHA-1 is shown to be the cloud revision's (`verify`), and nothing frees it before its
+    // bytes have been checked (`free_up_one`).
     let on_disk = ((entry.nFileSizeHigh as u64) << 32) | entry.nFileSizeLow as u64;
     if on_disk != size {
         return Existing::Foreign;
     }
-    match convert_file_to_placeholder(path, uid, false) {
-        Ok(()) => Existing::Adopted,
+    match convert_file_to_placeholder(path, uid) {
+        Ok(()) => {
+            if let Some(entry) = file_attribute_data(path) {
+                verify::want(app, path, uid, stamp_of(&entry));
+            }
+            Existing::Adopted
+        }
         Err(e) => {
             // No file name / uid in the log — just the outcome and the OS error.
-            // Without the uid blob attached nothing could act on it correctly anyway,
+            // Without the uid attached nothing could act on it correctly anyway,
             // so it stays out of the index.
             crate::note(app, &format!("[reconcile] convert failed: {e}"));
             Existing::Foreign
@@ -987,6 +1306,7 @@ pub struct MountActivity {
 
 static ACTIVITY: std::sync::Mutex<Option<MountActivity>> = std::sync::Mutex::new(None);
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn show_activity(app: &tauri::AppHandle, now: Option<MountActivity>) {
     use tauri::Emitter;
     let mut cur = ACTIVITY.lock().unwrap();
@@ -996,11 +1316,13 @@ fn show_activity(app: &tauri::AppHandle, now: Option<MountActivity>) {
 
 /// Names the outermost piece of work while it runs: one nested inside it (a download
 /// a fill set off) leaves the outer name standing, and only its owner clears it.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) struct Doing {
     app: tauri::AppHandle,
     owns: bool,
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 impl Doing {
     pub(crate) fn new(app: &tauri::AppHandle, what: &'static str, name: Option<String>, by: Option<String>) -> Self {
         let owns = ACTIVITY.lock().unwrap().is_none();
@@ -1020,12 +1342,14 @@ impl Drop for Doing {
 }
 
 /// The fill's count of photos placed, shown only while a fill is what the folder is doing.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn fill_progress(app: &tauri::AppHandle, done: u64, total: u64) {
     fill_phase(app, None, done, total);
 }
 
 /// The part of the fill that runs now and how far it has got, so the window never shows
 /// the photos' last count standing while the albums and the tidying still run.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn fill_phase(app: &tauri::AppHandle, phase: Option<&'static str>, done: u64, total: u64) {
     let next = match ACTIVITY.lock().unwrap().clone() {
         Some(a) if a.what == "fill" => Some(MountActivity { done, total, phase, ..a }),
@@ -1117,6 +1441,15 @@ fn file_attribute_data(
     Some(data)
 }
 
+/// A file's size and last write time from its directory entry, which tell the checker in
+/// `verify` whether a copy changed since it was last looked at.
+#[cfg(windows)]
+fn stamp_of(entry: &windows::Win32::Storage::FileSystem::WIN32_FILE_ATTRIBUTE_DATA) -> verify::Stamp {
+    let size = ((entry.nFileSizeHigh as u64) << 32) | entry.nFileSizeLow as u64;
+    let written = ((entry.ftLastWriteTime.dwHighDateTime as i64) << 32) | entry.ftLastWriteTime.dwLowDateTime as i64;
+    (size, written)
+}
+
 /// A path's attributes, read from its directory entry. See `file_attribute_data` for
 /// why this never goes through `std::fs::metadata`.
 #[cfg(windows)]
@@ -1188,16 +1521,13 @@ fn hydrated_size(base: &std::path::Path, rel: &str) -> Option<u64> {
 /// and un-freeable) back into a Cloud Filter placeholder. `CfConvertToPlaceholder`
 /// needs a real Win32 file handle; the cloud-filter crate only exposes convert through
 /// its oplock handle, which the API rejects with ERROR_INVALID_HANDLE, so we call it
-/// directly on a `CreateFile`/std handle. With `dehydrate` the local data is dropped
-/// (free up); without it the data is kept (green check). The uid is stored as the file
-/// identity blob so a later hydrate / free-up can find the cloud file.
+/// directly on a `CreateFile`/std handle. The data is kept, and the uid is stored as the
+/// file identity so a later hydrate / free-up can find the cloud file.
 #[cfg(windows)]
-fn convert_file_to_placeholder(path: &std::path::Path, uid: &str, dehydrate: bool) -> Result<(), String> {
+fn convert_file_to_placeholder(path: &std::path::Path, uid: &str) -> Result<(), String> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::CloudFilters::{
-        CfConvertToPlaceholder, CF_CONVERT_FLAG_DEHYDRATE, CF_CONVERT_FLAG_MARK_IN_SYNC,
-    };
+    use windows::Win32::Storage::CloudFilters::{CfConvertToPlaceholder, CF_CONVERT_FLAG_NONE};
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1209,13 +1539,10 @@ fn convert_file_to_placeholder(path: &std::path::Path, uid: &str, dehydrate: boo
     } else {
         (Some(blob.as_ptr() as *const core::ffi::c_void), blob.len() as u32)
     };
-    let flags = if dehydrate {
-        CF_CONVERT_FLAG_MARK_IN_SYNC | CF_CONVERT_FLAG_DEHYDRATE
-    } else {
-        CF_CONVERT_FLAG_MARK_IN_SYNC
-    };
+    // Not marked in sync: a file that only has the cloud file's name and size is no proof of
+    // its bytes, and a copy in sync may be freed, which throws its bytes away.
     unsafe {
-        CfConvertToPlaceholder(HANDLE(file.as_raw_handle() as _), id_ptr, id_len, flags, None, None)
+        CfConvertToPlaceholder(HANDLE(file.as_raw_handle() as _), id_ptr, id_len, CF_CONVERT_FLAG_NONE, None, None)
     }
     .map_err(|e| format!("{e:?}"))
 }
@@ -1347,6 +1674,7 @@ pub async fn free_up_album(app: tauri::AppHandle, uid: String) -> u32 {
             let base = sync_root_path();
             let rev = rel_to_uid();
             let mut freed = 0u32;
+            let mut photos = Vec::new();
             for rel in album_copies(&uid) {
                 // No uid means the copy is not in the mount's index, so there is no
                 // blob to restore it with and it is not ours to touch.
@@ -1354,8 +1682,10 @@ pub async fn free_up_album(app: tauri::AppHandle, uid: String) -> u32 {
                 if free_up_one(&app, &base, photo, &rel) {
                     freed += 1;
                 }
+                photos.push(photo.clone());
             }
             crate::note(&app, &format!("[album-sync] freed {freed} album copies"));
+            crate::keep_all::note_album_freed(&app, &photos);
             rescan_hydrated();
             freed
         })
@@ -1388,29 +1718,40 @@ pub fn set_album_synced(app: tauri::AppHandle, uid: String, enabled: bool) {
     let _ = (app, uid, enabled);
 }
 
-/// Re-mark a hydrated file as in-sync. A read-only provider (we never upload) must
-/// do this, or the write-time bump from hydration reads as a local change and the
-/// file is stranded on "waiting to sync", which also blocks "Free up space".
+/// Marks a file just downloaded in sync once its bytes are still the ones the download wrote,
+/// trying a few times while the program that opened it holds it for writing. A file that
+/// changed in the meantime stays out of sync, and no free up throws the change away.
 #[cfg(windows)]
-fn mark_path_in_sync(app: &tauri::AppHandle, path: &std::path::Path) {
-    use cloud_filter::placeholder::OpenOptions;
-    match OpenOptions::new().write_access().open(path) {
-        Ok(mut ph) => match ph.mark_in_sync(true, None) {
-            Ok(_) => crate::note(app, "[cloud] re-marked in-sync after hydrate"),
-            Err(e) => crate::note(app, &format!("[cloud] mark-in-sync failed: {e:?}")),
-        },
-        Err(e) => crate::note(app, &format!("[cloud] mark-in-sync open failed: {e:?}")),
+fn settle_after_download(app: &tauri::AppHandle, path: &std::path::Path, uid: &str, written: (u64, u64)) {
+    for wait in [700u64, 3_000, 15_000] {
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        match identity::mark_in_sync_if_same(path, written) {
+            Ok(true) => return,
+            Ok(false) => {
+                crate::note(app, "[cloud] changed right after its download, left out of sync");
+                return;
+            }
+            Err(_) => {}
+        }
+    }
+    crate::note(app, "[cloud] in use after its download, left out of sync");
+    // Checked against the revision's digest instead, in the background.
+    if let Some(entry) = file_attribute_data(path) {
+        verify::want(app, path, uid, stamp_of(&entry));
     }
 }
 
 /// The smallest and largest page populate asks the sidecar for. A cold page resolves
 /// every photo in it over the network, so it starts small; one answered from cache
 /// costs milliseconds, and paging four at a time would turn a large library into hours.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) const POPULATE_PAGE_MIN: u64 = 4;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 const POPULATE_PAGE_MAX: u64 = 200;
 
 /// The next page size and the rest before asking for it, from how long the last page
 /// took: fast pages double, slow ones halve and leave the channel free for a moment.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub(crate) fn next_populate_page(page: u64, took: std::time::Duration) -> (u64, std::time::Duration) {
     use std::time::Duration;
     if took < Duration::from_millis(300) {
@@ -1484,6 +1825,14 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         // second time. Otherwise the sidecar streams the download to a temp file; either
         // way it is transferred into the placeholder a chunk at a time, so a large video
         // never sits in memory.
+        // Noted before anything is written, so the fill never changes this file's identity
+        // while the download runs, and checked against the file as it is now: the identity the
+        // request carries was read when it was raised.
+        let _filling = identity::Filling::begin(&request.path());
+        if identity::read(&request.path()).is_some_and(|info| !info.is(&uid)) {
+            crate::note(&self.app, "[cloud] hydrate aborted: the file now stands for another photo");
+            return Err(CloudErrorKind::ValidationFailed);
+        }
         let local = local_timeline_copy(&uid, &request.path(), want);
         let (temp, got) = match &local {
             Some(path) => (path.clone(), want),
@@ -1507,9 +1856,14 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         }
 
         // Stream the temp file into the placeholder. The OS requires each transfer to
-        // be 4KiB or to end exactly on the file size, so send full 4KiB chunks with a
-        // smaller final chunk, holding only one chunk in memory at a time.
-        const CHUNK: usize = 4096;
+        // be a multiple of 4KiB or to end exactly on the file size. Each chunk is one
+        // CfExecute call, so a large chunk keeps a big video from costing hundreds of
+        // thousands of them.
+        const CHUNK: usize = 1 << 20;
+        const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+        // What was written, for checking the file still holds exactly it before it is marked
+        // in sync.
+        let mut written = identity::Digest::default();
         let transfer = (|| -> Result<(), CloudErrorKind> {
             let mut f = std::fs::File::open(&temp).map_err(|e| {
                 crate::note(&self.app, &format!("[cloud] hydrate open temp failed: {e:?}"));
@@ -1518,6 +1872,7 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
             let mut buf = vec![0u8; CHUNK];
             let mut offset = 0u64;
             let mut remaining = got;
+            let mut reported = std::time::Instant::now();
             while remaining > 0 {
                 let this = std::cmp::min(CHUNK as u64, remaining) as usize;
                 f.read_exact(&mut buf[..this]).map_err(|e| {
@@ -1528,9 +1883,13 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
                     crate::note(&self.app, &format!("[cloud] transfer failed at {offset}: {e:?}"));
                     CloudErrorKind::InvalidRequest
                 })?;
+                written.add(&buf[..this]);
                 offset += this as u64;
                 remaining -= this as u64;
-                let _ = ticket.report_progress(got, offset);
+                if remaining == 0 || reported.elapsed() >= PROGRESS_EVERY {
+                    let _ = ticket.report_progress(got, offset);
+                    reported = std::time::Instant::now();
+                }
             }
             Ok(())
         })();
@@ -1542,14 +1901,15 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
             crate::note(&self.app, &format!("[cloud] hydrate done ({got} bytes)"));
         }
         mark_hydrated(&uid, true);
-        // Re-mark in-sync once the hydration handle is released, so the file can be
-        // freed up later instead of being stranded on "waiting to sync".
+        // Settle the in-sync state once the hydration handle is released, so the file can be
+        // freed up later instead of being stranded on "waiting to sync", but only while it
+        // still holds exactly what was written: a program that opened it may write to it
+        // straight away, and a copy in sync may be freed, which throws its bytes away.
         let path = request.path();
         let app = self.app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(700));
-            mark_path_in_sync(&app, &path);
-        });
+        let written = written.finish();
+        let downloaded = uid.clone();
+        std::thread::spawn(move || settle_after_download(&app, &path, &downloaded, written));
         Ok(())
     }
 
@@ -1570,6 +1930,8 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
             // The trash is never emptied from here, and what others shared is theirs.
             return Err(cloud_filter::error::CloudErrorKind::AccessDenied);
         }
+        // The photo this file opens, for reading the delete back once the file is gone.
+        crate::explorer_sync::note_identity(&rel, &String::from_utf8_lossy(request.file_blob()));
         ticket.pass().map_err(|_| cloud_filter::error::CloudErrorKind::InvalidRequest)
     }
 
@@ -1606,6 +1968,8 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
                 if to.is_none() && !recycled {
                     crate::explorer_sync::note_moved_out(from);
                 }
+                // The photo this file opens, for reading the move back once it has left `from`.
+                crate::explorer_sync::note_identity(from, &String::from_utf8_lossy(request.file_blob()));
             }
         }
         ticket.pass().map_err(|_| cloud_filter::error::CloudErrorKind::InvalidRequest)
@@ -1617,10 +1981,26 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         ticket: cloud_filter::filter::ticket::Dehydrate,
         _info: cloud_filter::filter::info::Dehydrate,
     ) -> cloud_filter::error::CResult<()> {
-        // While every photo is kept, only the app frees a copy (Free up), never Windows by
-        // itself, which would free it and have the pass download it again.
-        if crate::keep_all::keeps_all(&self.app) && !dehydrating_ourselves(&request.path()) {
-            crate::note(&self.app, "[cloud] dehydrate refused: every photo is kept on this PC");
+        use crate::keep_all::OsFree;
+        let path = request.path();
+        let unpinned = file_attributes(&path).is_some_and(|a| a & FILE_ATTRIBUTE_UNPINNED != 0);
+        let blob_uid = String::from_utf8_lossy(request.file_blob()).into_owned();
+        let listed = listed_copy(&blob_uid, &path);
+        let decision = crate::keep_all::os_free(
+            crate::keep_all::mode(&self.app),
+            dehydrating_ourselves(&path),
+            listed,
+            unpinned,
+        );
+        if decision == OsFree::Refuse {
+            crate::note(
+                &self.app,
+                if listed {
+                    "[cloud] dehydrate refused: every photo is kept on this PC"
+                } else {
+                    "[cloud] dehydrate refused: the copy is not a photo of the library"
+                },
+            );
             return Err(cloud_filter::error::CloudErrorKind::AccessDenied);
         }
         // Approve "free up space": the local data is dropped and the file goes back
@@ -1632,6 +2012,9 @@ impl cloud_filter::filter::SyncFilter for ProtonSyncFilter {
         match ticket.pass() {
             Ok(()) => {
                 crate::note(&self.app, "[cloud] dehydrate approved");
+                if decision == OsFree::Record {
+                    note_os_freed(&self.app, &blob_uid, &path);
+                }
                 rescan_hydrated();
                 Ok(())
             }
@@ -1810,11 +2193,14 @@ fn prune_stale(
                                 .unwrap_or_default();
                             (crate::keep_all::kept(app), hidden)
                         });
-                        if hidden.iter().any(|h| !h.is_empty() && (h.ends_with(&tail) || tail.ends_with(h.as_str()))) {
+                        if let Some(h) = hidden.iter().find(|h| !h.is_empty() && (h.ends_with(&tail) || tail.ends_with(h.as_str()))) {
                             // Hidden: out of the plain folder whatever the mode, and whoever
-                            // downloaded it. Its photo is still in Drive, behind the lock.
-                            if let_go_of_copy(&entry.path(), &rel) {
-                                removed += 1;
+                            // downloaded it, once Drive says the photo is still there, behind the
+                            // lock. Hidden and deleted for good, the copy is all that is left, and
+                            // it stays as the user's own (`release_orphans`).
+                            let listed = now_at.keys().map(|(_, u)| u.as_str());
+                            if let Some(uid) = crate::keep_all::hidden_copy_uid(&tail, h, listed) {
+                                orphans.push((uid, entry.path(), rel));
                             }
                             continue;
                         }
@@ -1892,6 +2278,9 @@ fn prune_stale(
 #[cfg(windows)]
 fn let_go_of_copy(path: &std::path::Path, rel: &str) -> bool {
     use cloud_filter::ext::FileExt;
+    if file_attributes(path).is_some_and(|a| a & FILE_ATTRIBUTE_PINNED != 0) {
+        clear_pin_mark(path, false);
+    }
     let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
         return false;
     };
@@ -1935,9 +2324,31 @@ impl Drop for OwnDehydrate {
     }
 }
 
+/// Whether the folder's index lists this file as a copy of the photo it carries.
+#[cfg(windows)]
+fn listed_copy(uid: &str, path: &std::path::Path) -> bool {
+    let Some(rel) = crate::explorer_sync::relative(&sync_root_path(), path) else { return false };
+    let rel = rel.to_lowercase();
+    mount_index().lock().unwrap().get(uid).is_some_and(|rels| rels.iter().any(|r| r.to_lowercase() == rel))
+}
+
 #[cfg(windows)]
 fn dehydrating_ourselves(path: &std::path::Path) -> bool {
     own_dehydrations().lock().unwrap().contains(&path.to_string_lossy().to_lowercase())
+}
+
+/// Records a copy Windows freed as the app's Free up records it: the timeline copy as the
+/// photo, any other copy as an album's.
+#[cfg(windows)]
+fn note_os_freed(app: &tauri::AppHandle, uid: &str, path: &std::path::Path) {
+    if uid.is_empty() {
+        return;
+    }
+    let copy = match crate::explorer_sync::relative(&sync_root_path(), path) {
+        Some(rel) => crate::keep_all::freed_copy(&rel, timeline_rel(uid).as_deref()),
+        None => crate::keep_all::FreedCopy::Album,
+    };
+    crate::keep_all::note_copy_freed(app, &[uid.to_string()], copy);
 }
 
 /// Lets go of the downloaded copies whose photos left the library, by Drive's own answer
@@ -2024,7 +2435,8 @@ fn timeline_rel(uid: &str) -> Option<String> {
 
 /// The timeline copy of a photo, when it is on this PC already with the size the cloud
 /// file has and is not the very file being filled, so another copy of the same photo (in
-/// an album or the favourites) can be filled from it.
+/// an album or the favourites) can be filled from it. Only a copy of this photo in sync,
+/// which is the cloud file's bytes: one changed here would carry the change into the other.
 #[cfg(windows)]
 fn local_timeline_copy(uid: &str, asking: &std::path::Path, size: u64) -> Option<std::path::PathBuf> {
     let base = sync_root_path();
@@ -2033,7 +2445,10 @@ fn local_timeline_copy(uid: &str, asking: &std::path::Path, size: u64) -> Option
     if path.to_string_lossy().eq_ignore_ascii_case(&asking.to_string_lossy()) {
         return None;
     }
-    (hydrated_size(&base, &rel)? == size).then_some(path)
+    if hydrated_size(&base, &rel)? != size {
+        return None;
+    }
+    identity::read(&path).is_some_and(|info| info.is(uid) && info.in_sync).then_some(path)
 }
 
 /// The photos the last fill placed in `Photos\`, newest first.
@@ -2052,6 +2467,16 @@ pub(crate) fn is_cloud_only(uid: &str) -> bool {
         .is_some_and(|a| a & RECALL_ON_DATA_ACCESS != 0)
 }
 
+/// Whether any copy of a photo, in `Photos\` or in an album, holds its data on this PC.
+#[cfg(windows)]
+pub(crate) fn any_copy_local(uid: &str) -> bool {
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    let rels = mount_index().lock().unwrap().get(uid).cloned().unwrap_or_default();
+    let base = sync_root_path();
+    rels.iter()
+        .any(|rel| file_attributes(&base.join(rel)).is_some_and(|a| a & RECALL_ON_DATA_ACCESS == 0))
+}
+
 #[cfg(windows)]
 pub(crate) fn cloud_size_of(uid: &str) -> Option<u64> {
     cloud_size(uid)
@@ -2060,6 +2485,7 @@ pub(crate) fn cloud_size_of(uid: &str) -> Option<u64> {
 /// Downloads a photo's timeline copy in place, but only while it is cloud-only: a file that
 /// is local already, or is no placeholder at all, is left exactly as it is. Unlike
 /// `keep_offline_one`, it never adopts a plain file, which by now could be the user's own.
+/// The download itself marks the copy in sync once its bytes check out.
 #[cfg(windows)]
 pub(crate) fn hydrate_cloud_only(uid: &str) -> bool {
     use cloud_filter::placeholder::OpenOptions;
@@ -2067,12 +2493,14 @@ pub(crate) fn hydrate_cloud_only(uid: &str) -> bool {
         return false;
     }
     let Some(rel) = timeline_rel(uid) else { return false };
-    let Ok(mut ph) = OpenOptions::new().write_access().open(sync_root_path().join(rel)) else { return false };
-    if ph.info().ok().flatten().is_none() || ph.hydrate(..).is_err() {
+    let path = sync_root_path().join(rel);
+    // Read without opening it for its data: a placeholder of another photo under this name
+    // would download that photo.
+    if !identity::read(&path).is_some_and(|info| info.is(uid)) {
         return false;
     }
-    let _ = ph.mark_in_sync(true, None);
-    true
+    let Ok(mut ph) = OpenOptions::new().write_access().open(&path) else { return false };
+    ph.hydrate(..).is_ok()
 }
 
 /// Free space on the drive the folder is on, as this user may use it.
@@ -2154,7 +2582,7 @@ fn populate_flat(app: &tauri::AppHandle, root: &std::path::Path, rel_dir: &str, 
             made += 1;
             true
         } else {
-            reconcile_existing(app, &dir.join(&unique), uid, *size) != Existing::Foreign
+            reconcile_existing(app, &dir.join(&unique), uid, *size, *ft) != Existing::Foreign
         };
         mark_not_indexed(&dir.join(&unique));
         if owned {
@@ -2196,7 +2624,7 @@ fn populate_extras(app: &tauri::AppHandle, root: &std::path::Path, favorites: &[
     made += populate_flat(app, root, "Trash", &photos_of(extras.get("trash")));
     made += populate_flat(app, root, "Shared", &photos_of(extras.get("shared")));
     let mut album_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for album in extras.get("sharedAlbums").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+    for album in extras.get("sharedAlbums").and_then(|v| v.as_array()).into_iter().flatten() {
         let name = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
         let folder = unique_name(&sanitize_name(name), &mut album_names);
         made += populate_flat(app, root, &format!("Shared\\{folder}"), &photos_of(album.get("photos")));
@@ -2218,12 +2646,18 @@ pub(crate) fn clear_after_sign_out(app: &tauri::AppHandle) {
     // What the folder held is this account's business; the next one takes its own look.
     if let Ok(dir) = crate::secure_store::app_dir(app) {
         let _ = std::fs::remove_file(dir.join(crate::explorer_sync::SEEN_FILE));
+        let _ = std::fs::remove_file(dir.join(relocate::RESTORE_FILE));
     }
     let _fill = populate_lock();
     let root = sync_root_path();
-    let mut folders: Vec<String> =
-        vec!["Photos".into(), "Photos\\Favorites".into(), "Trash".into(), "Shared".into()];
-    for parent in ["Albums", "Shared"] {
+    // A folder whose drive is gone is not touched: another disk may hold that letter now.
+    let present = sync_root_available();
+    let mut folders: Vec<String> = if present {
+        vec!["Photos".into(), "Photos\\Favorites".into(), "Trash".into(), "Shared".into()]
+    } else {
+        Vec::new()
+    };
+    for parent in ["Albums", "Shared"].into_iter().filter(|_| present) {
         if let Ok(entries) = std::fs::read_dir(root.join(parent)) {
             for entry in entries.flatten() {
                 if entry.file_type().is_ok_and(|t| t.is_dir()) {
@@ -2259,16 +2693,7 @@ pub(crate) fn clear_after_sign_out(app: &tauri::AppHandle) {
             let _ = std::fs::remove_dir(&path);
         }
     }
-    mount_index().lock().unwrap().clear();
-    album_index().lock().unwrap().clear();
-    album_dirs().lock().unwrap().clear();
-    forget_fills();
-    {
-        let (state, _) = hydrated_state();
-        let mut st = state.lock().unwrap();
-        st.uids.clear();
-        st.version += 1;
-    }
+    forget_mount_state();
     // Whether the next account's photos show in File Explorer is that account's choice: the
     // folder stops filling now, and the window says so once the next account is in.
     if show_in_explorer_enabled() {
@@ -2277,6 +2702,23 @@ pub(crate) fn clear_after_sign_out(app: &tauri::AppHandle) {
         let _ = crate::secure_store::write_sealed(app, EXPLORER_OFF_NOTICE, &left.to_string());
     }
     crate::note(app, &format!("[cloud] signed out: removed {removed} placeholders, kept downloaded copies"));
+}
+
+/// Forgets what the folder's last fill knew: the copies it indexed, the albums' folders, the
+/// fills' timing and which photos were on this PC.
+#[cfg(windows)]
+fn forget_mount_state() {
+    // A fill still running for the account that left publishes nothing.
+    *NEXT_INDEX.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    verify::forget();
+    mount_index().lock().unwrap().clear();
+    album_index().lock().unwrap().clear();
+    album_dirs().lock().unwrap().clear();
+    forget_fills();
+    let (state, _) = hydrated_state();
+    let mut st = state.lock().unwrap();
+    st.uids.clear();
+    st.version += 1;
 }
 
 /// Whether a path lies in a drive's Recycle Bin, where Explorer's Delete moves a file.
@@ -2338,21 +2780,29 @@ pub(crate) fn album_for_folder(name: &str) -> Option<String> {
 #[cfg(windows)]
 fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
     let _fill = populate_lock();
+    populate_locked(app)?;
+    relocate::resume_restore(app);
+    Ok(())
+}
+
+/// The fill itself, for a caller that already holds `populate_lock`.
+#[cfg(windows)]
+fn populate_locked(app: &tauri::AppHandle) -> Result<(), String> {
     use cloud_filter::metadata::{Metadata, MetadataExt};
     use cloud_filter::placeholder_file::PlaceholderFile;
     use std::collections::{HashMap, HashSet};
 
+    if !sync_root_available() {
+        return Err("the drive of the folder is not connected".into());
+    }
     let folder = sync_root_path();
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     mark_not_indexed(&folder);
-    // Idempotent across an unexpected second run in one process. The sizes go with
-    // the index they belong to: a free-up that overlaps a populate then finds no size
-    // for a moment and declines to convert, which is the harmless direction.
     // What the previous fill knew, for `prune_stale` to recognise a downloaded copy that
-    // is still a photo of the library under the name it had before a rename.
+    // is still a photo of the library under the name it had before a rename. The new index
+    // is built aside and replaces it whole once everything is placed.
     let previous = rel_to_uid();
-    mount_index().lock().unwrap().clear();
-    mount_sizes().lock().unwrap().clear();
+    begin_index();
     cleanup_stale_root(&folder);
 
     let photos_dir = folder.join("Photos");
@@ -2386,13 +2836,13 @@ fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
 
     loop {
         let asked = std::time::Instant::now();
-        let result = crate::sidecar_rpc(
+        let mut result = crate::sidecar_rpc(
             app,
             "listForMount",
             serde_json::json!({ "offset": offset, "limit": page }),
         )?;
         let took = asked.elapsed();
-        let items = result.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let items = result.get_mut("items").and_then(|v| v.as_array_mut()).map(std::mem::take).unwrap_or_default();
         let total = result.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
         fill_progress(app, (offset + items.len() as u64).min(total), total);
 
@@ -2411,7 +2861,7 @@ fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
             let base = sanitize_name(name);
             let unique = unique_name(&base, &mut photos_seen);
             meta.insert(uid.to_string(), (base, size, ft));
-            mount_sizes().lock().unwrap().insert(uid.to_string(), size);
+            size_push(uid, size);
             all_uids.push(uid.to_string());
 
             let placeholder = PlaceholderFile::new(&unique)
@@ -2426,7 +2876,7 @@ fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
                 // One of ours from an earlier run is reconciled so it is not stranded
                 // on "waiting to sync" and the app still sees it as kept offline. It
                 // predates the folder's no-index bit, so it does not inherit it.
-                match reconcile_existing(app, &photos_dir.join(&unique), uid, size) {
+                match reconcile_existing(app, &photos_dir.join(&unique), uid, size, ft) {
                     Existing::Adopted => {
                         reconciled += 1;
                         true
@@ -2481,6 +2931,7 @@ fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
     populate_albums(app, &folder.join("Albums"), &meta);
     fill_phase(app, Some("tidy"), 0, 0);
     populate_extras(app, &folder, &favorites);
+    publish_index();
     prune_stale(app, &folder, &previous);
     // The index now names copies an earlier run downloaded, which the badge has to show.
     rescan_hydrated();
@@ -2510,6 +2961,8 @@ fn try_populate(app: &tauri::AppHandle) -> Result<(), String> {
         *timeline_order().lock().unwrap() = all_uids.clone();
     }
     crate::keep_all::nudge();
+    // Explorer marks set while the app was closed, or lost among too many changes at once.
+    sweep_pin_marks(app);
 
     // Settle the folders' Explorer status (a fresh sync-root folder reads as pending
     // until it is an in-sync placeholder). Done last, after all hydration.
@@ -2541,7 +2994,7 @@ fn populate_albums(
     let mut offset = 0u64;
     // A page of albums at a time, each page a short call, with the count shown as it goes.
     loop {
-        let page = match crate::sidecar_rpc(
+        let mut page = match crate::sidecar_rpc(
             app,
             "listAlbumsForMount",
             serde_json::json!({ "offset": offset, "limit": ALBUM_PAGE }),
@@ -2553,7 +3006,7 @@ fn populate_albums(
             }
         };
         let total = page.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
-        let albums = page.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let albums = page.get_mut("items").and_then(|v| v.as_array_mut()).map(std::mem::take).unwrap_or_default();
         if total == 0 {
             album_index().lock().unwrap().clear();
             album_dirs().lock().unwrap().clear();
@@ -2570,7 +3023,7 @@ fn populate_albums(
         for album in &albums {
             let album_uid = album.get("uid").and_then(|v| v.as_str()).unwrap_or_default();
             let name = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
-            let uids = album.get("uids").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            let uids: &[serde_json::Value] = album.get("uids").and_then(|v| v.as_array()).map_or(&[], Vec::as_slice);
             if uids.is_empty() {
                 continue;
             }
@@ -2588,7 +3041,7 @@ fn populate_albums(
             mark_not_indexed(&album_folder);
             let mut file_seen: HashSet<String> = HashSet::new();
             let mut members: Vec<String> = Vec::new();
-            for u in &uids {
+            for u in uids {
                 let Some(uid) = u.as_str() else { continue };
                 let Some((base, size, ft)) = meta.get(uid) else { continue };
                 let unique = unique_name(base, &mut file_seen);
@@ -2604,7 +3057,7 @@ fn populate_albums(
                     // A copy already sits here: reconcile it so Explorer shows the green
                     // check instead of "waiting to sync". A cloud-only one needs nothing
                     // doing and is ours all the same, so only a foreign file is excluded.
-                    reconcile_existing(app, &album_folder.join(&unique), uid, *size) != Existing::Foreign
+                    reconcile_existing(app, &album_folder.join(&unique), uid, *size, *ft) != Existing::Foreign
                 };
                 mark_not_indexed(&album_folder.join(&unique));
                 // Indexed only once it belongs to the mount, on the same grounds as the
@@ -2726,12 +3179,12 @@ pub async fn pin_selected(app: tauri::AppHandle, uids: Vec<String>) -> PinResult
     }
 }
 
-/// Free up one copy: dehydrate it back to a cloud-only placeholder via
-/// `CfDehydratePlaceholder` directly. This is the provider's own dehydrate call and
-/// does NOT go through Explorer's "Free up space" (which a not-in-sync placeholder
-/// blocks before the callback). `true` once the local data is gone; a copy that is
-/// already cloud-only counts as neither freed nor failed. Logs the exact error, so a
-/// failure pinpoints the cause.
+/// Free up one copy: back to a cloud-only placeholder, its local bytes dropped. Only a copy
+/// that is provably the cloud file's loses its bytes: a placeholder of this photo in sync,
+/// which Windows keeps only while nothing but the download wrote to it, or any other copy of
+/// this photo once its SHA-1 matches the one its cloud revision records, or, for a revision
+/// that records none, once its bytes have been compared with a download of the cloud file. `true` once the local data is gone; a copy that is already cloud-only counts as
+/// neither freed nor failed.
 #[cfg(windows)]
 fn free_up_one(app: &tauri::AppHandle, base: &std::path::Path, uid: &str, rel: &str) -> bool {
     use cloud_filter::ext::FileExt;
@@ -2739,65 +3192,82 @@ fn free_up_one(app: &tauri::AppHandle, base: &std::path::Path, uid: &str, rel: &
     let path = base.join(rel);
     // Skip a copy that is already cloud-only (e.g. an unopened album copy).
     // Attributes only: stat-ing this by opening it would hydrate the very
-    // file we are here to free up. The same directory entry carries the size
-    // the last fallback below has to check, so one read serves both.
+    // file we are here to free up.
     let Some(entry) = file_attribute_data(&path) else {
         return false;
     };
     if entry.dwFileAttributes & RECALL_ON_DATA_ACCESS != 0 {
         return false;
     }
+    let placeholder = identity::read(&path);
+    if placeholder.as_ref().is_some_and(|info| !info.is(uid)) {
+        // Counts only, no name or uid: enough to see that a copy was passed over.
+        crate::note(app, "[freeup] the file at this name is another photo's, left alone");
+        return false;
+    }
+    // Windows refuses to free a copy marked "Always keep on this device"; freeing it here is
+    // the user's later word.
+    if entry.dwFileAttributes & FILE_ATTRIBUTE_PINNED != 0 {
+        clear_pin_mark(&path, false);
+    }
     let _own = OwnDehydrate::new(&path);
-    // Normal path: dehydrate the placeholder in place.
-    if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-        if file.dehydrate(..).is_ok() {
-            return true;
-        }
+    if placeholder.as_ref().is_some_and(|info| info.in_sync) {
+        // The driver refuses a copy that went out of sync since this was read.
+        return std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .is_ok_and(|file| file.dehydrate(..).is_ok());
     }
-    // A placeholder left not-in-sync by a failed/interrupted hydrate blocks
-    // the dehydrate above (and the shell's own delete, which reports "the
-    // cloud provider is not running"). Force it back in-sync, then dehydrate,
-    // to reset it to a clean cloud-only placeholder that deletes normally.
-    {
-        use cloud_filter::placeholder::OpenOptions;
-        if let Ok(mut ph) = OpenOptions::new().write_access().open(&path) {
-            if ph.info().ok().flatten().is_some() {
-                let _ = ph.mark_in_sync(true, None);
-            }
-        } // release the oplock handle before the std dehydrate
-        if let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-            if file.dehydrate(..).is_ok() {
-                return true;
-            }
-        }
-    }
-    // The copy lost its placeholder status (a plain "waiting to sync" file, so
-    // CfDehydratePlaceholder fails with "not a cloud file"): convert it straight
-    // to a DEHYDRATED placeholder, which reclaims the space and restores the
-    // cloud status in one step.
-    //
-    // This branch is the one that ASSERTS the file is the cloud file's copy, rather
-    // than being told so: the two attempts above act on a placeholder, where the
-    // driver already knows what the local data stands for, while this one attaches a
-    // uid to a plain file and drops its bytes in the same call. So the same test the
-    // rest of this file turns on applies here too, and for the same reason: a size
-    // that no longer matches means the file is not that copy, whatever its name says.
-    // `reconcile_existing` refuses to adopt on it, and free-up must refuse to destroy
-    // on it.
+    // Out of sync, or an ordinary file that lost its placeholder status: what it holds is
+    // checked against the cloud file before anything is dropped. A size other than the cloud
+    // file's is not that copy, whatever its name says, and needs nothing more to tell. The
+    // SHA-1 the cloud revision records is the check; only a revision that records none is
+    // downloaded to compare with, and with no answer from Drive the copy stays.
     let on_disk = ((entry.nFileSizeHigh as u64) << 32) | entry.nFileSizeLow as u64;
     if cloud_size(uid) != Some(on_disk) {
-        // Counts only, no name or uid: enough to see that a copy was passed over.
         crate::note(app, "[freeup] size does not match the cloud file, left alone");
         return false;
     }
-    match convert_file_to_placeholder(&path, uid, true) {
-        Ok(()) => true,
-        // No file name / uid in the log — just the outcome and the OS error.
-        Err(e) => {
-            crate::note(app, &format!("[freeup] convert-dehydrate failed: {e}"));
+    let digests = crate::sidecar_rpc(app, "mountDigests", serde_json::json!({ "uids": [uid] })).ok();
+    let outcome = match verify::free_check(digests.as_ref(), uid) {
+        verify::FreeCheck::Digest(sha1) => identity::free_if_digest(&path, uid, &sha1),
+        verify::FreeCheck::Download => match free_by_download(app, &path, uid, on_disk) {
+            Some(outcome) => outcome,
+            None => return false,
+        },
+        verify::FreeCheck::LeaveAlone => {
+            crate::note(app, "[freeup] the cloud file's digest could not be read, left alone");
+            return false;
+        }
+    };
+    match outcome {
+        identity::Freed::Freed => true,
+        identity::Freed::Differs => {
+            crate::note(app, "[freeup] changed on this PC, left alone");
+            false
+        }
+        identity::Freed::NotFreed => {
+            crate::note(app, "[freeup] could not free a copy that matches the cloud file");
             false
         }
     }
+}
+
+/// Frees a copy whose cloud revision records no digest by comparing it with a download of the
+/// cloud file. None when the download failed.
+#[cfg(windows)]
+fn free_by_download(app: &tauri::AppHandle, path: &std::path::Path, uid: &str, on_disk: u64) -> Option<identity::Freed> {
+    let (cloud, got) = match crate::hydrate_to_temp(app, uid) {
+        Ok(download) => download,
+        Err(e) => {
+            crate::note(app, &format!("[freeup] could not download the cloud file to compare: {e}"));
+            return None;
+        }
+    };
+    let outcome = if got == on_disk { identity::free_if_same(path, uid, &cloud) } else { identity::Freed::Differs };
+    let _ = std::fs::remove_file(&cloud);
+    Some(outcome)
 }
 
 /// App-side "remove download / free up space" for a selection. Returns how many
@@ -2881,7 +3351,8 @@ pub async fn free_up_all(app: tauri::AppHandle) -> u32 {
                 }
             }
             crate::note(&app, &format!("[freeup] freed {freed} of {total} copies"));
-            crate::keep_all::freed_everything(&app);
+            let uids: Vec<String> = pairs.into_iter().map(|(uid, _)| uid).collect();
+            crate::keep_all::freed_everything(&app, &uids);
             rescan_hydrated();
             freed
         })
@@ -2893,6 +3364,239 @@ pub async fn free_up_all(app: tauri::AppHandle) -> u32 {
         let _ = app;
         0
     }
+}
+
+// ---- Explorer's "Always keep on this device" and "Free up space" ----
+
+/// The marks Explorer's two menu items leave on a file: "Always keep on this device" pins it,
+/// "Free up space" unpins it. Windows acts on neither; the provider does.
+const FILE_ATTRIBUTE_PINNED: u32 = 0x0008_0000;
+const FILE_ATTRIBUTE_UNPINNED: u32 = 0x0010_0000;
+
+/// What a mark Explorer left on a copy asks of the app.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PinMark {
+    /// Download it and keep it, like the app's Download.
+    Keep,
+    /// Free it, like the app's Free up.
+    Free,
+}
+
+/// The mark in a file's attributes, if any. A copy marked both ways is kept, the direction
+/// that loses nothing.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn pin_mark(attrs: u32) -> Option<PinMark> {
+    if attrs & FILE_ATTRIBUTE_PINNED != 0 {
+        Some(PinMark::Keep)
+    } else if attrs & FILE_ATTRIBUTE_UNPINNED != 0 {
+        Some(PinMark::Free)
+    } else {
+        None
+    }
+}
+
+/// Whether a copy Explorer was asked to free may lose its bytes: a placeholder the folder's
+/// index knows, carrying this photo's identity, in sync with the cloud file, and the size the
+/// cloud file has. A file still waiting to upload is an ordinary file and fails the first
+/// test; one changed on this PC since its download is not in sync and fails the third.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn may_free(placeholder: bool, same_photo: bool, in_sync: bool, on_disk: u64, cloud: Option<u64>) -> bool {
+    placeholder && same_photo && in_sync && cloud == Some(on_disk)
+}
+
+/// Sets a file's pin mark back to none through a handle that never recalls its data, so a
+/// cloud-only copy is not downloaded by being opened. A downloaded file, which no open can
+/// recall, may also go through the provider's own handle. True once the mark is gone.
+#[cfg(windows)]
+fn clear_pin_mark(path: &std::path::Path, dir: bool) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::CloudFilters::{CfSetPinState, CF_PIN_STATE_UNSPECIFIED, CF_SET_PIN_FLAG_NONE};
+    const FILE_FLAG_OPEN_NO_RECALL: u32 = 0x0010_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    let flags = if dir { FILE_FLAG_OPEN_NO_RECALL | FILE_FLAG_BACKUP_SEMANTICS } else { FILE_FLAG_OPEN_NO_RECALL };
+    let cleared = std::fs::OpenOptions::new().read(true).custom_flags(flags).open(path).is_ok_and(|file| {
+        unsafe { CfSetPinState(HANDLE(file.as_raw_handle() as _), CF_PIN_STATE_UNSPECIFIED, CF_SET_PIN_FLAG_NONE, None) }
+            .is_ok()
+    });
+    if cleared || dir || file_attributes(path).is_none_or(|a| a & RECALL_ON_DATA_ACCESS != 0) {
+        return cleared;
+    }
+    use cloud_filter::placeholder::{OpenOptions, PinOptions, PinState};
+    OpenOptions::new()
+        .write_access()
+        .open(path)
+        .is_ok_and(|mut ph| ph.mark_pin(PinState::Unspecified, PinOptions::default()).is_ok())
+}
+
+/// Copies whose pin mark changed, waiting for the worker, and whether every copy is to be
+/// looked over.
+#[cfg(windows)]
+#[derive(Default)]
+struct PinMarks {
+    rels: std::collections::BTreeSet<String>,
+    sweep: bool,
+}
+
+#[cfg(windows)]
+fn pin_marks() -> &'static (std::sync::Mutex<PinMarks>, std::sync::Condvar) {
+    static MARKS: std::sync::OnceLock<(std::sync::Mutex<PinMarks>, std::sync::Condvar)> = std::sync::OnceLock::new();
+    MARKS.get_or_init(Default::default)
+}
+
+/// A path in the folder whose pin mark changed, from the folder's watcher.
+#[cfg(windows)]
+pub(crate) fn pin_mark_changed(app: &tauri::AppHandle, rel: String) {
+    let (marks, wake) = pin_marks();
+    marks.lock().unwrap().rels.insert(rel);
+    wake.notify_one();
+    start_pin_worker(app);
+}
+
+/// Looks over every copy the folder's index knows for a mark not acted on yet: one set while
+/// the app was closed, or one the watcher missed among too many changes at once.
+#[cfg(windows)]
+fn sweep_pin_marks(app: &tauri::AppHandle) {
+    let (marks, wake) = pin_marks();
+    marks.lock().unwrap().sweep = true;
+    wake.notify_one();
+    start_pin_worker(app);
+}
+
+/// One thread, started once, so a download or a free up never holds up the watcher.
+#[cfg(windows)]
+fn start_pin_worker(app: &tauri::AppHandle) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let app = app.clone();
+        std::thread::spawn(move || loop {
+            let (rels, sweep) = {
+                let (marks, wake) = pin_marks();
+                let mut m = wake.wait_while(marks.lock().unwrap(), |m| m.rels.is_empty() && !m.sweep).unwrap();
+                (std::mem::take(&mut m.rels), std::mem::replace(&mut m.sweep, false))
+            };
+            // A fill rebuilds the index the copies are found in; act once it is done.
+            drop(populate_lock());
+            apply_pin_marks(&app, rels, sweep);
+        });
+    });
+}
+
+/// Downloads the copies marked to keep and frees the ones marked to free, through the same
+/// steps as the app's Download and Free up. Only the copies of the library's photos the
+/// folder's index knows are touched; any other file keeps its mark and its bytes.
+#[cfg(windows)]
+fn apply_pin_marks(app: &tauri::AppHandle, mut rels: std::collections::BTreeSet<String>, sweep: bool) {
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    const DIRECTORY: u32 = 0x10;
+    if detaching() || !show_in_explorer_enabled() || !sync_root_available() {
+        return;
+    }
+    let base = sync_root_path();
+    let index = photos_by_path();
+    if sweep {
+        for rel in index.keys() {
+            let waiting = match file_attributes(&base.join(rel)).and_then(|a| pin_mark(a).map(|m| (a, m))) {
+                Some((a, PinMark::Keep)) => a & RECALL_ON_DATA_ACCESS != 0,
+                Some((_, PinMark::Free)) => true,
+                None => false,
+            };
+            if waiting {
+                rels.insert(rel.clone());
+            }
+        }
+    }
+    let mut acted = false;
+    for rel in rels {
+        let path = base.join(&rel);
+        let Some(entry) = file_attribute_data(&path) else { continue };
+        let attrs = entry.dwFileAttributes;
+        let Some(mark) = pin_mark(attrs) else { continue };
+        if attrs & DIRECTORY != 0 {
+            // Explorer marks every file beneath a folder itself. A folder freed keeps no mark
+            // of its own, so the photos a later fill puts in it are not taken as freed too.
+            if mark == PinMark::Free {
+                clear_pin_mark(&path, true);
+            }
+            continue;
+        }
+        let Some(uid) = index.get(&rel.to_lowercase()) else { continue };
+        acted = true;
+        match mark {
+            PinMark::Keep => keep_marked(app, &base, &rel, uid, attrs),
+            PinMark::Free => free_marked(app, &base, &rel, uid, &entry),
+        }
+    }
+    if acted {
+        rescan_hydrated();
+    }
+}
+
+/// "Always keep on this device": the user asked to keep the photo, as the app's Download does.
+/// The mark stays, so Windows never frees the copy by itself.
+#[cfg(windows)]
+fn keep_marked(app: &tauri::AppHandle, base: &std::path::Path, rel: &str, uid: &str, attrs: u32) {
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    const REPARSE_POINT: u32 = 0x400;
+    if crate::keep_all::freed_copy(rel, timeline_rel(uid).as_deref()) == crate::keep_all::FreedCopy::Timeline {
+        crate::keep_all::note_unfreed(app, &[uid.to_string()]);
+    }
+    if attrs & RECALL_ON_DATA_ACCESS == 0 || attrs & REPARSE_POINT == 0 {
+        return;
+    }
+    if keep_offline_one(app, base, rel, Some(uid)) {
+        mark_hydrated(uid, true);
+        crate::note(app, "[explorer] always keep: downloaded");
+    } else {
+        crate::note(app, "[explorer] always keep: download failed");
+    }
+}
+
+/// "Free up space": frees the copy as the app's Free up does and records it the same way, an
+/// album's copy as an album's. A copy that is not exactly the cloud file's keeps its bytes.
+#[cfg(windows)]
+fn free_marked(
+    app: &tauri::AppHandle,
+    base: &std::path::Path,
+    rel: &str,
+    uid: &str,
+    entry: &windows::Win32::Storage::FileSystem::WIN32_FILE_ATTRIBUTE_DATA,
+) {
+    const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+    const REPARSE_POINT: u32 = 0x400;
+    let path = base.join(rel);
+    let attrs = entry.dwFileAttributes;
+    let local = attrs & RECALL_ON_DATA_ACCESS == 0;
+    if local {
+        let on_disk = ((entry.nFileSizeHigh as u64) << 32) | entry.nFileSizeLow as u64;
+        let (in_sync, same_photo) = placeholder_state(&path, uid);
+        if !may_free(attrs & REPARSE_POINT != 0, same_photo, in_sync, on_disk, cloud_size(uid)) {
+            crate::note(app, "[explorer] free up space: the copy is not the cloud file as it is, left alone");
+            clear_pin_mark(&path, false);
+            return;
+        }
+    }
+    // The mark goes first: a copy left marked would be freed again each time it is opened.
+    clear_pin_mark(&path, false);
+    if local {
+        if !free_up_one(app, base, uid, rel) {
+            crate::note(app, "[explorer] free up space: could not free the copy");
+            return;
+        }
+        mark_hydrated(uid, false);
+        crate::note(app, "[explorer] free up space: freed");
+    }
+    let copy = crate::keep_all::freed_copy(rel, timeline_rel(uid).as_deref());
+    crate::keep_all::note_copy_freed(app, &[uid.to_string()], copy);
+}
+
+/// Whether a downloaded copy is in sync with the cloud file, and whether it carries this
+/// photo's identity, read through a handle that downloads nothing.
+#[cfg(windows)]
+fn placeholder_state(path: &std::path::Path, uid: &str) -> (bool, bool) {
+    identity::read(path).map_or((false, false), |info| (info.in_sync, info.is(uid)))
 }
 
 /// The uids whose placeholder is hydrated (kept offline, "available on this
@@ -3084,6 +3788,243 @@ pub fn reveal_photo(uid: String) -> Result<(), String> {
     }
 }
 
+#[cfg(windows)]
+#[cfg(test)]
+mod identity_on_disk_tests {
+    use super::identity::{self, Freed};
+    use cloud_filter::error::{CResult, CloudErrorKind};
+    use cloud_filter::filter::{info, ticket, Request, SyncFilter};
+    use cloud_filter::metadata::Metadata;
+    use cloud_filter::placeholder::{ConvertOptions, Placeholder};
+    use cloud_filter::placeholder_file::PlaceholderFile;
+    use cloud_filter::root::{SecurityId, Session, SyncRootIdBuilder};
+    use std::io::Write;
+
+    /// A provider that downloads nothing and lets every free-up through.
+    struct Provider;
+
+    impl SyncFilter for Provider {
+        fn fetch_data(&self, _: Request, _: ticket::FetchData, _: info::FetchData) -> CResult<()> {
+            Err(CloudErrorKind::NotSupported)
+        }
+
+        fn dehydrate(&self, _: Request, ticket: ticket::Dehydrate, _: info::Dehydrate) -> CResult<()> {
+            ticket.pass().map_err(|_| CloudErrorKind::Unsuccessful)
+        }
+    }
+
+    const UID: &str = "volume-of-the-photos~the-photo-link-id==";
+    const CLOUD: &[u8] = b"cloud bytes";
+
+    fn cloud_only(path: &std::path::Path) -> bool {
+        super::file_attributes(path).is_some_and(|a| a & 0x0040_0000 != 0)
+    }
+
+    fn in_sync_copy(path: &std::path::Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).unwrap();
+        let mut placeholder: Placeholder = std::fs::OpenOptions::new().write(true).open(path).unwrap().into();
+        placeholder.convert_to_placeholder(ConvertOptions::default().mark_in_sync().blob(UID.as_bytes().to_vec()), None).unwrap();
+    }
+
+    /// Registers a throwaway sync root under another name, so it is run by hand only:
+    /// `cargo test --lib identity_on_disk_tests -- --ignored`.
+    #[test]
+    #[ignore]
+    fn identities_and_frees_follow_what_the_files_hold() {
+        let root = std::env::temp_dir().join(format!("pfp-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let id = SyncRootIdBuilder::new("PfpIdentityTest").user_security_id(SecurityId::current_user().unwrap()).build();
+        super::register_with_insync_policy(&id, &root, r"%SystemRoot%\system32\shell32.dll,0").unwrap();
+        let connection = Session::new().connect(&root, Provider).unwrap();
+        let cloud_file = std::env::temp_dir().join(format!("pfp-identity-cloud-{}.bin", std::process::id()));
+        std::fs::write(&cloud_file, CLOUD).unwrap();
+
+        // A cloud-only placeholder: its whole identity reads back, nothing is downloaded, and
+        // it takes another photo's identity, size and times in place.
+        PlaceholderFile::new("cloud.jpg")
+            .mark_in_sync()
+            .metadata(Metadata::file().size(5))
+            .blob(b"volume~photo-a".to_vec())
+            .create::<&std::path::Path>(&root)
+            .unwrap();
+        let cloud = root.join("cloud.jpg");
+        let before = identity::read(&cloud).unwrap();
+        let retargeted = identity::retarget_cloud_only(&cloud, UID, 11, 133_000_000_000_000_000);
+        let after = identity::read(&cloud).unwrap();
+        let cloud_size = super::file_attribute_data(&cloud).map(|d| d.nFileSizeLow);
+        let still_cloud_only = cloud_only(&cloud);
+
+        // Copies holding data: one edited here, one out of sync without a change, another
+        // photo's, and plain files with the cloud file's bytes and with a same-size edit.
+        let (edited, stuck, other, plain, plain_edited, fresh, fresh_changed) = (
+            root.join("edited.jpg"),
+            root.join("stuck.jpg"),
+            root.join("other.jpg"),
+            root.join("plain.jpg"),
+            root.join("plain-edited.jpg"),
+            root.join("fresh.jpg"),
+            root.join("fresh-changed.jpg"),
+        );
+        in_sync_copy(&edited, CLOUD);
+        in_sync_copy(&stuck, CLOUD);
+        std::fs::OpenOptions::new().write(true).open(&edited).unwrap().write_all(b"CHANGED").unwrap();
+        let edited_in_sync = identity::read(&edited).unwrap().in_sync;
+        cloud_filter::placeholder::OpenOptions::new().write_access().open(&stuck).unwrap().mark_in_sync(false, None).unwrap();
+        std::fs::write(&other, CLOUD).unwrap();
+        let mut placeholder: Placeholder = std::fs::OpenOptions::new().write(true).open(&other).unwrap().into();
+        placeholder.convert_to_placeholder(ConvertOptions::default().blob(b"volume~photo-b".to_vec()), None).unwrap();
+        drop(placeholder);
+        std::fs::write(&plain, CLOUD).unwrap();
+        std::fs::write(&plain_edited, b"cloud bytEs").unwrap();
+
+        let retarget_with_data = identity::retarget_cloud_only(&stuck, UID, 11, 0);
+        let freed_edited = identity::free_if_same(&edited, UID, &cloud_file);
+        let freed_stuck = identity::free_if_same(&stuck, UID, &cloud_file);
+        let freed_other = identity::free_if_same(&other, UID, &cloud_file);
+        let freed_plain = identity::free_if_same(&plain, UID, &cloud_file);
+        let freed_plain_edited = identity::free_if_same(&plain_edited, UID, &cloud_file);
+        let plain_now = identity::read(&plain);
+
+        // A copy a download just wrote, out of sync: marked only while it holds those bytes.
+        for path in [&fresh, &fresh_changed] {
+            std::fs::write(path, CLOUD).unwrap();
+            super::convert_file_to_placeholder(path, UID).unwrap();
+        }
+        let converted_in_sync = identity::read(&fresh).unwrap().in_sync;
+        let mut written = identity::Digest::default();
+        written.add(CLOUD);
+        std::fs::OpenOptions::new().write(true).open(&fresh_changed).unwrap().write_all(b"C").unwrap();
+        let marked_fresh = identity::mark_in_sync_if_same(&fresh, written.finish());
+        let marked_changed = identity::mark_in_sync_if_same(&fresh_changed, written.finish());
+        let fresh_in_sync = identity::read(&fresh).unwrap().in_sync;
+        let changed_in_sync = identity::read(&fresh_changed).unwrap().in_sync;
+
+        // Copies checked against the SHA-1 the cloud revision records: an out-of-sync copy that
+        // holds it, a same-size edit, another photo's, one checked against no whole digest,
+        // and frees by the digest of a placeholder, a plain file and a same-size edit.
+        let sha1: String = identity::sha1_of(CLOUD).unwrap().iter().map(|b| format!("{b:02x}")).collect();
+        let (by_digest, by_digest_edited, by_digest_other, no_digest) = (
+            root.join("by-digest.jpg"),
+            root.join("by-digest-edited.jpg"),
+            root.join("by-digest-other.jpg"),
+            root.join("no-digest.jpg"),
+        );
+        let (free_digest, free_digest_plain, free_digest_edited) =
+            (root.join("free-digest.jpg"), root.join("free-digest-plain.jpg"), root.join("free-digest-edited.jpg"));
+        for (path, bytes) in [
+            (&by_digest, CLOUD),
+            (&by_digest_edited, b"cloud bytEs".as_slice()),
+            (&no_digest, CLOUD),
+            (&free_digest, CLOUD),
+        ] {
+            std::fs::write(path, bytes).unwrap();
+            super::convert_file_to_placeholder(path, UID).unwrap();
+        }
+        std::fs::write(&by_digest_other, CLOUD).unwrap();
+        let mut placeholder: Placeholder = std::fs::OpenOptions::new().write(true).open(&by_digest_other).unwrap().into();
+        placeholder.convert_to_placeholder(ConvertOptions::default().blob(b"volume~photo-b".to_vec()), None).unwrap();
+        drop(placeholder);
+        std::fs::write(&free_digest_plain, CLOUD).unwrap();
+        std::fs::write(&free_digest_edited, b"cloud bytEs").unwrap();
+
+        let checked = identity::mark_in_sync_if_digest(&by_digest, UID, &sha1.to_uppercase());
+        let checked_edited = identity::mark_in_sync_if_digest(&by_digest_edited, UID, &sha1);
+        let checked_other = identity::mark_in_sync_if_digest(&by_digest_other, UID, &sha1);
+        let checked_no_digest = identity::mark_in_sync_if_digest(&no_digest, UID, "");
+        let digest_in_sync: Vec<bool> = [&by_digest, &by_digest_edited, &by_digest_other, &no_digest]
+            .iter()
+            .map(|p| identity::read(p).is_some_and(|info| info.in_sync))
+            .collect();
+        let freed_by_digest = identity::free_if_digest(&free_digest, UID, &sha1);
+        let freed_by_digest_plain = identity::free_if_digest(&free_digest_plain, UID, &sha1);
+        let freed_by_digest_edited = identity::free_if_digest(&free_digest_edited, UID, &sha1);
+        let digest_cloud_only = [cloud_only(&free_digest), cloud_only(&free_digest_plain), cloud_only(&free_digest_edited)];
+        let digest_plain_now = identity::read(&free_digest_plain);
+
+        let contents: Vec<Vec<u8>> = [&edited, &other, &plain_edited, &fresh_changed, &by_digest_edited, &free_digest_edited]
+            .iter()
+            .map(|p| std::fs::read(p).unwrap_or_default())
+            .collect();
+        let (stuck_cloud_only, plain_cloud_only) = (cloud_only(&stuck), cloud_only(&plain));
+        drop(connection);
+        let _ = id.unregister();
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&cloud_file);
+
+        assert_eq!(before.identity, b"volume~photo-a");
+        assert_eq!(before.on_disk, 0);
+        assert!(retargeted.is_ok(), "{retargeted:?}");
+        assert!(after.is(UID));
+        assert!(after.in_sync);
+        assert_eq!(cloud_size, Some(11));
+        assert!(still_cloud_only, "looking at or retargeting a cloud-only copy downloaded it");
+
+        assert!(!edited_in_sync, "an edit here left the copy in sync");
+        assert!(retarget_with_data.is_err());
+        assert_eq!(freed_edited, Freed::Differs, "a copy changed here was freed");
+        assert_eq!(freed_stuck, Freed::Freed);
+        assert!(stuck_cloud_only);
+        assert_eq!(freed_other, Freed::Differs, "another photo's copy was freed");
+        assert_eq!(freed_plain, Freed::Freed);
+        assert!(plain_cloud_only);
+        assert!(plain_now.is_some_and(|info| info.is(UID)));
+        assert_eq!(freed_plain_edited, Freed::Differs, "a same-size edit was freed");
+
+        assert!(!converted_in_sync);
+        assert_eq!(marked_fresh, Ok(true));
+        assert!(fresh_in_sync);
+        assert_eq!(marked_changed, Ok(false));
+        assert!(!changed_in_sync);
+        assert_eq!(contents[0], b"CHANGEDytes");
+        assert_eq!(contents[1], CLOUD);
+        assert_eq!(contents[2], b"cloud bytEs");
+        assert_eq!(contents[3], b"Cloud bytes");
+
+        assert_eq!(checked, identity::Checked::InSync);
+        assert_eq!(checked_edited, identity::Checked::Differs, "a same-size edit matched the digest");
+        assert_eq!(checked_other, identity::Checked::NotChecked);
+        assert_eq!(checked_no_digest, identity::Checked::Differs);
+        assert_eq!(digest_in_sync, [true, false, false, false], "only the copy that holds the digest is in sync");
+        assert_eq!(freed_by_digest, Freed::Freed);
+        assert_eq!(freed_by_digest_plain, Freed::Freed);
+        assert!(digest_plain_now.is_some_and(|info| info.is(UID)));
+        assert_eq!(freed_by_digest_edited, Freed::Differs, "a same-size edit was freed by the digest");
+        assert_eq!(digest_cloud_only, [true, true, false]);
+        assert_eq!(contents[4], b"cloud bytEs");
+        assert_eq!(contents[5], b"cloud bytEs");
+    }
+}
+
+#[cfg(test)]
+mod pin_mark_tests {
+    use super::{may_free, pin_mark, PinMark, FILE_ATTRIBUTE_PINNED, FILE_ATTRIBUTE_UNPINNED};
+
+    #[test]
+    fn explorers_two_menu_items_read_as_keep_and_free() {
+        const ARCHIVE: u32 = 0x20;
+        assert_eq!(pin_mark(ARCHIVE | FILE_ATTRIBUTE_PINNED), Some(PinMark::Keep));
+        assert_eq!(pin_mark(ARCHIVE | FILE_ATTRIBUTE_UNPINNED), Some(PinMark::Free));
+        assert_eq!(pin_mark(ARCHIVE), None);
+        // Marked both ways, the copy is kept.
+        assert_eq!(pin_mark(FILE_ATTRIBUTE_PINNED | FILE_ATTRIBUTE_UNPINNED), Some(PinMark::Keep));
+    }
+
+    #[test]
+    fn only_a_confirmed_copy_of_the_cloud_file_is_freed() {
+        assert!(may_free(true, true, true, 100, Some(100)));
+        // An ordinary file, such as one still waiting to upload.
+        assert!(!may_free(false, true, true, 100, Some(100)));
+        // Another photo's identity.
+        assert!(!may_free(true, false, true, 100, Some(100)));
+        // Changed on this PC since it was downloaded.
+        assert!(!may_free(true, true, false, 100, Some(100)));
+        // Not the size the cloud file has, or no size known for it.
+        assert!(!may_free(true, true, true, 99, Some(100)));
+        assert!(!may_free(true, true, true, 100, None));
+    }
+}
+
 #[cfg(test)]
 mod populate_page_tests {
     use super::{next_populate_page, POPULATE_PAGE_MAX, POPULATE_PAGE_MIN};
@@ -3176,6 +4117,42 @@ mod uid_list_tests {
         assert!(!looks_like_uid_list("\u{1}\u{2}\u{3}"), "control bytes are not a uid");
         assert!(!looks_like_uid_list("{\"seen\":[]}"), "nor is anything punctuated");
         assert!(!looks_like_uid_list("two words"), "nor is prose");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod index_build_tests {
+    use super::*;
+
+    #[test]
+    fn readers_see_the_whole_previous_index_until_the_new_one_is_complete() {
+        *mount_index().lock().unwrap() = [("v~old".to_string(), vec!["Photos\\old.jpg".to_string()])].into();
+        *mount_sizes().lock().unwrap() = [("v~old".to_string(), 5)].into();
+        begin_index();
+        index_push("v~new", "Photos\\new.jpg");
+        size_push("v~new", 7);
+        // Part way through a fill: Free up and the watcher still see the previous fill whole.
+        assert_eq!(rel_to_uid().get("Photos\\old.jpg").map(String::as_str), Some("v~old"));
+        assert!(!rel_to_uid().contains_key("Photos\\new.jpg"));
+        assert_eq!(cloud_size("v~old"), Some(5));
+        assert_eq!(cloud_size("v~new"), None);
+
+        publish_index();
+        assert!(mount_index().lock().unwrap().get("v~old").is_none());
+        assert_eq!(mount_index().lock().unwrap().get("v~new"), Some(&vec!["Photos\\new.jpg".to_string()]));
+        assert_eq!(cloud_size("v~new"), Some(7));
+        assert_eq!(cloud_size("v~old"), None);
+
+        // Outside a fill nothing is recorded, and a fill the sign-out let go of publishes nothing.
+        index_push("v~stray", "Photos\\stray.jpg");
+        begin_index();
+        index_push("v~gone", "Photos\\gone.jpg");
+        *NEXT_INDEX.lock().unwrap() = None;
+        publish_index();
+        let index = mount_index().lock().unwrap().clone();
+        assert_eq!(index.keys().cloned().collect::<Vec<_>>(), vec!["v~new".to_string()]);
+        mount_index().lock().unwrap().clear();
+        mount_sizes().lock().unwrap().clear();
     }
 }
 

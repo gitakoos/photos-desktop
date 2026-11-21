@@ -96,7 +96,8 @@
 .g-strip-search {
   position: relative;
 }
-.g-strip-search .g-strip-pill {
+.g-strip-search .g-strip-pill,
+.g-strip-search .g-strip-pillout {
   max-width: 40%;
 }
 /* What the typing could become, under the field. */
@@ -153,7 +154,8 @@
   font-size: 14px;
 }
 /* A pill in the search: a date, a type or a category narrowing the photos. */
-.g-strip-pill {
+.g-strip-pill,
+.g-strip-pillout {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -173,8 +175,26 @@
 .g-strip-pill:hover {
   background: var(--accent-wash-strong);
 }
-.g-strip-pill > svg:last-child {
+.g-strip-pill > svg:last-child,
+.g-strip-pillout > svg:last-child {
   opacity: 0.75;
+}
+/* A pill pops in with the menu's curve when it is made; one taken out folds away (TopStrip). */
+.g-strip-pill {
+  transition: background 0.12s ease;
+  animation: g-pill-in 0.13s cubic-bezier(0.2, 0.9, 0.3, 1) backwards;
+}
+@keyframes g-pill-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+.g-strip-pillout {
+  box-sizing: border-box;
+  overflow: hidden;
+  pointer-events: none;
+  cursor: default;
 }
 .g-strip-search > svg {
   flex: 0 0 auto;
@@ -1211,13 +1231,19 @@
 .g-album:hover .g-album-cover img {
   transform: scale(1.04);
 }
+/* Two lines with an ellipsis, and always two lines tall, so the counts of a row line up. */
 .g-album-name {
   font-size: 13px;
   font-weight: 600;
+  line-height: 1.3;
+  min-height: 2.6em;
   color: var(--fg-primary);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 /* The inline name editor for a freshly created album: sits where the name label does, in
    the same type, with an accent frame so it reads as editable. */
@@ -1238,8 +1264,150 @@
   color: var(--fg-mute);
 }
 .g-album.g-skel {
-  aspect-ratio: 1 / 1.18;
+  aspect-ratio: 1 / 1.3;
   border-radius: 12px;
+}
+
+/* The album list as rows: cover, name, size, last change, and the grip first while arranging. */
+.al-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 6px;
+}
+.al-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr) 120px 110px;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.al-row:hover,
+.al-row:focus-visible {
+  background: var(--line-06);
+  outline: none;
+}
+.al-row .th {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--bg2);
+}
+.al-row .th img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.al-newbox {
+  display: grid;
+  place-items: center;
+  border: 1.5px dashed var(--fg-mute);
+  background: transparent !important;
+}
+.al-row .nm {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.al-row .ct,
+.al-row .la {
+  color: var(--fg-mute);
+  font-size: 12.5px;
+}
+.al-list.arranging .al-row {
+  grid-template-columns: 28px 56px minmax(0, 1fr) 120px 110px;
+}
+.al-row .handle {
+  display: none;
+  place-items: center;
+  color: var(--fg-mute);
+}
+.al-list.arranging .handle {
+  display: grid;
+}
+@media (max-width: 720px) {
+  .al-row {
+    grid-template-columns: 56px minmax(0, 1fr) 90px;
+  }
+  .al-list.arranging .al-row {
+    grid-template-columns: 28px 56px minmax(0, 1fr) 90px;
+  }
+  .al-row .la {
+    display: none;
+  }
+}
+
+/* Rearranging: every card takes hold of the pointer, the one held dims, the one it would
+   land on is framed. */
+.arranging .g-album,
+.arranging .al-row {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.arranging .g-album-cover {
+  animation: g-album-wiggle 0.35s ease-in-out infinite alternate;
+}
+.g-album.over .g-album-cover,
+.al-row.over {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+}
+.g-album.drag,
+.al-row.drag {
+  opacity: 0.4;
+}
+@keyframes g-album-wiggle {
+  from {
+    transform: rotate(-0.6deg);
+  }
+  to {
+    transform: rotate(0.6deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .arranging .g-album-cover {
+    animation: none;
+  }
+}
+
+/* Arranging an album's photos: the same hold, dim and frame as the album cards. The frame is
+   drawn inside the tile, so the scroller's edge never cuts it. */
+.g-arranging .g-cell {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.g-arranging .g-cell {
+  animation: g-album-wiggle 0.35s ease-in-out infinite alternate;
+}
+.g-cell.arr-drag {
+  opacity: 0.4;
+}
+.g-cell.arr-over::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 2px dashed var(--accent);
+  border-radius: inherit;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .g-arranging .g-cell {
+    animation: none;
+  }
 }
 
 /* ---- Shared ---- */
@@ -1841,6 +2009,7 @@
 .g-albumhero-actions {
   margin-top: auto;
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
 }
@@ -1950,4 +2119,108 @@
   padding: 0 12px;
   font-size: 13px;
   font-weight: 500;
+}
+
+/* Compress on Drive: the run's count and saving over its bar, with Stop under them. */
+.cc-toast {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 260px;
+}
+.cc-stop {
+  align-self: flex-end;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-primary);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.cc-stop:hover {
+  border-color: var(--fg-mute);
+}
+
+/* A label as a chip, in the filter and under the search: its tag, its name and its count. */
+.g-labelchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+.g-labelchip > svg {
+  flex: none;
+}
+.g-labelchip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.g-labelchip-count {
+  flex: none;
+  font-size: 12px;
+  color: var(--fg-mute);
+  font-variant-numeric: tabular-nums;
+}
+.g-labelchip.sel .g-labelchip-count {
+  color: inherit;
+  opacity: 0.75;
+}
+/* The labels the typed keyword offers, in the search's dropdown. */
+.g-strip-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px;
+  animation: g-labels-in 0.18s ease backwards;
+}
+/* They open downward as they fade in, and fade back up as they go, taking no clicks. */
+@keyframes g-labels-in {
+  from {
+    opacity: 0;
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(-30px -30px -30px -30px);
+  }
+}
+.g-strip-labels.leaving {
+  pointer-events: none;
+  animation: g-labels-out 0.14s ease-in both;
+}
+@keyframes g-labels-out {
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.g-strip-labels .g-chip {
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+}
+.g-strip-labels .g-labelchip {
+  max-width: 220px;
+}
+.g-strip-labels .g-chip.on {
+  color: var(--fg-primary);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .g-strip-pill,
+  .g-strip-labels,
+  .g-strip-labels.leaving {
+    animation: none;
+  }
+}
+
+/* Emptying the trash: what is going on while Proton deletes. */
+.g-emptying {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-dim);
+  font-size: 12.5px;
 }

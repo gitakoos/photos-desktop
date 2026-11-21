@@ -31,6 +31,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
+  # Sound for video playback (PipeWire serves this socket too). The app never records.
+  - --socket=pulseaudio
   # The keystore that persists the signed-in session (gnome-keyring / kwallet).
   - --talk-name=org.freedesktop.secrets
   - --talk-name=org.freedesktop.Notifications
@@ -45,9 +47,18 @@ finish-args:
 
 # H.264 and HEVC (the upload's video frames and HEIC stills, and playback in the viewer)
 # come from org.freedesktop.Platform.codecs-extra, which the GNOME runtime declares and
-# installs by itself, so the app declares nothing for them.
+# installs by itself, so the app declares nothing for them. Videos are compressed for upload
+# with the app's own ffmpeg instead, the same build the Windows app carries.
 
 modules:
+  - name: ffmpeg
+    buildsystem: simple
+    build-commands:
+      # From the sources build-local.sh fetched into .ffmpeg-work, checked against their commits.
+      - PFP_FFMPEG_WORK="$PWD/.ffmpeg-work" bash ffmpeg/build.sh linux /app/bin/resources/ffmpeg
+    sources:
+      - type: dir
+        path: ..
   - name: photos-for-proton
     buildsystem: simple
     build-commands:
@@ -64,6 +75,8 @@ modules:
       - install -Dm755 app/src-tauri/target/release/photosforproton /app/bin/photosforproton
       - install -Dm755 app/src-tauri/binaries/sidecar-x86_64-unknown-linux-gnu /app/bin/resources/sidecar-runtime
       - install -Dm644 sidecar/build/server.mjs /app/bin/resources/sidecar/server.mjs
+      # The thread the face, search and text models run on, started from beside server.mjs.
+      - install -Dm644 sidecar/build/ortWorker.mjs /app/bin/resources/sidecar/ortWorker.mjs
       - cp -r sidecar/build/node_modules /app/bin/resources/sidecar/node_modules
       # The search-by-content vocabulary, read from beside server.mjs.
       - cp -r sidecar/build/assets /app/bin/resources/sidecar/assets
@@ -72,6 +85,10 @@ modules:
       - install -Dm644 flatpak/eu.akoos.photos.metainfo.xml /app/share/metainfo/eu.akoos.photos.metainfo.xml
       - install -Dm644 app/src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/eu.akoos.photos.png
       - install -Dm644 app/src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/eu.akoos.photos.png
+      # The licence, the third-party notices and the licence of the Node.js runtime it carries.
+      - install -Dm644 LICENSE /app/share/licenses/eu.akoos.photos/LICENSE
+      - install -Dm644 THIRD-PARTY-NOTICES.txt /app/share/licenses/eu.akoos.photos/THIRD-PARTY-NOTICES.txt
+      - install -Dm644 /usr/lib/sdk/node24/share/licenses/org.freedesktop.Sdk.Extension.node24/node/LICENSE /app/share/licenses/eu.akoos.photos/NODE-LICENSE.txt
     sources:
       - type: dir
         path: ..

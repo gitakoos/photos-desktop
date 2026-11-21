@@ -39,7 +39,10 @@ pub mod data_format;
 // Public for the same reason: the installer compiles this one too, and the identity
 // constants in it are the installer's to read, not the app's.
 pub mod file_assoc;
-#[cfg(not(windows))]
+// Public for the same reason: the installer holds its own executable with it.
+#[cfg(windows)]
+pub mod file_hold;
+#[cfg(target_os = "linux")]
 mod files_drive;
 mod hello;
 mod notices;
@@ -47,9 +50,12 @@ mod local_file;
 mod local_folder;
 mod photo_edit;
 mod secure_store;
+#[cfg(windows)]
+mod sync_location;
 mod update_sig;
 mod upload_frame;
 mod video_compress;
+mod video_edit;
 mod window_place;
 
 use std::collections::BinaryHeap;
@@ -144,12 +150,17 @@ fn priority_for(method: &str) -> Priority {
 fn classified(method: &str) -> Option<Priority> {
     Some(match method {
         // The user is waiting on the answer.
-        "getPreview" | "getVideo" | "getNodeDetails" | "hydrateFile" | "startHydrate"
+        "getPreview" | "getVideo" | "getMotionClip" | "localMotionClip" | "getNodeDetails" | "cachedNames" | "hydrateFile"
+        | "startHydrate" | "videoNotStreamable"
         // Session lifecycle: must never sit behind a warm.
         | "__init" | "ping" | "lock" | "unlock" | "signOut" | "unlockDevice"
         | "localLockState" | "localLockCheck" | "localLockSet" | "localLockClear"
         | "startBrowserLogin" | "browserLoginStatus" | "cancelBrowserLogin"
         | "protectSession" | "signInChoice" | "keepSignIn" | "retryResume" | "cachedAlbumPhotoUids" | "semanticModelStatus"
+        // A quit waiting for the shared backup's last change to reach Drive, asked in steps of a second.
+        | "sharedBackupFlush"
+        // A sign-out waiting for what it would delete to reach Drive, asked in the same steps.
+        | "signOutSave"
         | "semanticSearch" | "faceModelStatus" | "faceModelDownload" | "detectFaces" => Priority::Interactive,
 
         // The viewer's full-resolution upgrade. Deliberately a tier BELOW the preview,
@@ -185,7 +196,14 @@ fn classified(method: &str) -> Option<Priority> {
         | "hiddenRefresh"
         // Keeping every photo on this PC: a whole-library download that yields to the window,
         // and the lookups that decide what it keeps.
-        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden" => Priority::Background,
+        | "hydrateFileBg" | "mountFates" | "keepReady" | "mountHidden"
+        // The digests the folder checks downloaded copies against, a batch at a time.
+        | "mountDigests"
+        // The trash read ahead for a view not yet open. It lists and decrypts every
+        // trashed photo, which on a large trash takes seconds and on the foreground lane
+        // held up every call the window made behind it. Opening Trash reads it as
+        // `listTrashed`, in the foreground, and the sidecar shares the one read.
+        | "listTrashedAhead" => Priority::Background,
 
         // What a page on screen is drawing: its thumbnails and its lists. These fall
         // through to `UserAction` below, named here so no one moves them back under the
@@ -195,15 +213,25 @@ fn classified(method: &str) -> Option<Priority> {
         // What the window asks for a screenful at a time, or waits on as it opens a view:
         // short, and wanted now.
         "getDurations" | "getMediaTypes" | "getTimeline" | "startTimeline" | "timelinePage"
-        | "listTrashed" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
+        | "listTrashed" | "trashCount" | "lockStatus" | "thumbServer" | "cloudEditorSource" | "facesOnPhoto"
         | "facePeople" | "facePersonCandidates" | "labelsList" | "labelsOf" | "myFilesList"
-        | "myFilesThumbs" | "getImportReview" | "getImportChecks" | "diagReport"
-        | "duplicatesGroups" => Priority::UserAction,
+        | "myFilesThumbs" | "cameraFacts" | "getImportReview" | "getImportChecks" | "importThumbnails" | "diagReport"
+        | "duplicatesGroups" | "themes" => Priority::UserAction,
 
         // The window's status polls: tiny answers.
-        "uploadStatus" | "dropReplaced" | "dateEditStatus" | "offlineStatus" | "offlineAlbums" | "saveStatus" | "hydrateProgress" | "updateStatus"
-        | "faceScanStatus" | "faceSweepStatus" | "labelsVersion" | "sharedBackupStatus"
-        | "duplicatesStatus" | "ocrModelStatus" | "ocrResult" | "hiddenState" | "faceWipeSeen" => Priority::UserAction,
+        "uploadStatus" | "dropReplaced" | "dateEditStatus" | "cloudCompressStatus" | "offlineStatus" | "offlineAlbums" | "saveStatus" | "hydrateProgress" | "updateStatus"
+        | "faceScanStatus" | "faceSweepStatus" | "labelsVersion" | "sharedBackupStatus" | "settingsSyncPull"
+        | "duplicatesStatus" | "ocrModelStatus" | "ocrResult" | "hiddenState" | "faceWipeSeen" | "albumOrderGet"
+        // The window, come back, asking the shared backup to look at Drive: it answers at once.
+        | "sharedBackupCheck"
+        // A refresh of the library asking the same, after a waiting change goes out: it answers at once.
+        | "sharedBackupRefresh"
+        // The window going to the tray or coming back, for the shared backup's quick look.
+        | "sharedBackupShown"
+        // The window, come back into focus, asking the photos feed to look: it answers at once.
+        | "checkPhotoEvents"
+        // The video editor following the download it started.
+        | "videoEditProgress" => Priority::UserAction,
 
         // The backups on Drive the backup settings list, a folder listing each, and the trash of one.
         "driveBackups" | "driveBackupTrash" => Priority::UserAction,
@@ -220,18 +248,23 @@ fn classified(method: &str) -> Option<Priority> {
         | "setPublicLink" | "removePublicLink" | "stopSharing" | "pinOffline" | "unpinOffline" | "offlineAlbumSet"
         | "unpinAllOffline" | "startSaveOriginals" | "cancelHydrate" | "saveCloudEdit"
         | "startUpload" | "startDropUpload" | "cancelUpload" | "clearUploads" | "startImport"
-        | "dateEditInfo" | "startDateEdit" | "stopDateEdit"
+        | "dateEditInfo" | "metaInfo" | "startDateEdit" | "stopDateEdit" | "startCloudCompress" | "stopCloudCompress"
+        | "gifBegin" | "gifFrame" | "gifCancel" | "gifFinish"
+        | "videoEditSource" | "videoEditStage" | "videoEditCancel" | "saveEditedMedia"
         | "prepareImport" | "confirmImport" | "discardImport" | "startMyFilesImport"
         | "startUpdateDownload" | "semanticModelDownload" | "semanticModelRemove"
         | "faceScanSetEnabled" | "faceScanSetPaused" | "faceScanRescan" | "faceScanClear"
         | "faceClearHere" | "faceClearEverywhere"
         | "faceSearchClear" | "faceNameFaces" | "faceRejectFaces" | "faceNotThisPerson" | "facePersonRename"
         | "facePersonMerge" | "facePersonReject" | "facePersonDecline" | "facePersonCover"
+        | "facePersonHide" | "facePersonShow"
         | "facePersonAddFaces" | "facePersonRemovePhotos" | "faceSuggestionDismiss"
         | "faceSweepStart" | "faceSweepStop" | "labelsAdd" | "labelsRemove" | "labelsSet"
         | "labelCreate" | "labelRename" | "labelDelete" | "sharedBackupSet" | "sharedBackupNow"
+        | "settingsSyncReport"
         | "diagSave" | "diagSetDetailed" | "duplicatesStart" | "duplicatesTrash"
-        | "duplicatesIgnore" | "ocrModelDownload" | "ocrModelRemove" | "ocrStart" | "hiddenSet" => Priority::UserAction,
+        | "duplicatesIgnore" | "ocrModelDownload" | "ocrModelRemove" | "ocrStart" | "hiddenSet"
+        | "albumOrderSetMode" | "albumOrderSave" | "albumOrderSeed" => Priority::UserAction,
 
         _ => return None,
     })
@@ -453,6 +486,169 @@ struct SidecarGate {
     /// it can never hold more than the calls actually outstanding, however many cancels
     /// arrive late.
     pending: Mutex<std::collections::HashMap<CallId, bool>>,
+    /// Every cancellable call written to the sidecar and not yet answered: the spawn it went
+    /// to and its request id there, so a cancel still reaches the work itself.
+    sent: Mutex<std::collections::HashMap<CallId, (u64, u64)>>,
+    /// Where cancels for calls already sent go: one long-lived thread writes them as
+    /// `{"cancel": id}` lines, so a cancel never waits on the sidecar's stdin itself.
+    cancels: std::sync::OnceLock<std::sync::mpsc::Sender<(u64, u64)>>,
+    /// Every call from arriving to answering, for the watchdog: see `Flights`.
+    flights: Flights,
+}
+
+/// How long a call may wait or run before the watchdog names it.
+const STUCK_RPC_MS: u128 = 5_000;
+/// How often the watchdog looks.
+const WATCHDOG_EVERY: Duration = Duration::from_secs(5);
+/// The longest a stuck call goes unnamed again. It is named at 5 s, then each time its age
+/// has doubled, then at most this often: a long legitimate walk is named a handful of times,
+/// not every 5 s, so it cannot push earlier lines out of the size-capped log.
+const WATCHDOG_RENAME_MAX_MS: u128 = 60_000;
+/// Longest method name logged. The window names the method, so it is capped.
+const WATCHDOG_NAME_MAX: usize = 64;
+/// The most calls the watchdog names in one look; the rest are counted.
+const WATCHDOG_NAMES: usize = 8;
+
+/// One call between arriving and answering.
+struct Flight {
+    method: String,
+    background: bool,
+    since: Instant,
+    /// When it was let onto its lane, if it has been.
+    admitted: Option<Instant>,
+    /// The age at which the watchdog names it next.
+    next_note_ms: u128,
+}
+
+/// Every call from arriving to answering.
+///
+/// The slow-call log names a call only once it answers, so a call that never answers, and
+/// every call queued behind it on its lane, left no line at all. This is what lets the
+/// watchdog name them while they are stuck.
+struct Flights {
+    next: std::sync::atomic::AtomicU64,
+    open: Mutex<std::collections::HashMap<u64, Flight>>,
+}
+
+/// Keeps one call in `Flights` for exactly as long as it is outstanding, however it ends.
+struct FlightGuard<'a> {
+    flights: &'a Flights,
+    id: u64,
+}
+
+impl Flights {
+    fn new() -> Self {
+        Flights {
+            next: std::sync::atomic::AtomicU64::new(0),
+            open: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn start(&self, method: &str) -> FlightGuard<'_> {
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let flight = Flight {
+            method: method.chars().take(WATCHDOG_NAME_MAX).collect(),
+            background: is_background(priority_for(method)),
+            since: Instant::now(),
+            admitted: None,
+            next_note_ms: STUCK_RPC_MS,
+        };
+        self.lock().insert(id, flight);
+        FlightGuard { flights: self, id }
+    }
+
+    /// The registry, whatever became of a thread that held it before: it holds only
+    /// bookkeeping, and a guard dropped while a panic unwinds must not abort the app.
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<u64, Flight>> {
+        self.open.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The watchdog's lines at `now`: the calls due to be named (outstanding at least
+    /// `min_ms`, and named last at half their present age or a minute ago), the oldest
+    /// first, `WATCHDOG_NAMES` of them by name, and one line counting every call by lane
+    /// whenever any is named. Only the method name is logged, never params: it is not user
+    /// data.
+    fn stuck_report(&self, now: Instant, min_ms: u128) -> Vec<String> {
+        let mut open = self.lock();
+        let mut due: Vec<u64> = Vec::new();
+        let mut stuck = 0;
+        for (id, f) in open.iter() {
+            let age = now.saturating_duration_since(f.since).as_millis();
+            if age < min_ms {
+                continue;
+            }
+            stuck += 1;
+            if age >= f.next_note_ms.max(min_ms) {
+                due.push(*id);
+            }
+        }
+        if due.is_empty() {
+            return Vec::new();
+        }
+        for id in &due {
+            if let Some(f) = open.get_mut(id) {
+                let age = now.saturating_duration_since(f.since).as_millis();
+                f.next_note_ms = (age * 2).min(age + WATCHDOG_RENAME_MAX_MS);
+            }
+        }
+        let mut named: Vec<&Flight> = due.iter().filter_map(|id| open.get(id)).collect();
+        named.sort_by_key(|f| f.since);
+        let mut lines: Vec<String> = named
+            .iter()
+            .take(WATCHDOG_NAMES)
+            .map(|f| {
+                let lane = if f.background { "bg" } else { "fg" };
+                let age = now.saturating_duration_since(f.since).as_millis();
+                match f.admitted {
+                    None => format!("[rpc] {} stuck lane={lane} waiting={age}", f.method),
+                    Some(at) => {
+                        let waited = at.saturating_duration_since(f.since).as_millis();
+                        let running = now.saturating_duration_since(at).as_millis();
+                        format!("[rpc] {} stuck lane={lane} running={running} waited={waited}", f.method)
+                    }
+                }
+            })
+            .collect();
+        let count = |bg: bool, admitted: bool| {
+            open.values().filter(|f| f.background == bg && f.admitted.is_some() == admitted).count()
+        };
+        lines.push(format!(
+            "[rpc] queue stuck={} fg_running={} fg_waiting={} bg_running={} bg_waiting={}",
+            stuck,
+            count(false, true),
+            count(false, false),
+            count(true, true),
+            count(true, false),
+        ));
+        lines
+    }
+}
+
+impl FlightGuard<'_> {
+    /// The call has been let onto its lane.
+    fn admitted(&self) {
+        if let Some(f) = self.flights.lock().get_mut(&self.id) {
+            f.admitted = Some(Instant::now());
+        }
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.flights.lock().remove(&self.id);
+    }
+}
+
+/// Names every call stuck past `STUCK_RPC_MS`, every `WATCHDOG_EVERY`, in the app's log,
+/// for as long as the app runs.
+fn start_rpc_watchdog(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(WATCHDOG_EVERY);
+        let shared = app.state::<SharedSidecar>().inner().clone();
+        for line in shared.flights.stuck_report(Instant::now(), STUCK_RPC_MS) {
+            note(&app, &line);
+        }
+    });
 }
 
 /// Keeps one call in `pending` for exactly as long as it is outstanding. Tied to a drop
@@ -475,7 +671,15 @@ impl SidecarGate {
             sidecar: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
             pending: Mutex::new(std::collections::HashMap::new()),
+            sent: Mutex::new(std::collections::HashMap::new()),
+            cancels: std::sync::OnceLock::new(),
+            flights: Flights::new(),
         }
+    }
+
+    /// Whether a sidecar runs now. A call starts one when none does, which a quit must not.
+    fn running(&self) -> bool {
+        self.sidecar.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 
     /// A fresh spawn id. Only the failure paths compare it, so `Relaxed` ordering is
@@ -510,6 +714,39 @@ impl SidecarGate {
         // here too is what keeps the two from ever being taken in opposite orders.
         if found {
             self.gate.wake_all();
+            self.cancel_sent(id);
+        }
+    }
+
+    /// Starts the thread that writes cancels for calls already sent. Once, at start-up.
+    fn start_cancel_writer(self: &Arc<Self>) {
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, u64)>();
+        if self.cancels.set(tx).is_err() {
+            return;
+        }
+        let gate = self.clone();
+        std::thread::spawn(move || {
+            // A sidecar replaced since the call was sent is not written to: `post` checks.
+            for (generation, request) in rx {
+                gate.post(generation, &format!("{{\"cancel\":{request}}}\n"));
+            }
+        });
+    }
+
+    /// Remembers that cancellable call `id` went to the sidecar of `generation` as
+    /// `request`; one let go of before this is cancelled there at once.
+    fn sent_to(&self, id: CallId, generation: u64, request: u64) {
+        self.sent.lock().unwrap().insert(id, (generation, request));
+        if self.is_abandoned(id) {
+            self.cancel_sent(id);
+        }
+    }
+
+    /// Asks the sidecar to stop call `id`, if it was sent and has not answered.
+    fn cancel_sent(&self, id: CallId) {
+        let Some(&target) = self.sent.lock().unwrap().get(&id) else { return };
+        if let Some(tx) = self.cancels.get() {
+            let _ = tx.send(target);
         }
     }
 
@@ -575,9 +812,14 @@ impl SidecarGate {
             Tracked { shared: self, id }
         });
 
+        // Followed from here until it answers, so the watchdog can name it while it is stuck.
+        let flight = self.flights.start(&method);
         let wait_start = Instant::now();
         let permit = self.admit(&method, call_id);
         let wait_ms = wait_start.elapsed().as_millis();
+        if permit.is_some() {
+            flight.admitted();
+        }
 
         let Some(permit) = permit else {
             // Nothing was written and the channel was never held, so there is no hold to
@@ -589,7 +831,7 @@ impl SidecarGate {
         };
 
         let hold_start = Instant::now();
-        let result = self.io(app, &method, params);
+        let result = self.io(app, &method, params, call_id);
         let hold_ms = hold_start.elapsed().as_millis();
 
         // Release the channel BEFORE logging, so the log write never extends the hold
@@ -612,9 +854,10 @@ impl SidecarGate {
         app: &AppHandle,
         method: &str,
         params: serde_json::Value,
+        call_id: Option<CallId>,
     ) -> Result<serde_json::Value, String> {
         // Send, under the lock: spawn if needed, register the waiter, write the line.
-        let (generation, rx) = {
+        let (generation, request, rx) = {
             let mut guard = self
                 .sidecar
                 .lock()
@@ -635,19 +878,28 @@ impl SidecarGate {
             let sc = guard.as_mut().unwrap();
             let generation = sc.generation;
             match send_request(sc, method, params) {
-                Ok(rx) => (generation, rx),
+                Ok((request, rx)) => (generation, request, rx),
                 Err(e) => {
                     // The write failed, so this sidecar is suspect: drop it while the lock
                     // is already held and let the next call spawn a fresh one.
-                    *guard = None;
+                    if let Some(old) = guard.take() {
+                        let_go_of_sidecar(app, old, method, &e);
+                    }
                     return Err(e);
                 }
             }
         };
 
+        if let Some(id) = call_id {
+            self.sent_to(id, generation, request);
+        }
         // Wait, with no lock held, so the other lane's call is free to run alongside this.
         let deadline = Instant::now() + deadline_for(method);
-        match recv_response(&rx, deadline, method) {
+        let answer = recv_response(&rx, deadline, method);
+        if let Some(id) = call_id {
+            self.sent.lock().unwrap().remove(&id);
+        }
+        match answer {
             Ok(value) => Ok(value),
             Err(e) => {
                 // A stuck or dead sidecar: drop it so the next call respawns, but only when
@@ -658,7 +910,9 @@ impl SidecarGate {
                     .lock()
                     .map_err(|_| "sidecar lock poisoned".to_string())?;
                 if guard.as_ref().map(|s| s.generation) == Some(generation) {
-                    *guard = None;
+                    if let Some(old) = guard.take() {
+                        let_go_of_sidecar(app, old, method, &e);
+                    }
                 }
                 Err(e)
             }
@@ -667,6 +921,37 @@ impl SidecarGate {
 }
 
 type SharedSidecar = Arc<SidecarGate>;
+
+/// Lets go of a sidecar after a failed call, with a line saying why and how its process ended: a
+/// sidecar that died leaves its exit status (a native crash's code, a kill's) where it otherwise
+/// leaves nothing. Read off the caller's thread, so a wedged process never holds anyone up.
+fn let_go_of_sidecar(app: &AppHandle, mut sc: Sidecar, method: &str, why: &str) {
+    let app = app.clone();
+    let method = method.to_string();
+    let why = why.to_string();
+    std::thread::spawn(move || {
+        let mut status = None;
+        for _ in 0..10 {
+            match sc.child.try_wait() {
+                Ok(Some(s)) => {
+                    status = Some(s);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        let ended = match status {
+            Some(s) => match s.code() {
+                Some(code) => format!("exit status {code:#x}"),
+                None => format!("exit status {s}"),
+            },
+            None => "still running, ended now".to_string(),
+        };
+        note(&app, &format!("[host] sidecar gen={} let go after {method}: {why}; {ended}", sc.generation));
+        drop(sc);
+    });
+}
 
 fn sidecar_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sidecar")
@@ -734,7 +1019,13 @@ fn locate_packaged_sidecar(app: &AppHandle) -> Result<(std::path::PathBuf, std::
     // The installer keeps the runtime under a `resources\` subfolder so the
     // install folder's top level stays tidy: <install>\resources\sidecar.exe and
     // <install>\resources\sidecar\server.mjs.
+    //
+    // A macOS bundle keeps its resources in `Contents/Resources`, one level up from the
+    // executable's `Contents/MacOS`.
+    #[cfg(not(target_os = "macos"))]
     let res = exe_dir.join("resources");
+    #[cfg(target_os = "macos")]
+    let res = exe_dir.join("..").join("Resources");
     // The node runtime binary. On non-Windows it cannot be named `sidecar`, because
     // `sidecar/` is the directory holding server.mjs and its node_modules right next to
     // it, and a name is either a file or a directory. Windows sidesteps this with the
@@ -1087,6 +1378,19 @@ fn machine_guid() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// The folder imports are unpacked in: the temp folder on Windows, the app's cache folder elsewhere.
+fn import_staging_root(app: &AppHandle) -> std::path::PathBuf {
+    #[cfg(not(windows))]
+    {
+        use tauri::Manager;
+        if let Ok(cache) = app.path().app_cache_dir() {
+            return cache.join("pfp-import");
+        }
+    }
+    let _ = app;
+    std::env::temp_dir().join("pfp-import")
+}
+
 fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     let mut command = if cfg!(debug_assertions) {
         dev_command()
@@ -1099,6 +1403,23 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     } else {
         sidecar_log(app)
     };
+
+    // One temp folder for both sides: Node reads TEMP first and Rust reads TMP first on Windows,
+    // and Node falls back to TMP and TEMP where Rust reads only TMPDIR elsewhere, so where they
+    // differ a file the sidecar stages would sit where the host never looks or sweeps.
+    let temp = std::env::temp_dir();
+    for var in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(var, &temp);
+    }
+    // The video editor's staging folder, which on Linux is on disk rather than in /tmp.
+    command.env("PFP_VEDIT_DIR", video_edit::staging_root(app));
+    // Where a Google Takeout or Ente zip is unpacked: on disk on Linux too, as /tmp there is
+    // often a small RAM disk that such an export does not fit in.
+    command.env("PFP_IMPORT_DIR", import_staging_root(app));
+
+    // ONNX Runtime sends usage data to Microsoft from its native code unless this is set
+    // before it loads; that traffic goes around the page's own network rules.
+    command.env("ORT_DISABLE_TELEMETRY", "1");
 
     // The value the sidecar makes this install's id among the account's devices from, so a
     // reinstall on the same PC writes on in the files the earlier install saved to Drive.
@@ -1135,13 +1456,23 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     let reader_app = app.clone();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
+        let mut bytes = Vec::new();
         loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
+            bytes.clear();
+            // Read as bytes: a line that is not UTF-8 (a native library writing to stdout) is
+            // passed over like any other stray line, never taken for the end of the pipe.
+            let read = reader.read_until(b'\n', &mut bytes);
+            let line = String::from_utf8_lossy(&bytes);
+            match read {
                 // A closed pipe or a read error means the process is gone. Dropping every
                 // registered sender wakes each waiting caller with a disconnect at once,
                 // rather than leaving them to sit out their whole deadlines.
                 Ok(0) | Err(_) => {
+                    let how = match &read {
+                        Err(e) => format!("read failed ({:?})", e.kind()),
+                        _ => "closed".to_string(),
+                    };
+                    note(&reader_app, &format!("[host] sidecar gen={generation} output {how}"));
                     reader_router.lock().unwrap().clear();
                     return;
                 }
@@ -1199,7 +1530,7 @@ fn spawn_sidecar(app: &AppHandle, generation: u64) -> Result<Sidecar, String> {
     // keep its (vault-encrypted) caches and session. This one round trip is synchronous:
     // it runs before the sidecar is reachable by any other caller.
     let init = secure_store::sidecar_init_params(app)?;
-    let rx = send_request(&mut sc, "__init", init)?;
+    let (_, rx) = send_request(&mut sc, "__init", init)?;
     recv_response(&rx, Instant::now() + deadline_for("__init"), "__init")?;
     Ok(sc)
 }
@@ -1227,7 +1558,14 @@ fn deadline_for(method: &str) -> Duration {
     match method {
         // The calls that move whole files: one photo or video for the mount or the
         // viewer, or the installer for an update.
-        "hydrateFile" | "getOriginal" | "getVideo" | "downloadUpdate" => TRANSFER,
+        "hydrateFile" | "getOriginal" | "getVideo" | "getMotionClip" | "localMotionClip" | "downloadUpdate" => TRANSFER,
+        // A photo's file read whole for its description, and a big selection's nodes read one
+        // by one: the window waits ten minutes for either, so the host must not give up first.
+        "metaInfo" | "dateEditInfo" => TRANSFER,
+        // A made GIF joined and uploaded, which can be tens of megabytes.
+        "gifFinish" => TRANSFER,
+        // An edited video uploaded as a new copy.
+        "saveEditedMedia" => TRANSFER,
         // The whole-library sweeps, named by their priority tier so the two lists
         // cannot drift apart.
         _ if priority_for(method) == Priority::Enumerate => TRANSFER,
@@ -1236,7 +1574,7 @@ fn deadline_for(method: &str) -> Duration {
         // making steady progress. Each walk is stopped inside the sidecar as soon as
         // the SDK goes a minute without an answer, so a long ceiling here never lets a
         // stuck one hang; a short one would throw away the signed-in session mid-walk.
-        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" => TRANSFER,
+        "getTimeline" | "getAlbumPhotoUids" | "getAlbumPhotos" | "listTrashed" | "listTrashedAhead" | "trashCount" => TRANSFER,
         // The people and labels the phone saved to Drive: whole files, read over the network.
         "getDriveCollections" | "sharedBackupLoad" => TRANSFER,
         _ => REPLY,
@@ -1247,12 +1585,12 @@ fn deadline_for(method: &str) -> Duration {
 /// its response will arrive on. Only the write needs the sidecar — and so the sidecar
 /// mutex the caller holds for it — while the receiver is waited on with no lock, so two
 /// requests on the two lanes overlap. The waiter is registered BEFORE the write, so the
-/// answer can never race in ahead of it.
+/// answer can never race in ahead of it. Hands back the request's id with it.
 fn send_request(
     sc: &mut Sidecar,
     method: &str,
     params: serde_json::Value,
-) -> Result<Receiver<serde_json::Value>, String> {
+) -> Result<(u64, Receiver<serde_json::Value>), String> {
     let id = sc.next_id;
     sc.next_id += 1;
     // A one-slot channel: exactly one response ever arrives for an id.
@@ -1278,7 +1616,7 @@ fn send_request(
         sc.router.lock().unwrap().remove(&id);
         return Err(format!("flush to sidecar failed: {e}"));
     }
-    Ok(rx)
+    Ok((id, rx))
 }
 
 /// Wait for one request's response, up to its deadline. The reader matches on id and drops
@@ -1328,9 +1666,9 @@ pub(crate) fn sidecar_rpc(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let shared = app.state::<SharedSidecar>().inner().clone();
-    let resp = rpc_blocking(app, &shared, method.to_string(), params, None)?;
+    let mut resp = rpc_blocking(app, &shared, method.to_string(), params, None)?;
     if resp.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-        Ok(resp.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(resp.get_mut("result").map(serde_json::Value::take).unwrap_or(serde_json::Value::Null))
     } else {
         Err(resp
             .get("error")
@@ -1350,7 +1688,11 @@ pub(crate) fn hydrate_to_temp(app: &AppHandle, uid: &str) -> Result<(std::path::
     // The pass that keeps every photo on this PC downloads on the background lane, so a
     // photo the user opens is never queued behind a whole file of it.
     #[cfg(windows)]
-    let method = if keep_all::in_pass(uid) { "hydrateFileBg" } else { "hydrateFile" };
+    if !keep_all::in_pass(uid) {
+        return hydrate_streamed(app, uid);
+    }
+    #[cfg(windows)]
+    let method = "hydrateFileBg";
     #[cfg(not(windows))]
     let method = "hydrateFile";
     let result = sidecar_rpc(app, method, serde_json::json!({ "uid": uid }))?;
@@ -1360,6 +1702,41 @@ pub(crate) fn hydrate_to_temp(app: &AppHandle, uid: &str) -> Result<(std::path::
         .ok_or("hydrateFile returned no path")?;
     let size = result.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
     Ok((std::path::PathBuf::from(path), size))
+}
+
+/// A file the user opened, downloaded without holding the foreground lane for its whole
+/// length: `hydrateFile` would keep every thumbnail and view of the window waiting
+/// behind a large video. The download is started, then polled with short calls.
+#[cfg(windows)]
+fn hydrate_streamed(app: &AppHandle, uid: &str) -> Result<(std::path::PathBuf, u64), String> {
+    use std::time::{Duration, Instant};
+    let started = sidecar_rpc(app, "startHydrate", serde_json::json!({ "uid": uid }))?;
+    let path = started
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("startHydrate returned no path")?
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(60 * 60);
+    let mut wait = Duration::from_millis(50);
+    loop {
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(Duration::from_millis(250));
+        let failed = match sidecar_rpc(app, "hydrateProgress", serde_json::json!({ "path": path })) {
+            Ok(v) if v.get("done").and_then(|d| d.as_bool()) == Some(true) => {
+                let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+                return Ok((std::path::PathBuf::from(path), size));
+            }
+            Ok(v) => match v.get("error").and_then(|e| e.as_str()) {
+                // The sidecar deletes a failed download itself.
+                Some(e) => return Err(e.to_string()),
+                None if Instant::now() < deadline => continue,
+                None => "hydration timed out".to_string(),
+            },
+            Err(e) => e,
+        };
+        let _ = sidecar_rpc(app, "cancelHydrate", serde_json::json!({ "path": path }));
+        return Err(failed);
+    }
 }
 
 /// The sidecar methods only the host may call. Each one either takes a path or hands out
@@ -1374,6 +1751,7 @@ fn host_only(method: &str) -> bool {
             "hydrateFile"
                 | "hydrateFileBg"
                 | "mountFates"
+                | "mountDigests"
                 | "keepReady"
                 | "mountHidden"
                 | "startHydrate"
@@ -1396,12 +1774,68 @@ fn on_sidecar_notice(app: &AppHandle, notice: &str) {
         crate::keep_all::forget();
         let _ = app.emit("session-ended", ());
     }
+    // A photo changed on Drive from another device: the window reads its timeline again.
+    if notice == "timelineChanged" {
+        let _ = app.emit("timeline-changed", ());
+    }
 }
 
 /// Whether a browser sign-in's answer says another account took the place of a lapsed one.
 #[cfg_attr(not(windows), allow(dead_code))]
+/// Whether a `signOut` answer says the account was signed out, not held for changes not on Drive.
+fn sign_out_done(answer: &serde_json::Value) -> bool {
+    answer.get("ok").and_then(|v| v.as_bool()) == Some(true)
+        && answer.get("result").and_then(|r| r.get("ok")).and_then(|v| v.as_bool()) != Some(false)
+}
+
 fn account_switched(answer: &serde_json::Value) -> bool {
     answer.get("result").and_then(|r| r.get("switched")).and_then(|v| v.as_bool()) == Some(true)
+}
+
+/// Whether a call that went through may have unlocked, locked, signed in or signed out the
+/// session. The tray menu reads the account once when the app starts, usually before the
+/// session is back, so it is told to read it again at these moments rather than first when
+/// it opens, by which time its question can wait behind the window's own long calls.
+fn session_changed(method: &str, answer: &serde_json::Value) -> bool {
+    if answer.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+    match method {
+        "unlock" | "unlockDevice" | "retryResume" | "protectSession" | "keepSignIn" | "lock" => true,
+        "signOut" => sign_out_done(answer),
+        "browserLoginStatus" => {
+            answer.get("result").and_then(|r| r.get("status")).and_then(|v| v.as_str()) != Some("waiting")
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod session_changed_tests {
+    use super::session_changed;
+    use serde_json::json;
+
+    #[test]
+    fn the_tray_reads_the_account_again_after_a_session_change_only() {
+        let ok = json!({ "ok": true, "result": {} });
+        for m in ["unlock", "unlockDevice", "retryResume", "protectSession", "keepSignIn", "lock", "signOut"] {
+            assert!(session_changed(m, &ok), "{m}");
+        }
+        assert!(!session_changed("unlockDevice", &json!({ "ok": false, "error": "x" })));
+        assert!(!session_changed("lockStatus", &ok));
+        assert!(!session_changed("getTimeline", &ok));
+        assert!(!session_changed("browserLoginStatus", &json!({ "ok": true, "result": { "status": "waiting" } })));
+        assert!(session_changed("browserLoginStatus", &json!({ "ok": true, "result": { "status": "ok", "email": "a@x" } })));
+    }
+
+    #[test]
+    fn a_sign_out_held_for_changes_not_on_drive_changes_nothing() {
+        let held = json!({ "ok": true, "result": { "ok": false, "unsaved": ["labels"] } });
+        assert!(!super::sign_out_done(&held));
+        assert!(!session_changed("signOut", &held));
+        assert!(super::sign_out_done(&json!({ "ok": true, "result": { "ok": true } })));
+        assert!(!super::sign_out_done(&json!({ "ok": false, "error": "x" })));
+    }
 }
 
 #[cfg(test)]
@@ -1436,9 +1870,12 @@ async fn rpc(
     if method == "startSaveOriginals" && !save_folder_was_picked(&params) {
         return Err("choose the folder to save to first".into());
     }
+    // A picture file the window names is vetted as every other local path is, and the sidecar
+    // is handed only the resolved one.
+    let params = if method == "localMotionClip" { vetted_motion_still(&app, &params)? } else { params };
     // A lock or a sign-out closes the file-manager drive before the sidecar hears of it,
     // so it answers nothing from a library the user has just locked away.
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     if matches!(method.as_str(), "lock" | "signOut") {
         files_drive::session_ended();
     }
@@ -1451,22 +1888,32 @@ async fn rpc(
     }
     let called = method.clone();
     let app_after = app.clone();
+    let discard = params.get("discard").and_then(serde_json::Value::as_bool) == Some(true);
     let result = tauri::async_runtime::spawn_blocking(move || {
+        // A sign-out the user let go of what is not on Drive yet does not wait for it again.
+        if method == "signOut" && !discard {
+            save_backup_before_sign_out(&app);
+        }
         rpc_blocking(&app, &shared, method, params, call_id)
     })
     .await
     .map_err(|e| format!("sidecar task failed: {e}"))?;
     // The Explorer folder held the account that just signed out: its placeholders go.
+    // A sign-out held for changes not on Drive yet left the account as it was.
+    let signed_out = called == "signOut" && result.as_ref().is_ok_and(sign_out_done);
     #[cfg(windows)]
-    if called == "signOut" && result.is_ok() {
+    if signed_out {
         let app = app_after.clone();
         std::thread::spawn(move || cloud_mount::clear_after_sign_out(&app));
     }
     // The account's own switches go with it, so the next account turns on only what it chooses.
-    if (called == "signOut" && result.is_ok())
+    if signed_out
         || (called == "browserLoginStatus" && result.as_ref().is_ok_and(account_switched))
     {
         secure_store::turn_off_account_switches(&app_after);
+        // The names the file-manager drive gave this account's photos go with it.
+        #[cfg(target_os = "linux")]
+        files_drive::forget_names(&app_after);
     }
     // Another account signed in where a lapsed session left the folder: the previous
     // account's placeholders and mount state go as at sign-out, before the answer reaches
@@ -1476,6 +1923,9 @@ async fn rpc(
         let app = app_after.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || cloud_mount::clear_after_sign_out(&app)).await;
     }
+    if result.as_ref().is_ok_and(|r| session_changed(&called, r)) {
+        let _ = app_after.emit_to(TRAY_POPUP_WINDOW, "session-changed", ());
+    }
     // A change made in the app shows in the Explorer folder too, quietly and soon.
     #[cfg(windows)]
     if result.as_ref().is_ok_and(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
@@ -1483,12 +1933,12 @@ async fn rpc(
             called.as_str(),
             "trashPhotos" | "restorePhotos" | "deletePhotosForever" | "emptyTrash" | "renamePhoto"
                 | "duplicatesTrash" | "hiddenSet" | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
-                | "removePhotosFromAlbum" | "setFavorite" | "saveCloudEdit"
+                | "removePhotosFromAlbum" | "setFavorite" | "saveCloudEdit" | "saveEditedMedia"
         )
     {
         crate::explorer_sync::request_refresh(&app_after);
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     if result.as_ref().is_ok_and(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true)) {
         match called.as_str() {
             // The timeline loads right after every unlock: the drive can list again.
@@ -1496,15 +1946,15 @@ async fn rpc(
             "startUpload" | "confirmImport" => files_drive::upload_started(),
             "trashPhotos" | "restorePhotos" | "deletePhotosForever" | "emptyTrash" | "renamePhoto"
             | "duplicatesTrash" | "hiddenSet" | "createAlbum" | "renameAlbum" | "deleteAlbum" | "addPhotosToAlbum"
-            | "removePhotosFromAlbum" | "saveCloudEdit" => files_drive::library_changed(),
+            | "removePhotosFromAlbum" | "saveCloudEdit" | "saveEditedMedia" => files_drive::library_changed(),
             _ => {}
         }
     }
     result
 }
 
-/// Asks Windows Hello to confirm it is this account's owner before the Hidden page opens.
-/// Off the async runtime, since the prompt waits for the person.
+/// Asks Windows Hello, or Touch ID on a Mac, to confirm it is this account's owner before the
+/// Hidden page opens. Off the async runtime, since the prompt waits for the person.
 #[tauri::command]
 async fn hello_verify(window: tauri::WebviewWindow, message: String) -> Result<hello::Verification, String> {
     #[cfg(windows)]
@@ -1548,8 +1998,8 @@ fn set_private_preview(app: AppHandle, on: bool) {
     let _ = (app, on);
 }
 
-/// Whether Windows Hello is set up for this account, asked without a prompt, for Settings
-/// to offer the app lock only where it can be answered.
+/// Whether Windows Hello (Touch ID or the Mac's password on a Mac) is set up for this account,
+/// asked without a prompt, for Settings to offer the app lock only where it can be answered.
 #[tauri::command]
 async fn hello_available() -> bool {
     tauri::async_runtime::spawn_blocking(hello::available).await.unwrap_or(false)
@@ -1613,6 +2063,23 @@ async fn pick_diag_file(window: tauri::WebviewWindow, default_name: String, filt
     Some(path)
 }
 
+/// The still a Live Photo or a motion photo clip is looked for beside: a HEIC or JPEG file.
+fn is_motion_still(path: &std::path::Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    matches!(ext.as_str(), "jpg" | "jpeg" | "heic" | "heif")
+}
+
+/// `localMotionClip`'s parameters with the path the window gave resolved and vetted by
+/// `checked_media_path`, or the reason it is refused.
+fn vetted_motion_still(app: &AppHandle, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let path = params.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+    let resolved = local_file::checked_media_path(app, path)?;
+    if !is_motion_still(&resolved) {
+        return Err("that file cannot have a clip".into());
+    }
+    Ok(serde_json::json!({ "path": strip_verbatim(resolved).to_string_lossy() }))
+}
+
 fn diag_file_was_picked(params: &serde_json::Value) -> bool {
     let path = params.get("path").and_then(|v| v.as_str()).unwrap_or_default();
     !path.is_empty() && DIAG_FILES.lock().unwrap().iter().any(|p| p == path)
@@ -1625,7 +2092,7 @@ fn save_folder_was_picked(params: &serde_json::Value) -> bool {
 
 /// Linux, the first time a close leaves the app running: say so once, since nothing on
 /// screen shows it any more, and give the background-apps list its line again.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn announce_background(app: &AppHandle) {
     static TOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let first = !TOLD.swap(true, std::sync::atomic::Ordering::SeqCst);
@@ -1640,7 +2107,7 @@ fn announce_background(app: &AppHandle) {
 }
 
 /// The notice a first close gives, and the background-apps status line, per language.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn background_texts(lang: &str) -> (&'static str, &'static str, &'static str) {
     match lang {
         "hu" => ("A Photos for Proton tovább fut", "A Proton Photos elérhető marad a Fájlokban. Az appot az alkalmazások közül nyithatod meg újra, kilépni a fiókmenüből vagy a Háttéralkalmazások közül tudsz.", "A Proton Photos elérhető a Fájlokban"),
@@ -1664,20 +2131,127 @@ fn lock_on_hide(app: &AppHandle) -> bool {
     page_setting(app, "lockOnHide").and_then(|b| b.as_bool()).unwrap_or(false)
 }
 
-/// Whether the app locks at all: Windows Hello, or the password of a vault that has one.
-#[cfg(windows)]
+/// Whether the app locks at all: Windows Hello (Touch ID on a Mac), or the password of a vault
+/// that has one.
+#[cfg(any(windows, target_os = "macos"))]
 fn app_lock_set(app: &AppHandle) -> bool {
     let on = |key: &str| page_setting(app, key).and_then(|b| b.as_bool()).unwrap_or(false);
     on("helloLock") || on("lockOnHide")
 }
 
 /// A close to the tray waiting for the page to cover itself, and whether it has.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 static COVERING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static COVERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The longest a close to the tray waits for that cover, so it never hangs on a page that is stuck.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 const COVER_WAIT: Duration = Duration::from_millis(400);
+
+/// The longest a quit, or a lock as the window goes to the tray, waits for the shared backup's
+/// waiting change to reach Drive. A save the wait cuts short leaves the copy on Drive as it was
+/// and the change waiting on this computer for the next start.
+const BACKUP_FLUSH_WAIT: Duration = Duration::from_secs(12);
+/// Each ask holds its lane at most this long, so the window's own calls never wait behind the save.
+const BACKUP_FLUSH_STEP_MS: u64 = 1_000;
+/// The longest a sign-out waits for the same save. A quit cut short keeps the change on this
+/// computer; a sign-out deletes it, so it waits for a whole round: the read of every copy, then each
+/// part's save, a face copy among them. The window's own ceiling for `signOut` is above this.
+const SIGN_OUT_FLUSH_WAIT: Duration = Duration::from_secs(90);
+
+/// One ask in `flush_shared_backup`'s steps: whether the save is done, or `None` when the sidecar
+/// does not answer it.
+fn flush_step(app: &AppHandle, wait_ms: u64) -> Option<bool> {
+    sidecar_rpc(app, "sharedBackupFlush", serde_json::json!({ "waitMs": wait_ms }))
+        .ok()
+        .map(|v| v.get("done").and_then(|d| d.as_bool()) == Some(true))
+}
+
+/// Saves the shared backup's waiting change now rather than minutes later, and waits for it at
+/// most `within`, whatever the sidecar does. Nothing to wait for when no sidecar runs (none is
+/// started for it). True when the save finished in time.
+fn flush_shared_backup(app: &AppHandle, within: Duration) -> bool {
+    if !app.state::<SharedSidecar>().inner().running() {
+        return true;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let asking = app.clone();
+    std::thread::spawn(move || {
+        let until = Instant::now() + within;
+        let done = loop {
+            let left = until.saturating_duration_since(Instant::now()).as_millis() as u64;
+            if left == 0 {
+                break false;
+            }
+            match flush_step(&asking, left.min(BACKUP_FLUSH_STEP_MS)) {
+                Some(true) => break true,
+                Some(false) => continue,
+                None => break false,
+            }
+        };
+        let _ = tx.send(done);
+    });
+    // A sidecar that stopped answering holds a call for minutes: the wait here does not.
+    rx.recv_timeout(within + Duration::from_secs(1)).unwrap_or(false)
+}
+
+/// Sign-out deletes the hidden list, the labels and the synced settings on this computer: a change
+/// to them still waiting for the shared backup goes to Drive first.
+fn save_backup_before_sign_out(app: &AppHandle) {
+    let started = Instant::now();
+    let done = flush_shared_backup(app, SIGN_OUT_FLUSH_WAIT);
+    note(app, &format!("[backup] save before sign-out done={done} ms={}", started.elapsed().as_millis()));
+}
+
+/// Starts the shared backup's waiting change on its way to Drive without waiting for it, as the
+/// window goes to the tray: the app keeps running, and the save with it.
+fn start_backup_flush(app: &AppHandle) {
+    if !app.state::<SharedSidecar>().inner().running() {
+        return;
+    }
+    let asking = app.clone();
+    std::thread::spawn(move || {
+        let _ = flush_step(&asking, 0);
+    });
+}
+
+/// Tells the shared backup whether the main window is on screen: its quick look at the other
+/// devices' copies runs only while it is, and looks once as the window comes back.
+fn backup_window_shown(app: &AppHandle, shown: bool) {
+    if !app.state::<SharedSidecar>().inner().running() {
+        return;
+    }
+    let asking = app.clone();
+    std::thread::spawn(move || {
+        let _ = sidecar_rpc(&asking, "sharedBackupShown", serde_json::json!({ "shown": shown }));
+    });
+}
+
+/// Where a quit stands with the shared backup's save: not asked yet, saving (every exit request
+/// waits, also the one the last window closing makes), or done (the next one goes through).
+static EXIT_FLUSH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(EXIT_NOT_ASKED);
+const EXIT_NOT_ASKED: u8 = 0;
+const EXIT_SAVING: u8 = 1;
+const EXIT_SAVED: u8 = 2;
+
+/// Every quit comes through here once (the tray's, the account menu's, an update's, a second
+/// launch's `--quit`): the windows go at once, the shared backup's waiting change is saved within
+/// `BACKUP_FLUSH_WAIT`, and then the app ends.
+fn quit_after_backup_flush(app: &AppHandle, code: i32) {
+    for (_, w) in app.webview_windows() {
+        let _ = w.hide();
+    }
+    let quitting = app.clone();
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let done = flush_shared_backup(&quitting, BACKUP_FLUSH_WAIT);
+        note(
+            &quitting,
+            &format!("[backup] save before quit done={done} ms={}", started.elapsed().as_millis()),
+        );
+        EXIT_FLUSH.store(EXIT_SAVED, std::sync::atomic::Ordering::SeqCst);
+        quitting.exit(code);
+    });
+}
 
 /// The page has covered what it shows; the window may go to the tray now.
 #[tauri::command]
@@ -1685,18 +2259,24 @@ fn page_covered() {
     COVERED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Hides the main window to the tray: the key of a vault with a password goes now or once its
-/// wait is up, the page hears of it, and the page is put to sleep.
-#[cfg(windows)]
+/// Hides the main window to the tray (the menu bar on a Mac): the key of a vault with a password
+/// goes now or once its wait is up, the page hears of it, and on Windows the page is put to sleep.
+#[cfg(any(windows, target_os = "macos"))]
 fn hide_to_tray(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         let _ = window.hide();
     }
+    backup_window_shown(app, false);
     // Locked from here rather than left to the page: the page is suspended a moment later and
     // would not act on the event until it is woken, which left the session open behind the tray.
     if lock_on_hide(app) {
         let locking = app.clone();
         let after = lock_after_secs(app);
+        // With a wait before the lock, the waiting change goes now, while the session is still open,
+        // rather than only when the lock comes; the lock still waits for what is left of the save.
+        if after > 0 {
+            start_backup_flush(app);
+        }
         let hidden = HIDE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         std::thread::spawn(move || {
             // With a wait chosen, the key goes only once the window has stayed in the tray that
@@ -1711,21 +2291,26 @@ fn hide_to_tray(app: &AppHandle) {
                     return;
                 }
             }
+            // The waiting change goes to Drive while the key that seals it is still here.
+            flush_shared_backup(&locking, BACKUP_FLUSH_WAIT);
             let _ = sidecar_rpc(&locking, "lock", serde_json::json!({}));
         });
+    } else {
+        start_backup_flush(app);
     }
     let _ = app.emit("window-hidden", ());
+    #[cfg(windows)]
     webview_power::suspend(app);
 }
 
 /// After how many seconds in the tray the app locks; 0 for as soon as it goes there.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn lock_after_secs(app: &AppHandle) -> u64 {
     page_setting(app, "lockAfter").and_then(|v| v.as_u64()).unwrap_or(0)
 }
 
 /// Counts the window's trips to the tray, so a lock timed for one trip does not fire in the next.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 static HIDE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One of the settings the page keeps sealed, for the host to act on; `None` when they
@@ -1742,33 +2327,35 @@ pub(crate) fn page_setting(app: &AppHandle, key: &str) -> Option<serde_json::Val
 /// commands and never asks.
 #[tauri::command]
 fn files_drive_status(app: AppHandle) -> serde_json::Value {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     return serde_json::to_value(files_drive::status(&app)).unwrap_or_default();
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = app;
         serde_json::json!({ "enabled": false, "address": null })
     }
 }
 
-/// Linux: whether closing the window leaves the app running. Windows always keeps
-/// running in the tray, so there it is simply true.
+/// Linux: whether closing the window leaves the app running. Windows keeps running in the
+/// tray and macOS in the menu bar, so there it is simply true.
 #[tauri::command]
 fn keep_running() -> bool {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     return autostart::keep_running();
-    #[cfg(windows)]
-    true
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
 }
 
 /// Async: turning it on asks the desktop's portal, which may ask the user.
 #[tauri::command]
 async fn set_keep_running(enabled: bool) -> Result<(), String> {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     return tauri::async_runtime::spawn_blocking(move || autostart::set_keep_running(enabled))
         .await
         .map_err(|e| e.to_string())?;
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = enabled;
         Ok(())
@@ -1779,13 +2366,13 @@ async fn set_keep_running(enabled: bool) -> Result<(), String> {
 /// for any free port. Async, since moving it restarts the server.
 #[tauri::command]
 async fn set_files_drive_address(app: AppHandle, host: String, port: String) -> Result<serde_json::Value, String> {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     return tauri::async_runtime::spawn_blocking(move || {
         files_drive::set_address(&app, &host, &port).map(|s| serde_json::to_value(s).unwrap_or_default())
     })
     .await
     .map_err(|e| e.to_string())?;
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, host, port);
         Err("not available".into())
@@ -1795,9 +2382,9 @@ async fn set_files_drive_address(app: AppHandle, host: String, port: String) -> 
 /// Whether the drive's `Photos/` is split into year and month folders.
 #[tauri::command]
 fn set_files_drive_by_date(app: AppHandle, enabled: bool) -> serde_json::Value {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     return serde_json::to_value(files_drive::set_by_date(&app, enabled)).unwrap_or_default();
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, enabled);
         serde_json::json!({ "enabled": false, "edits": false, "byDate": false, "address": null })
@@ -1807,9 +2394,9 @@ fn set_files_drive_by_date(app: AppHandle, enabled: bool) -> serde_json::Value {
 /// Whether deleting and renaming in the file manager reach the library.
 #[tauri::command]
 fn set_files_drive_edits(app: AppHandle, enabled: bool) -> serde_json::Value {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     return serde_json::to_value(files_drive::set_edits(&app, enabled)).unwrap_or_default();
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, enabled);
         serde_json::json!({ "enabled": false, "edits": false, "address": null })
@@ -1820,13 +2407,13 @@ fn set_files_drive_edits(app: AppHandle, enabled: bool) -> serde_json::Value {
 /// sidecar whether it is unlocked, which must not hold the main thread.
 #[tauri::command]
 async fn set_files_drive(app: AppHandle, enabled: bool) -> Result<serde_json::Value, String> {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     return tauri::async_runtime::spawn_blocking(move || {
         serde_json::to_value(files_drive::set_enabled(&app, enabled)).unwrap_or_default()
     })
     .await
     .map_err(|e| e.to_string());
-    #[cfg(windows)]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, enabled);
         Ok(serde_json::json!({ "enabled": false, "address": null }))
@@ -1837,8 +2424,8 @@ async fn set_files_drive(app: AppHandle, enabled: bool) -> Result<serde_json::Va
 ///
 /// Deliberately not a sidecar call and deliberately not behind the gate: it sets one
 /// flag, so it answers immediately even while the channel is busy with something long.
-/// A call this reaches before it is admitted never touches the sidecar at all; one it
-/// misses answers normally and the frontend discards the result, exactly as before.
+/// A call this reaches before it is admitted never touches the sidecar at all; one already
+/// sent is handed to the cancel writer, and the sidecar stops its work.
 #[tauri::command]
 fn cancel_rpc(state: State<'_, SharedSidecar>, call_id: CallId) {
     state.inner().abandon(call_id);
@@ -2141,6 +2728,9 @@ fn show_main_or_viewer(window: &tauri::WebviewWindow) {
         webview_power::resume(window.app_handle());
     }
     let _ = window.show();
+    if window.label() == MAIN_WINDOW {
+        backup_window_shown(window.app_handle(), true);
+    }
 }
 
 /// Show `window` if the frontend never got as far as asking.
@@ -2187,16 +2777,25 @@ fn framed<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
 /// The app's own window. Built rather than declared so it exists only once the app
 /// itself has been asked for.
 fn build_main_window(app: &AppHandle) -> tauri::Result<()> {
-    let main = framed(
-        tauri::WebviewWindowBuilder::new(app, MAIN_WINDOW, tauri::WebviewUrl::default())
-            .title(APP_TITLE)
-            .inner_size(1100.0, 720.0)
-            .min_inner_size(720.0, 500.0)
-            .decorations(false)
-            .resizable(true)
-            .visible(false),
-    )
-    .build()?;
+    let builder = tauri::WebviewWindowBuilder::new(app, MAIN_WINDOW, tauri::WebviewUrl::default())
+        .title(APP_TITLE)
+        .inner_size(1100.0, 720.0)
+        .min_inner_size(720.0, 500.0)
+        .resizable(true)
+        .visible(false);
+    #[cfg(not(target_os = "macos"))]
+    let builder = framed(builder.decorations(false));
+    // A Mac keeps its own window frame and traffic lights, drawn over the page's top strip
+    // and centred on its 48 points. The page leaves them room and hides its own buttons.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .decorations(true)
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 22.0))
+        .transparent(false)
+        .background_color(tauri::window::Color(25, 25, 27, 255));
+    let main = builder.build()?;
     window_place::apply(app, &main, (1100.0, 720.0));
     // A stale Windows icon cache could otherwise leave the old taskbar icon.
     if let Some(icon) = app.default_window_icon().cloned() {
@@ -2259,8 +2858,9 @@ fn ensure_app_started(app: &AppHandle) {
         }
         // No dependable system tray on the Linux target: GNOME shows no legacy tray icon,
         // so the app runs as a plain window there and its close is a real quit (below),
-        // rather than a hide to a tray that would not be there to bring it back.
-        #[cfg(windows)]
+        // rather than a hide to a tray that would not be there to bring it back. A Mac has
+        // its menu bar for the same icon.
+        #[cfg(any(windows, target_os = "macos"))]
         {
             if let Err(e) = build_tray(app) {
                 note(app, &format!("[host] tray creation failed: {e}"));
@@ -2377,17 +2977,24 @@ fn show_main_window(app: &AppHandle) {
 /// System-tray icon so the app keeps running in the background once its window
 /// is closed. Either mouse button shows our own rounded popup (a real frameless
 /// window, not the OS menu) near the cursor — with the account, live sync status,
-/// a "Sync now" action, and Open / Sign out / Quit.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// a "Sync now" action, and Open / Sign out / Quit. On a Mac the icon sits in the
+/// menu bar and the popup opens under it.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    let Some(icon) = app.default_window_icon().cloned() else {
+    // A Mac draws a template image in the menu bar's own colour, light or dark.
+    #[cfg(target_os = "macos")]
+    let icon = Some(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?);
+    #[cfg(not(target_os = "macos"))]
+    let icon = app.default_window_icon().cloned();
+    let Some(icon) = icon else {
         return Ok(());
     };
 
     TrayIconBuilder::with_id("main")
         .icon(icon)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("Photos for Proton")
         .on_tray_icon_event(|tray, event| {
             let app = tray.app_handle();
@@ -2397,8 +3004,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                 TrayIconEvent::Click {
                     button: MouseButton::Left | MouseButton::Right,
                     button_state: MouseButtonState::Up,
+                    rect,
                     ..
-                } => show_tray_popup(app),
+                } => show_tray_popup(app, rect),
                 _ => {}
             }
         })
@@ -2409,12 +3017,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 /// A frameless, transparent popup styled like the app (rounded corners). It
 /// loads the frontend, which renders the tray menu when it sees this window's
 /// label. Created hidden alongside the app's own window; shown on a tray click.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn build_tray_popup(app: &AppHandle) -> tauri::Result<()> {
     let popup =
         tauri::WebviewWindowBuilder::new(app, TRAY_POPUP_WINDOW, tauri::WebviewUrl::default())
             .title("")
-            .inner_size(320.0, 436.0)
+            .inner_size(320.0, TRAY_POPUP_HEIGHT)
             .decorations(false)
             .transparent(true)
             .shadow(false)
@@ -2490,14 +3098,26 @@ fn native_show(window: &tauri::WebviewWindow) {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn native_show(_window: &tauri::WebviewWindow) {}
 
-/// Anchor the popup bottom-right, above the taskbar, like a standard tray flyout,
-/// then tell it to refresh its account data (it was created before sign-in).
-#[cfg_attr(not(windows), allow(dead_code))]
-fn show_tray_popup(app: &AppHandle) {
+/// The popup's height. The Mac's has no Explorer sync rows, so it is shorter.
+#[cfg(not(target_os = "macos"))]
+const TRAY_POPUP_HEIGHT: f64 = 436.0;
+#[cfg(target_os = "macos")]
+const TRAY_POPUP_HEIGHT: f64 = 372.0;
+
+/// Anchor the popup bottom-right, above the taskbar, like a standard tray flyout (on a
+/// Mac, under the menu bar icon), then tell it to refresh its account data (it was
+/// created before sign-in).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn show_tray_popup(app: &AppHandle, icon: tauri::Rect) {
     let Some(w) = app.get_webview_window(TRAY_POPUP_WINDOW) else {
         return;
     };
-    let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(320, 436));
+    let size = w.outer_size().unwrap_or(tauri::PhysicalSize::new(320, TRAY_POPUP_HEIGHT as u32));
+    #[cfg(target_os = "macos")]
+    place_under_menu_bar_icon(&w, icon, size);
+    #[cfg(not(target_os = "macos"))]
+    let _ = icon;
+    #[cfg(not(target_os = "macos"))]
     if let Ok(Some(monitor)) = w.primary_monitor() {
         let ms = monitor.size();
         let taskbar = (48.0 * monitor.scale_factor()) as i32;
@@ -2516,9 +3136,84 @@ fn show_tray_popup(app: &AppHandle) {
     let _ = w.emit("tray-shown", ());
 }
 
+/// Centres the popup under the menu bar icon, kept on the display the icon is on.
+#[cfg(target_os = "macos")]
+fn place_under_menu_bar_icon(w: &tauri::WebviewWindow, icon: tauri::Rect, size: tauri::PhysicalSize<u32>) {
+    let scale = w.scale_factor().unwrap_or(1.0);
+    let at = icon.position.to_physical::<f64>(scale);
+    let icon_size = icon.size.to_physical::<f64>(scale);
+    let mut x = at.x + icon_size.width / 2.0 - size.width as f64 / 2.0;
+    let y = at.y + icon_size.height;
+    let display = w.available_monitors().unwrap_or_default().into_iter().find(|m| {
+        let (p, s) = (m.position(), m.size());
+        let (left, top) = (p.x as f64, p.y as f64);
+        at.x >= left && at.x < left + s.width as f64 && at.y >= top && at.y < top + s.height as f64
+    });
+    if let Some(m) = display {
+        let left = m.position().x as f64;
+        let right = left + m.size().width as f64 - size.width as f64;
+        x = x.min(right).max(left);
+    }
+    let _ = w.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+}
+
 #[tauri::command]
 fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// The id of the Mac app menu's Quit, which asks before it cuts an upload short.
+#[cfg(target_os = "macos")]
+const QUIT_MENU_ID: &str = "quit";
+
+/// Whether an upload or an import is under way, from the sidecar's `uploadStatus`: quitting
+/// would cut it off. An import waiting for its owner (ready, or in review) is not.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn upload_busy(status: &serde_json::Value) -> bool {
+    status.get("running").and_then(|v| v.as_bool()) == Some(true)
+        || matches!(
+            status.pointer("/importing/phase").and_then(|v| v.as_str()),
+            Some("unpacking" | "downloading" | "planning")
+        )
+}
+
+/// The Quit of the tray popup, the account menu and, on a Mac, the app menu and Cmd+Q. On a Mac
+/// an upload or import still running is not cut off unasked: the window comes forward and asks
+/// first. Elsewhere it quits at once.
+#[tauri::command]
+fn request_quit(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(move || {
+        let busy = sidecar_rpc(&app, "uploadStatus", serde_json::json!({})).is_ok_and(|s| upload_busy(&s));
+        if !busy {
+            app.exit(0);
+            return;
+        }
+        let asking = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            show_main_window(&asking);
+            let _ = asking.emit_to(MAIN_WINDOW, "quit-requested", ());
+        });
+    });
+    #[cfg(not(target_os = "macos"))]
+    app.exit(0);
+}
+
+/// The Mac's standard app menu, with its Quit (and Cmd+Q) going through `request_quit`: the
+/// system's own Quit ends the app at once, upload or not.
+#[cfg(target_os = "macos")]
+fn mac_app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, MenuItemKind};
+    let menu = Menu::default(app)?;
+    if let Some(MenuItemKind::Submenu(own)) = menu.items()?.into_iter().next() {
+        let items = own.items()?;
+        if let Some(MenuItemKind::Predefined(quit)) = items.last() {
+            let label = quit.text()?;
+            own.remove_at(items.len() - 1)?;
+            own.append(&MenuItem::with_id(app, QUIT_MENU_ID, label, true, Some("CmdOrCtrl+Q"))?)?;
+        }
+    }
+    Ok(menu)
 }
 
 /// Relaunch the app (used to apply the "show in File Explorer" toggle, which mounts
@@ -2537,12 +3232,12 @@ fn restart_app(app: AppHandle) {
 /// time would leave two.
 fn start_background_services(app: &AppHandle) {
     // Linux: the file-manager drive, on the same terms (see files_drive.rs).
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     files_drive::start(app);
     // Linux: tell the desktop from the start, not only at the first close, that the app
     // runs in the background, so it is listed among the background apps as soon as its
     // window goes, and with a line saying why.
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     if autostart::keep_running() {
         let app = app.clone();
         std::thread::spawn(move || {
@@ -2558,6 +3253,7 @@ fn start_background_services(app: &AppHandle) {
     if cloud_mount::show_in_explorer_enabled() {
         cloud_mount::ensure_folder();
         cloud_mount::mount(app.clone());
+        cloud_mount::watch_drive(app.clone());
     } else {
         // Opted out: remove the registration so the nav-pane entry is gone.
         cloud_mount::unmount(app.clone());
@@ -2596,11 +3292,23 @@ fn run_updater(app: AppHandle) -> Result<(), String> {
             note(&app, "[update] no verified installer staged, not launching");
             return Err("no installer staged".into());
         }
+        // Held from before the check until the installer has been started, so the file
+        // checked below is the file that runs: while this handle lives it cannot be
+        // written, renamed or deleted, and the check reads it through this same handle.
+        let held = match file_hold::hold(&path) {
+            Ok(file) => file,
+            Err(e) => {
+                note(&app, &format!("[update] installer refused: {e}"));
+                return Err(e);
+            }
+        };
         // Checked here, by the process that runs it, right before it runs: signed with
         // the update key and newer than this app, or it is deleted and not run.
         let signature = std::env::temp_dir().join("pfp-update.exe.minisig");
-        if let Err(e) = update_sig::verify_installer(&path, &signature, &app.package_info().version) {
+        if let Err(e) = update_sig::verify_installer(&held, &signature, &app.package_info().version) {
             note(&app, &format!("[update] installer refused: {e}"));
+            // Let go first: the hold denies the delete.
+            drop(held);
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::remove_file(&signature);
             return Err(e);
@@ -2623,6 +3331,9 @@ fn run_updater(app: AppHandle) -> Result<(), String> {
             );
             return Err("could not launch the installer".into());
         }
+        // Released only once the process exists: by then its image is mapped from the file,
+        // and a file mapped as a running image cannot be written either.
+        drop(held);
     }
     app.exit(0);
     Ok(())
@@ -2977,6 +3688,26 @@ fn update_leftovers(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 #[cfg(test)]
+mod quit_tests {
+    use super::upload_busy;
+    use serde_json::json;
+
+    #[test]
+    fn a_running_upload_or_an_import_at_work_holds_the_quit() {
+        assert!(upload_busy(&json!({ "running": true, "total": 3 })));
+        for phase in ["unpacking", "downloading", "planning"] {
+            assert!(upload_busy(&json!({ "running": false, "importing": { "phase": phase } })), "{phase}");
+        }
+        // An import waiting for its owner, a finished upload, or no answer at all does not.
+        for phase in ["ready", "review"] {
+            assert!(!upload_busy(&json!({ "running": false, "importing": { "phase": phase } })), "{phase}");
+        }
+        assert!(!upload_busy(&json!({ "running": false, "total": 3, "done": 3 })));
+        assert!(!upload_busy(&json!(null)));
+    }
+}
+
+#[cfg(test)]
 mod update_leftover_tests {
     use super::update_leftovers;
 
@@ -2996,6 +3727,32 @@ mod update_leftover_tests {
         found.sort();
         assert_eq!(found, vec!["photosforproton.exe.pfp-old", "resources/sidecar/x.node.pfp-old"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod motion_clip_tests {
+    use super::{deadline_for, is_motion_still, priority_for, Priority};
+    use std::path::Path;
+
+    #[test]
+    fn only_a_heic_or_jpeg_still_is_looked_beside_for_a_clip() {
+        for ok in ["a.jpg", "b.JPEG", "c.heic", "d.HEIF"] {
+            assert!(is_motion_still(Path::new(ok)), "{ok}");
+        }
+        for no in ["a.mov", "b.png", "c", "d.jpg.exe"] {
+            assert!(!is_motion_still(Path::new(no)), "{no}");
+        }
+    }
+
+    #[test]
+    fn whole_file_reads_get_the_transfer_deadline() {
+        let transfer = deadline_for("getVideo");
+        for method in ["localMotionClip", "getMotionClip", "metaInfo", "dateEditInfo"] {
+            assert_eq!(deadline_for(method), transfer, "{method}");
+        }
+        assert_eq!(priority_for("localMotionClip"), priority_for("getMotionClip"));
+        assert_eq!(priority_for("videoEditProgress"), Priority::UserAction);
     }
 }
 
@@ -3071,6 +3828,7 @@ pub fn run() {
             set_launch_at_login,
             hide_tray_popup,
             open_main_from_tray,
+            request_quit,
             secure_store::store_set,
             secure_store::store_get,
             secure_store::store_del,
@@ -3093,6 +3851,9 @@ pub fn run() {
             cloud_mount::keep_held_answer,
             cloud_mount::explorer_edits,
             cloud_mount::set_explorer_edits,
+            cloud_mount::explorer_location,
+            cloud_mount::check_explorer_location,
+            cloud_mount::move_explorer_location,
             cloud_mount::synced_albums,
             cloud_mount::set_album_synced,
             cloud_mount::album_local_count,
@@ -3111,6 +3872,14 @@ pub fn run() {
             local_file::delete_local_file,
             photo_edit::local_editor_source,
             photo_edit::save_local_edit,
+            photo_edit::save_image_as,
+            video_edit::video_edit_open,
+            video_edit::video_edit_strip,
+            video_edit::video_edit_pick_audio,
+            video_edit::video_edit_run,
+            video_edit::video_edit_cancel,
+            video_edit::video_edit_discard,
+            video_edit::video_edit_save_local,
             local_folder::list_media_folder,
             local_folder::local_thumbnails,
             upload_frame::upload_frames,
@@ -3134,6 +3903,18 @@ pub fn run() {
             // An update installed while this app still ran set the files it held aside (`.pfp-old`); this
             // process no longer uses them, so they go now rather than at the next update.
             std::thread::spawn(sweep_update_leftovers);
+            #[cfg(target_os = "macos")]
+            {
+                app.set_menu(mac_app_menu(app.handle())?)?;
+                app.on_menu_event(|app, event| {
+                    if event.id() == QUIT_MENU_ID {
+                        request_quit(app.clone());
+                    }
+                });
+            }
+            // Names in the log any call stuck waiting for its lane or for its answer.
+            start_rpc_watchdog(app.handle().clone());
+            app.state::<SharedSidecar>().inner().start_cancel_writer();
             // The file a cold launch was asked to open. The single-instance callback
             // above never runs for the first process, and this never runs for a second
             // one, so both are needed and neither is a duplicate of the other. This one
@@ -3157,7 +3938,8 @@ pub fn run() {
             // launch sweeps too, because the folder emptied here is the one its own
             // decoded previews are staged in.
             cloud_mount::reap_temp_leftovers();
-            #[cfg(not(windows))]
+            video_edit::reap(app.handle());
+            #[cfg(target_os = "linux")]
             files_drive::reap(app.handle());
             // A launch that exists only to show a file stops here, with one window on
             // screen and nothing else built. What `ensure_app_started` holds is the app
@@ -3208,10 +3990,11 @@ pub fn run() {
                 // for real is the tray's own Quit. Suspending the now-hidden WebView2
                 // stops it holding its renderer memory while nothing is on screen.
                 MAIN_WINDOW => {
-                    // Windows closes to the tray and keeps running; the Linux build has no
+                    // Windows closes to the tray and a Mac to the menu bar, and both keep
+                    // running (a Mac also quits from its app menu); the Linux build has no
                     // tray, so closing the main window quits rather than leaving the app
                     // running invisibly with no icon to reopen it.
-                    #[cfg(windows)]
+                    #[cfg(any(windows, target_os = "macos"))]
                     {
                         api.prevent_close();
                         // With a lock set, the page first covers what it shows (the lock
@@ -3242,17 +4025,21 @@ pub fn run() {
                     // hides, and the app goes on serving the file-manager drive. It
                     // comes back when the app is started again, and quits from its
                     // account menu or the desktop's list of background apps.
-                    #[cfg(not(windows))]
+                    #[cfg(target_os = "linux")]
                     {
                         if autostart::keep_running() {
                             let _ = window.hide();
                             api.prevent_close();
+                            backup_window_shown(app, false);
                             if lock_on_hide(app) {
                                 files_drive::session_ended();
                                 let locking = app.clone();
                                 std::thread::spawn(move || {
+                                    flush_shared_backup(&locking, BACKUP_FLUSH_WAIT);
                                     let _ = sidecar_rpc(&locking, "lock", serde_json::json!({}));
                                 });
+                            } else {
+                                start_backup_flush(app);
                             }
                             announce_background(app);
                             let _ = app.emit("window-hidden", ());
@@ -3271,8 +4058,26 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
+                use std::sync::atomic::Ordering::SeqCst;
+                match EXIT_FLUSH.compare_exchange(EXIT_NOT_ASKED, EXIT_SAVING, SeqCst, SeqCst) {
+                    Ok(_) => {
+                        api.prevent_exit();
+                        quit_after_backup_flush(app, code.unwrap_or(0));
+                    }
+                    Err(EXIT_SAVING) => api.prevent_exit(),
+                    Err(_) => {}
+                }
+            }
+            // A Mac brings the app back from its Dock icon too, with the window closed to the menu bar.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                show_main_window(app);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -3357,6 +4162,68 @@ mod gate_tests {
         assert!(methods.len() > 100, "the handler tables were not read: {}", methods.len());
         let open: Vec<&String> = methods.iter().filter(|m| super::classified(m).is_none()).collect();
         assert!(open.is_empty(), "name these in `classified`: {open:?}");
+    }
+
+    #[test]
+    fn the_watchdog_names_calls_stuck_waiting_or_running_and_counts_the_lanes() {
+        let flights = super::Flights::new();
+        let quick = flights.start("getPreview");
+        let waiting = flights.start("semanticSearch");
+        let running = flights.start("getVideo");
+        running.admitted();
+        let behind = flights.start("warmThumbnails");
+        let later = Instant::now() + Duration::from_secs(10);
+        // Nothing is stuck yet.
+        assert!(flights.stuck_report(Instant::now(), 5_000).is_empty());
+        drop(quick);
+        let report = flights.stuck_report(later, 5_000);
+        assert_eq!(report.len(), 4, "{report:?}");
+        assert!(report[0].starts_with("[rpc] semanticSearch stuck lane=fg waiting="), "{report:?}");
+        assert!(report[1].starts_with("[rpc] getVideo stuck lane=fg running="), "{report:?}");
+        assert!(report[2].starts_with("[rpc] warmThumbnails stuck lane=bg waiting="), "{report:?}");
+        assert_eq!(report[3], "[rpc] queue stuck=3 fg_running=1 fg_waiting=1 bg_running=0 bg_waiting=1");
+        drop((waiting, running, behind));
+        assert!(flights.stuck_report(later, 5_000).is_empty(), "every call left with its guard");
+    }
+
+    #[test]
+    fn the_watchdog_names_a_long_call_less_and_less_often() {
+        let flights = super::Flights::new();
+        let walk = flights.start("listExtrasForMount");
+        let start = Instant::now();
+        let named_at: Vec<u64> = (1..=60u64)
+            .map(|tick| tick * 5)
+            .filter(|s| !flights.stuck_report(start + Duration::from_secs(*s), 5_000).is_empty())
+            .collect();
+        // At 5 s, at each doubling of its age, then once a minute.
+        assert_eq!(named_at, vec![5, 10, 20, 40, 80, 140, 200, 260], "{named_at:?}");
+        drop(walk);
+    }
+
+    #[test]
+    fn the_watchdog_caps_a_method_name() {
+        let flights = super::Flights::new();
+        let long = "m".repeat(500);
+        let call = flights.start(&long);
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert!(report[0].len() < 120, "{}", report[0]);
+        drop(call);
+    }
+
+    #[test]
+    fn the_watchdog_names_only_so_many_and_counts_the_rest() {
+        let flights = super::Flights::new();
+        let guards: Vec<_> = (0..20).map(|_| flights.start("getPreview")).collect();
+        let report = flights.stuck_report(Instant::now() + Duration::from_secs(6), 5_000);
+        assert_eq!(report.len(), super::WATCHDOG_NAMES + 1);
+        assert!(report.last().unwrap().starts_with("[rpc] queue stuck=20 "));
+        drop(guards);
+    }
+
+    #[test]
+    fn the_trash_read_ahead_never_holds_up_the_window() {
+        assert!(super::is_background(super::priority_for("listTrashedAhead")));
+        assert!(!super::is_background(super::priority_for("listTrashed")));
     }
 
     #[test]
@@ -3596,6 +4463,37 @@ mod cancel_tests {
     }
 
     #[test]
+    fn a_cancel_reaches_a_call_already_sent_and_only_that_one() {
+        let shared = std::sync::Arc::new(SidecarGate::new());
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(shared.cancels.set(tx).is_ok());
+
+        // Sent to the sidecar of spawn 3 as its request 41, then let go of.
+        shared.track(7);
+        shared.sent_to(7, 3, 41);
+        shared.abandon(7);
+        assert_eq!(rx.try_recv(), Ok((3, 41)));
+
+        // Let go of while still queued: nothing to tell the sidecar.
+        shared.track(8);
+        shared.abandon(8);
+        assert!(rx.try_recv().is_err(), "a call never sent was cancelled in the sidecar");
+
+        // Let go of between the write and its being noted: the note sends the cancel.
+        shared.track(9);
+        shared.abandon(9);
+        shared.sent_to(9, 3, 42);
+        assert_eq!(rx.try_recv(), Ok((3, 42)));
+
+        // Answered before the cancel came: nothing goes out.
+        shared.track(10);
+        shared.sent_to(10, 3, 43);
+        shared.sent.lock().unwrap().remove(&10);
+        shared.abandon(10);
+        assert!(rx.try_recv().is_err(), "an answered call was cancelled");
+    }
+
+    #[test]
     fn one_call_being_abandoned_says_nothing_about_another() {
         let shared = SidecarGate::new();
         shared.track(1);
@@ -3674,6 +4572,8 @@ mod log_tests {
         // The whole-library sweeps come in by priority tier, not by a second list.
         assert_eq!(priority_for("listForMount"), Priority::Enumerate);
         assert_eq!(deadline_for("listForMount"), long);
+        assert_eq!(deadline_for("listTrashed"), long, "a large trash must not cost the session");
+        assert_eq!(deadline_for("listTrashedAhead"), long, "nor the same walk read ahead");
         assert!(deadline_for("getPreview") < long);
         assert!(deadline_for("aMethodAddedLater") < long, "an unknown method waits the short one");
     }

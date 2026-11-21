@@ -66,21 +66,21 @@ pub fn enabled() -> bool {
 }
 /// Whether the app is set to start at sign-in: what was last asked of the portal and
 /// granted. The entry itself is written on the host, where the sandbox cannot read it.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn enabled() -> bool {
     linux::flag("autostart").unwrap_or(false)
 }
 
 /// Linux: whether closing the window leaves the app running, so the file-manager drive
 /// keeps working. On unless turned off. (Windows always goes to the tray.)
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn keep_running() -> bool {
     linux::flag("background").unwrap_or(true)
 }
 
 /// Turn running on after the window closes on or off. Turning it on tells the desktop,
 /// through the same portal, that the app may run with no window.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn set_keep_running(on: bool) -> Result<(), String> {
     if on {
         let (background, _) = linux::request_background(enabled())?;
@@ -94,7 +94,7 @@ pub fn set_keep_running(on: bool) -> Result<(), String> {
 /// Tell the desktop, through the portal, that the app may run with no window, and give it
 /// the line it shows under the app among its background apps (GNOME's Background Apps).
 /// Blocking; nothing depends on the answer.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn declare_background(status: &str) {
     let _ = linux::request_background(enabled());
     let _ = linux::set_status(status);
@@ -122,13 +122,24 @@ pub fn set(on: bool) -> Result<(), String> {
 }
 /// Ask the desktop to start the app at sign-in, or to stop. Blocking: the desktop may
 /// ask the user first.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn set(on: bool) -> Result<(), String> {
     let (_, granted) = linux::request_background(on)?;
     if on && !granted {
         return Err("the desktop did not allow starting at sign-in".into());
     }
     linux::set_flag("autostart", on)
+}
+
+/// macOS has no start-at-sign-in yet: the preference reads as off and cannot be set.
+#[cfg(target_os = "macos")]
+pub fn enabled() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+pub fn set(_on: bool) -> Result<(), String> {
+    Err("starting at sign-in is not available on this system".into())
 }
 
 /// Running in the background and starting at sign-in on Linux, through the XDG
@@ -139,7 +150,7 @@ pub fn set(on: bool) -> Result<(), String> {
 /// it away again, and a desktop that wants the user's say asks them. The app starts with
 /// its window, not hidden: there is no tray to wait in, and the vault needs unlocking
 /// before anything works anyway.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 mod linux {
     use std::collections::HashMap;
     use std::path::PathBuf;

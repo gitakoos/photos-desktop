@@ -40,6 +40,7 @@ import { describe, it } from "vitest";
 
 import { analyzeImage } from "./faceScan.ts";
 import { markGpuFailed, openModel } from "./inference.ts";
+import { tensor } from "./ortSession.ts";
 import { decodeLikePhone } from "./phoneDecode.ts";
 import { newStageTimes, runInOrder, stageFields, timed, timedSync, type StageTimes } from "./scanPipeline.ts";
 import { CLIP_SIDE, clipInputFrom, toHalves } from "./searchIndex.ts";
@@ -92,7 +93,6 @@ const ms = (v: number) => v.toFixed(1).padStart(7);
 describe.skipIf(!MODELS || !existsSync(join(MODELS, "ghostfacenet.onnx")))("the scan's steps on this computer", () => {
   it("are timed photo by photo, and several at once", { timeout: 600_000 }, async () => {
     if (process.env.PFP_BENCH_CPU) markGpuFailed("bench");
-    const ort = await import("onnxruntime-node");
     const det = await openModel(join(MODELS, "yolov5face.onnx"), true);
     const emb = await openModel(join(MODELS, "ghostfacenet.onnx"), true);
     const clip = await openModel(join(MODELS, "clip_image.onnx"), true, "basic");
@@ -108,7 +108,7 @@ describe.skipIf(!MODELS || !existsSync(join(MODELS, "ghostfacenet.onnx")))("the 
     const onePhoto = async (bytes: Buffer, t: StageTimes) => {
       const img = await timed(t, "decode", () => decodeLikePhone(bytes));
       const faces = await analyzeImage(img, models as any, "bench", false, t);
-      const input = timedSync(t, "clipPrep", () => new ort.Tensor("float32", clipInputFrom(img), [1, 3, CLIP_SIDE, CLIP_SIDE]));
+      const input = timedSync(t, "clipPrep", () => tensor("float32", clipInputFrom(img), [1, 3, CLIP_SIDE, CLIP_SIDE]));
       const out = await timed(t, "clip", () => clip.session.run({ [clip.session.inputNames[0]]: input }));
       timedSync(t, "clipPrep", () => toHalves(out[clip.session.outputNames[0]].data as Float32Array));
       t.photos++;

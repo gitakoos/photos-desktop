@@ -31,7 +31,7 @@ import { TrayPopup } from "./views/TrayPopup";
 import { ViewerWindow } from "./views/ViewerWindow";
 import { LangProvider } from "./lib/i18n";
 import { applyTheme, type ThemeMode } from "./lib/theme";
-import { isWindows } from "./lib/platform";
+import { isMac, isWindows } from "./lib/platform";
 
 /**
  * A line in the app's log, from the page.
@@ -74,10 +74,16 @@ if (isTrayPopup || isViewer) {
   })();
 }
 
+// A Mac's main window keeps its own frame with the traffic lights over the page's top strip
+// (the host's `build_main_window`), so the page leaves them room and draws no buttons of its own.
+const macChrome = isMac && !isTrayPopup && !isViewer;
+if (macChrome) document.documentElement.setAttribute("data-mac-chrome", "");
+
 // On Windows the system rounds and shades the window (see the host's `framed`), so the
 // page draws no corners of its own; and the window's own colour, which shows for a frame
-// wherever a resize uncovers it, follows what the page paints at its edge.
-if (isWindows) {
+// wherever a resize uncovers it, follows what the page paints at its edge. The same goes
+// for a Mac's main window.
+if (isWindows || macChrome) {
   const root = document.documentElement;
   root.setAttribute("data-native-frame", "");
   let painted = "";

@@ -22,7 +22,7 @@
 
 import { randomBytes } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -32,14 +32,21 @@ import sharp, { type Sharp } from "sharp";
 
 import {
   NO_COMPRESSION,
+  colourKept,
   compressPhoto,
+  compressionDir,
+  holdTemp,
   jpegName,
   mp4Name,
   planVideo,
   readCompressionSettings,
+  releaseTemp,
   resolveCodec,
   setMp4Times,
+  sweepCompressionTemp,
   targetBitrate,
+  type VideoEncoders,
+  type VideoPlan,
   type VideoProbe,
 } from "./compression.ts";
 import { readMp4CreationTime } from "./mp4Date.ts";
@@ -109,6 +116,18 @@ describe("a photo compressed for upload", () => {
     expect(await compressPhoto(small, "image/jpeg", on)).toEqual({ skipped: "not-smaller" });
   });
 
+  it("goes up as it is when it is a motion photo, so its clip stays", async () => {
+    const still = await (await noisy(1200, 800)).jpeg({ quality: 98 }).toBuffer();
+    const clip = Buffer.concat([
+      Buffer.from([0, 0, 0, 0x18]),
+      Buffer.from("ftypisommp41isommp41", "latin1"),
+      Buffer.alloc(64, 7),
+    ]);
+    const src = join(dir, "PXL_MOTION.jpg");
+    await writeFile(src, Buffer.concat([still, clip]));
+    expect(await compressPhoto(src, "image/jpeg", on)).toEqual({ skipped: "motion" });
+  });
+
   it("names a copy as a JPEG or an MP4", () => {
     expect(jpegName("a.PNG")).toBe("a.jpg");
     expect(jpegName("b.jpeg")).toBe("b.jpeg");
@@ -125,11 +144,13 @@ describe("the settings the window sends", () => {
       videoTier: "small",
     });
     expect(readCompressionSettings(null)).toEqual(NO_COMPRESSION);
+    expect(readCompressionSettings({ local: true }).local).toBe(true);
+    expect(readCompressionSettings({ local: "yes" }).local).toBe(false);
   });
 });
 
 describe("a video's plan", () => {
-  const all = { avc: true, hevc: true, av1: true };
+  const all: VideoEncoders = { avc: true, hevc: true, av1: true, hevcHdr: true, av1Hdr: true };
   const probe = (over: Partial<VideoProbe> = {}): VideoProbe => ({
     width: 3840,
     height: 2160,
@@ -140,6 +161,10 @@ describe("a video's plan", () => {
     hasAudio: true,
     codec: "hevc",
     hdr: false,
+    transfer: "sdr",
+    primaries: "bt709",
+    bitDepth: 8,
+    dolbyVisionOnly: false,
     size: 62_000_000,
     ...over,
   });
@@ -164,21 +189,56 @@ describe("a video's plan", () => {
     expect(lean).toMatchObject({ bitrate: targetBitrate("avc", "balanced", 1920, 1080, 60) });
   });
 
-  it("goes up as it is when already about as small, HDR, too short or unreadable", () => {
+  it("goes up as it is when already about as small, Dolby Vision only, too short or unreadable", () => {
     expect(planVideo(probe({ videoBitrate: 5_000_000 }), { ...on, codec: "avc", videoTier: "balanced" }, all)).toEqual({ skipped: "efficient" });
-    expect(planVideo(probe({ hdr: true }), on, all)).toEqual({ skipped: "hdr" });
+    expect(planVideo(probe({ dolbyVisionOnly: true }), on, all)).toEqual({ skipped: "hdr" });
+    expect(planVideo(probe({ hdr: true, transfer: "pq", dolbyVisionOnly: true }), on, all)).toEqual({ skipped: "hdr" });
     expect(planVideo(probe({ durationMs: 400 }), on, all)).toEqual({ skipped: "too-short" });
     expect(planVideo(probe({ size: 0 }), on, all)).toEqual({ skipped: "unreadable" });
   });
 
   it("takes the codec asked for when this PC has its encoder, else the next one down", () => {
-    const none = { avc: true, hevc: false, av1: false };
+    const none = { ...all, hevc: false, av1: false };
     expect(resolveCodec("auto", "avc", all)).toBe("hevc");
     expect(resolveCodec("auto", "avc", none)).toBe("avc");
-    expect(resolveCodec("av1", "avc", { avc: true, hevc: true, av1: false })).toBe("hevc");
+    expect(resolveCodec("av1", "avc", { ...all, av1: false })).toBe("hevc");
     expect(resolveCodec("keep", "hevc", all)).toBe("hevc");
     expect(resolveCodec("keep", "other", all)).toBe("avc");
-    expect(resolveCodec("avc", "hevc", { avc: false, hevc: false, av1: false })).toBeNull();
+    expect(resolveCodec("avc", "hevc", { ...all, avc: false, hevc: false, av1: false })).toBeNull();
+  });
+
+  const hdr10 = (over: Partial<VideoProbe> = {}) =>
+    probe({ hdr: true, transfer: "pq", primaries: "bt2020", bitDepth: 10, ...over });
+
+  it("keeps HDR in H.265 or AV1 when the encoder writes 10 bits, with a quarter more bits", () => {
+    const hevc = planVideo(hdr10(), { ...on, codec: "hevc" }, all);
+    expect(hevc).toMatchObject({ codec: "hevc", hdr: "keep" });
+    expect(planVideo(hdr10({ transfer: "hlg" }), { ...on, codec: "av1" }, all)).toMatchObject({ codec: "av1", hdr: "keep" });
+    const sdr = planVideo(probe(), { ...on, codec: "hevc" }, all);
+    expect(sdr).toMatchObject({ hdr: "none" });
+    expect((hevc as VideoPlan).bitrate).toBe(targetBitrate("hevc", "balanced", 1920, 1080, 60, true));
+    expect(targetBitrate("hevc", "balanced", 1920, 1080, 30, true)).toBeCloseTo(0.056 * 1920 * 1080 * 30 * 1.25, -1);
+  });
+
+  it("tone-maps HDR to SDR in H.264, or when the encoder writes only 8 bits", () => {
+    expect(planVideo(hdr10(), { ...on, codec: "avc" }, all)).toMatchObject({ codec: "avc", hdr: "tone-map" });
+    const eightBit = { ...all, hevcHdr: false, av1Hdr: false };
+    expect(planVideo(hdr10(), { ...on, codec: "hevc" }, eightBit)).toMatchObject({ codec: "hevc", hdr: "tone-map" });
+    const cpuOnly = { avc: true, hevc: false, av1: false, hevcHdr: false, av1Hdr: false };
+    expect(planVideo(hdr10(), { ...on, codec: "hevc" }, cpuOnly)).toMatchObject({ codec: "avc", hdr: "tone-map" });
+  });
+
+  it("takes a copy only with the colour its plan asked for", () => {
+    const source = hdr10();
+    const plan = (hdr: VideoPlan["hdr"]): VideoPlan => ({ codec: "hevc", width: 1920, height: 1080, fps: null, bitrate: 1, hdr });
+    expect(colourKept(plan("keep"), source, hdr10())).toBe(true);
+    expect(colourKept(plan("keep"), source, hdr10({ bitDepth: 8 }))).toBe(false);
+    expect(colourKept(plan("keep"), source, hdr10({ transfer: "hlg" }))).toBe(false);
+    expect(colourKept(plan("keep"), source, hdr10({ primaries: "bt709" }))).toBe(false);
+    expect(colourKept(plan("tone-map"), source, probe())).toBe(true);
+    expect(colourKept(plan("tone-map"), source, hdr10())).toBe(false);
+    expect(colourKept(plan("tone-map"), source, probe({ primaries: "bt2020" }))).toBe(false);
+    expect(colourKept(plan("none"), probe(), probe({ primaries: "" }))).toBe(true);
   });
 });
 
@@ -210,5 +270,50 @@ describe("the capture time of a transcoded MP4", () => {
     expect(back.length).toBe(file.length);
     const mdhd = back.indexOf(Buffer.from("mdhd")) + 4;
     expect(Number(back.readBigUInt64BE(mdhd + 4))).toBe(at.getTime() / 1000 + 2_082_844_800);
+  });
+});
+
+describe("the temporary folder of the lighter copies", () => {
+  it("is swept of what was left behind, keeping what work still running uses", async () => {
+    const folder = join(mkdtempSync(join(tmpdir(), "pfp-sweep-")), "pfp-compress");
+    mkdirSync(folder);
+    writeFileSync(join(folder, "drive-0123.jpg"), "decrypted original");
+    writeFileSync(join(folder, "copy.jpg"), "lighter copy");
+    const running = join(folder, "running.mp4");
+    writeFileSync(running, "being sent");
+    holdTemp(running);
+    mkdirSync(join(folder, "inner"));
+    writeFileSync(join(folder, "inner", "kept.jpg"), "not swept into");
+    expect(await sweepCompressionTemp(folder)).toBe(2);
+    expect(readdirSync(folder).sort()).toEqual(["inner", "running.mp4"]);
+    releaseTemp(running);
+    expect(await sweepCompressionTemp(folder)).toBe(1);
+    expect(readdirSync(folder)).toEqual(["inner"]);
+    expect(existsSync(join(folder, "inner", "kept.jpg"))).toBe(true);
+  });
+
+  it("never follows a link, as the folder or in it", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pfp-sweep-"));
+    const elsewhere = join(root, "elsewhere");
+    mkdirSync(elsewhere);
+    writeFileSync(join(elsewhere, "mine.jpg"), "someone's photo");
+    const linked = join(root, "pfp-compress");
+    symlinkSync(elsewhere, linked, "junction");
+    expect(await sweepCompressionTemp(linked)).toBe(0);
+    expect(existsSync(join(elsewhere, "mine.jpg"))).toBe(true);
+
+    const folder = join(root, "real", "pfp-compress");
+    mkdirSync(folder, { recursive: true });
+    symlinkSync(elsewhere, join(folder, "inside"), "junction");
+    expect(await sweepCompressionTemp(folder)).toBe(0);
+    expect(existsSync(join(elsewhere, "mine.jpg"))).toBe(true);
+  });
+
+  it("answers nothing for a folder that is not there", async () => {
+    expect(await sweepCompressionTemp(join(tmpdir(), "pfp-sweep-none", "pfp-compress"))).toBe(0);
+  });
+
+  it("is each test process's own", () => {
+    expect(compressionDir()).toBe(process.env.PFP_COMPRESS_DIR);
   });
 });

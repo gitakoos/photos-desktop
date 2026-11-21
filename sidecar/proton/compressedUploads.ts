@@ -27,7 +27,7 @@
 
 import { join } from "node:path";
 
-import { COMPRESSED_UPLOADS_FILE, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
+import { COMPRESSED_UPLOADS_FILE, readSealedOrSetAside, rethrowLocked, storeDir, writeSealedAtomic } from "./store.ts";
 
 /** Copies remembered at most; the oldest go first. */
 export const MAX_REMEMBERED = 50_000;
@@ -42,12 +42,14 @@ function load(): Map<string, string> {
   if (loaded) return loaded;
   const map = new Map<string, string>();
   try {
-    const raw = readSealedOrDiscard(path());
+    const raw = readSealedOrSetAside(path());
     const entries = raw ? JSON.parse(raw.toString("utf8")) : [];
     if (Array.isArray(entries)) {
       for (const e of entries) if (Array.isArray(e) && typeof e[0] === "string" && typeof e[1] === "string") map.set(e[0], e[1]);
     }
-  } catch {
+  } catch (e) {
+    // Locked: nothing is known yet, and nothing is kept as known.
+    rethrowLocked(e);
     /* an unreadable record is started again */
   }
   loaded = map;
@@ -61,14 +63,14 @@ export function compressedUploadOf(sourceSha1: string): string | null {
 
 /** Notes that the original with `sourceSha1` went up as the photo `uid`, as a lighter copy. */
 export function rememberCompressedUpload(sourceSha1: string, uid: string): void {
-  const map = load();
-  map.delete(sourceSha1);
-  map.set(sourceSha1, uid);
-  while (map.size > MAX_REMEMBERED) map.delete(map.keys().next().value as string);
   try {
+    const map = load();
+    map.delete(sourceSha1);
+    map.set(sourceSha1, uid);
+    while (map.size > MAX_REMEMBERED) map.delete(map.keys().next().value as string);
     writeSealedAtomic(path(), Buffer.from(JSON.stringify([...map]), "utf8"));
   } catch {
-    /* best-effort: the library's own check still runs */
+    /* best-effort, also with the store locked: the library's own check still runs */
   }
 }
 

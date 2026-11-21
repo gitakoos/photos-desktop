@@ -25,8 +25,16 @@
 //
 // Output:
 //   sidecar/build/server.mjs        the whole sidecar, bundled
+//   sidecar/build/ortWorker.mjs     the thread the ONNX models run on, bundled
 //   sidecar/build/node_modules/     sharp only (a native addon, cannot be inlined)
 //   app/src-tauri/binaries/sidecar-<triple>.exe   a copy of node.exe
+//   app/src-tauri/binaries/macos/sidecar-runtime  a copy of node, on macOS only
+//
+// Two settings serve the macOS universal build, which runs on one architecture and ships
+// both: PFP_SIDECAR_ARCHES names the architectures whose native binaries are kept
+// ("arm64,x64"; this Node's own when unset), and PFP_SIDECAR_RUNTIME the Node binary
+// copied as the runtime (this Node's own when unset). With more than one architecture,
+// sharp is copied from sidecar/node_modules, where each one's binaries must already be.
 //
 // Why ESM: openpgp's Node build calls `createRequire(import.meta.url)`, which a
 // CJS bundle cannot satisfy. Emitting ESM keeps `import.meta` real.
@@ -63,6 +71,11 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = join(here, "build");
 const binDir = join(here, "..", "app", "src-tauri", "binaries");
+const ARCHES = (process.env.PFP_SIDECAR_ARCHES || process.arch)
+  .split(",")
+  .map((a) => a.trim())
+  .filter(Boolean);
+const RUNTIME = process.env.PFP_SIDECAR_RUNTIME || process.execPath;
 
 const banner = [
   "import { createRequire as __createRequire } from 'module';",
@@ -94,6 +107,23 @@ await build({
 });
 console.log("bundled  -> build/server.mjs");
 
+// The thread the ONNX models run on (proton/ortSession.ts starts it from beside server.mjs), on its
+// own: it loads only node's modules and the runtime.
+await build({
+  absWorkingDir: here,
+  entryPoints: [join(here, "proton", "ortWorker.ts")],
+  outfile: join(outDir, "ortWorker.mjs"),
+  bundle: true,
+  platform: "node",
+  target: "node22",
+  format: "esm",
+  external: ["onnxruntime-node"],
+  banner: { js: banner },
+  legalComments: "none",
+  logLevel: "warning",
+});
+console.log("bundled  -> build/ortWorker.mjs");
+
 // sharp is the one dependency that cannot be bundled, so stage just it, with
 // its own dependency tree, beside the bundle where Node will resolve it.
 // The exact version the sidecar itself is installed with, so the build ships what was
@@ -103,9 +133,10 @@ writeFileSync(
   join(outDir, "package.json"),
   JSON.stringify({ name: "sidecar-dist", private: true, dependencies: { sharp: SHARP_VERSION } }, null, 2),
 );
-if (process.env.PFP_OFFLINE === "1") {
+if (process.env.PFP_OFFLINE === "1" || ARCHES.length > 1) {
   // The Flatpak build runs without network, so sharp is copied out of the sidecar's own
-  // installed dependencies instead of being installed a second time.
+  // installed dependencies instead of being installed a second time. A universal build
+  // takes it from there too: an install here would fetch this machine's architecture only.
   stageSharpFromDeps();
 } else {
   // `shell: true` is required on Windows: since Node 20, spawning a `.cmd` such as
@@ -153,7 +184,7 @@ function stageOnnxRuntime() {
         continue;
       }
       for (const arch of readdirSync(join(bin, napi, platform))) {
-        if (arch !== process.arch) rmSync(join(bin, napi, platform, arch), { recursive: true, force: true });
+        if (!ARCHES.includes(arch)) rmSync(join(bin, napi, platform, arch), { recursive: true, force: true });
       }
     }
   }
@@ -171,8 +202,10 @@ function stageOnnxRuntime() {
       }
     }
   }
-  const binding = join(bin, readdirSync(bin)[0], process.platform, process.arch, "onnxruntime_binding.node");
-  if (!existsSync(binding)) throw new Error("the ONNX runtime binding for this platform is missing");
+  for (const arch of ARCHES) {
+    const binding = join(bin, readdirSync(bin)[0], process.platform, arch, "onnxruntime_binding.node");
+    if (!existsSync(binding)) throw new Error(`the ONNX runtime binding for ${process.platform} ${arch} is missing`);
+  }
 }
 
 // sharp and everything it loads at run time: its dependencies, plus the optional ones
@@ -199,9 +232,11 @@ function stageSharpFromDeps() {
   for (const dir of found) {
     cpSync(dir, join(outDir, "node_modules", relative(deps, dir)), { recursive: true });
   }
-  const binding = `@img/sharp-${process.platform}-${process.arch}`;
-  if (!existsSync(join(outDir, "node_modules", binding, "package.json"))) {
-    throw new Error(`${binding} is not installed in sidecar/node_modules`);
+  for (const arch of ARCHES) {
+    const binding = `@img/sharp-${process.platform}-${arch}`;
+    if (!existsSync(join(outDir, "node_modules", binding, "package.json"))) {
+      throw new Error(`${binding} is not installed in sidecar/node_modules`);
+    }
   }
 }
 
@@ -242,5 +277,15 @@ const triple = execFileSync("rustc", ["-vV"], { encoding: "utf8" })
 
 mkdirSync(binDir, { recursive: true });
 const target = join(binDir, `sidecar-${triple}${process.platform === "win32" ? ".exe" : ""}`);
-copyFileSync(process.execPath, target);
-console.log(`runtime  -> binaries/sidecar-${triple} (node ${process.version})`);
+copyFileSync(RUNTIME, target);
+console.log(`runtime  -> binaries/sidecar-${triple} (${RUNTIME === process.execPath ? `node ${process.version}` : RUNTIME})`);
+
+// A macOS bundle keeps the runtime in Contents/Resources, where the host looks for it,
+// not in Contents/MacOS where Tauri puts an externalBin. tauri.macos.conf.json lists this
+// copy as a resource instead.
+if (process.platform === "darwin") {
+  const macDir = join(binDir, "macos");
+  mkdirSync(macDir, { recursive: true });
+  copyFileSync(RUNTIME, join(macDir, "sidecar-runtime"));
+  console.log("runtime  -> binaries/macos/sidecar-runtime");
+}

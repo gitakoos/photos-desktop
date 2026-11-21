@@ -29,7 +29,8 @@ import { SelectionBar } from "../hooks/useSelection";
 import { formatBytes, locale } from "../lib/format";
 import { useT } from "../lib/i18n";
 import { rpc } from "../lib/rpc";
-import { canMark, picksFrom, toggleMark, type Marks } from "../lib/duplicateMarks";
+import { canMark, toggleMark, type Marks } from "../lib/duplicateMarks";
+import { allBut, markEvery, marksWithout, planTrashCalls, plannedCount, unmarkedBulkGroups, type TrashCall } from "../lib/duplicateBulk";
 import "../styles/Duplicates.css";
 
 type Kind = "identical" | "similar";
@@ -43,6 +44,20 @@ type Tab = "identical" | "similar" | "ignored";
 /** Groups drawn at first, and added with each "show more". */
 const PAGE = 40;
 const META_BATCH = 120;
+/**
+ * About how many photos one call sends to the trash, so a large clean-up never runs into a
+ * call's time limit (the SDK trashes ten per request).
+ */
+const TRASH_CHUNK = 200;
+
+/** How far a move to the trash has got. Kept outside the page, which may be left while it runs. */
+type Moving = { done: number; total: number } | null;
+let keptMoving: Moving = null;
+const movingListeners = new Set<(m: Moving) => void>();
+function publishMoving(m: Moving) {
+  keptMoving = m;
+  movingListeners.forEach((l) => l(m));
+}
 
 // The choices outlive the page, so a look at a group in the viewer and back keeps them.
 let keptMarks: Marks = new Map();
@@ -71,6 +86,16 @@ export function Duplicates({
   const [meta, setMeta] = useState<Record<string, Meta>>({});
   const [confirm, setConfirm] = useState<{ whole: Group | null } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [moving, setMoving] = useState<Moving>(keptMoving);
+  useEffect(() => {
+    movingListeners.add(setMoving);
+    setMoving(keptMoving);
+    return () => {
+      movingListeners.delete(setMoving);
+    };
+  }, []);
+  // A move started before the page was left and opened again still holds the buttons.
+  const working = busy || moving !== null;
   const [toast, setToast] = useState("");
 
   const setTab = (next: Tab) => {
@@ -169,14 +194,24 @@ export function Duplicates({
   }, [toast]);
 
   const allGroups = useMemo(() => (groups ? [...groups.identical, ...groups.similar] : []), [groups]);
-  const markedCount = [...marks.values()].reduce((n, s) => n + s.size, 0);
-  const markedBytes = [...marks.values()].reduce(
-    (n, s) => n + [...s].reduce((m, u) => m + (meta[u]?.size ?? 0), 0),
-    0,
-  );
+  // Marked across every group, most were never on screen and their sizes are not known.
+  const { markedCount, markedBytes, sizesKnown } = useMemo(() => {
+    let count = 0;
+    let bytes = 0;
+    let known = true;
+    for (const set of marks.values()) {
+      for (const u of set) {
+        count++;
+        const size = meta[u]?.size;
+        if (size == null) known = false;
+        else bytes += size;
+      }
+    }
+    return { markedCount: count, markedBytes: bytes, sizesKnown: known };
+  }, [marks, meta]);
 
   function onTile(group: Group, uid: string) {
-    if (tab === "ignored") return;
+    if (tab === "ignored" || working) return;
     if (!canMark(marks, group, uid)) {
       setToast(t("duplicates.lastCopy"));
       return;
@@ -185,12 +220,20 @@ export function Duplicates({
   }
 
   function allButFirst(group: Group) {
+    if (working) return;
     const next: Marks = new Map(marks);
-    next.set(group.key, new Set(group.uids.slice(1)));
+    next.set(group.key, allBut(group));
     setMarks(next);
   }
 
+  /** Marks the extras of every group in the tab that may be marked at once (duplicateBulk.ts). */
+  function markEveryInTab() {
+    if (working) return;
+    setMarks(markEvery(marks, list));
+  }
+
   async function ignore(group: Group, on: boolean) {
+    if (working) return;
     const next: Marks = new Map(marks);
     next.delete(group.key);
     setMarks(next);
@@ -205,16 +248,31 @@ export function Duplicates({
   async function trash(whole: Group | null) {
     setConfirm(null);
     setBusy(true);
+    // Whole groups per call, about TRASH_CHUNK photos each, every call's photos leaving the
+    // timeline as it is done.
+    const calls: TrashCall[] = whole
+      ? [{ keys: [whole.key], groups: [], whole: [whole.uids] }]
+      : planTrashCalls(marks, allGroups, TRASH_CHUNK);
+    const total = calls.reduce((n, c) => n + plannedCount(c), 0);
+    const r = { trashed: [] as string[], failed: 0, skipped: 0 };
+    let done = 0;
+    const sent: string[] = [];
     try {
-      const params = whole
-        ? { groups: [], whole: [whole.uids] }
-        : { groups: picksFrom(marks, allGroups), whole: [] };
-      const r = await rpc<{ trashed: string[]; failed: number; skipped: number }>("duplicatesTrash", params);
-      onTrashed(r.trashed);
-      const next: Marks = new Map(marks);
-      if (whole) next.delete(whole.key);
-      else next.clear();
-      setMarks(next);
+      publishMoving({ done, total });
+      for (const params of calls) {
+        const part = await rpc<{ trashed: string[]; failed: number; skipped: number }>("duplicatesTrash", {
+          groups: params.groups,
+          whole: params.whole,
+        });
+        onTrashed(part.trashed);
+        r.trashed.push(...part.trashed);
+        r.failed += part.failed;
+        r.skipped += part.skipped;
+        sent.push(...params.keys);
+        // By what each call was planned to take: one it skipped (changed meanwhile) is done with too.
+        done += plannedCount(params);
+        publishMoving({ done, total });
+      }
       setToast(
         r.failed > 0
           ? t("trash.movedPartial", { ok: r.trashed.length, failed: r.failed })
@@ -222,14 +280,18 @@ export function Duplicates({
             ? t("duplicates.changed")
             : t("trash.moved", { count: r.trashed.length }),
       );
+    } catch {
+      // The calls before the one that failed did move their photos; the rest stay marked.
+      setToast(t("trash.movedPartial", { ok: r.trashed.length, failed: r.failed + total - done }));
+    } finally {
+      // Read as they stand now: the page may have been left and opened again meanwhile.
+      setMarks(marksWithout(keptMarks, sent));
+      publishMoving(null);
       const s = await rpc<Status>("duplicatesStatus").catch(() => null);
       if (s) {
         setStatus(s);
         await loadGroups(s.version);
       }
-    } catch (e) {
-      setToast(String(e));
-    } finally {
       setBusy(false);
     }
   }
@@ -241,6 +303,7 @@ export function Duplicates({
     ignored: groups?.ignored.length ?? 0,
   };
   const hint = tab === "identical" ? "duplicates.identicalHint" : tab === "similar" ? "duplicates.similarHint" : "duplicates.ignoredHint";
+  const markable = unmarkedBulkGroups(marks, list).length;
 
   return (
     <div className="dp-page">
@@ -260,7 +323,19 @@ export function Duplicates({
           ))}
         </div>
         <div className="dp-status" aria-live="polite">
-          {scanning && status ? (
+          {moving ? (
+            <>
+              <span>
+                {t("duplicates.moving", {
+                  done: moving.done.toLocaleString(locale),
+                  total: moving.total.toLocaleString(locale),
+                })}
+              </span>
+              <span className="dp-bar">
+                <span style={{ width: `${moving.total ? Math.round((moving.done / moving.total) * 100) : 0}%` }} />
+              </span>
+            </>
+          ) : scanning && status ? (
             <>
               <span>
                 {status.total > 0
@@ -282,7 +357,16 @@ export function Duplicates({
             <span>{t(hint)}</span>
           )}
         </div>
-        {tab !== "ignored" && list.length > 0 && <p className="dp-hint">{t("duplicates.pickHint")}</p>}
+        {tab !== "ignored" && list.length > 0 && (
+          <p className="dp-hint">
+            {t("duplicates.pickHint")}
+            {markable > 1 && (
+              <button className="g-chip dp-markall" disabled={working} onClick={markEveryInTab}>
+                {t("duplicates.markEvery", { count: markable.toLocaleString(locale) })}
+              </button>
+            )}
+          </p>
+        )}
       </div>
 
       {!groups?.ready ? (
@@ -311,18 +395,18 @@ export function Duplicates({
                   <div className="g-spacer" />
                   {tab !== "ignored" ? (
                     <>
-                      <button className="g-chip" onClick={() => allButFirst(group)}>
+                      <button className="g-chip" disabled={working} onClick={() => allButFirst(group)}>
                         {t("duplicates.allButFirst")}
                       </button>
-                      <button className="g-chip" onClick={() => void ignore(group, true)}>
+                      <button className="g-chip" disabled={working} onClick={() => void ignore(group, true)}>
                         {t("duplicates.ignore")}
                       </button>
-                      <button className="g-chip danger" disabled={busy} onClick={() => setConfirm({ whole: group })}>
+                      <button className="g-chip danger" disabled={working} onClick={() => setConfirm({ whole: group })}>
                         {t("duplicates.deleteGroup")}
                       </button>
                     </>
                   ) : (
-                    <button className="g-chip" onClick={() => void ignore(group, false)}>
+                    <button className="g-chip" disabled={working} onClick={() => void ignore(group, false)}>
                       {t("duplicates.unignore")}
                     </button>
                   )}
@@ -379,8 +463,10 @@ export function Duplicates({
       {tab !== "ignored" && (
         <SelectionBar
           count={markedCount}
-          busy={busy}
-          onCancel={() => setMarks(new Map())}
+          busy={working}
+          onCancel={() => {
+            if (!working) setMarks(new Map());
+          }}
           onTrash={() => setConfirm({ whole: null })}
         />
       )}
@@ -391,7 +477,12 @@ export function Duplicates({
           message={
             confirm.whole
               ? t("duplicates.confirmWholeMessage")
-              : t("duplicates.confirmMessage", { count: markedCount, size: formatBytes(markedBytes) })
+              : sizesKnown
+                ? t("duplicates.confirmMessage", { count: markedCount, size: formatBytes(markedBytes) })
+                : t("duplicates.confirmMessageCount", {
+                    count: markedCount.toLocaleString(locale),
+                    groups: marks.size.toLocaleString(locale),
+                  })
           }
           confirmLabel={t("selection.trash")}
           danger

@@ -112,6 +112,99 @@ pub fn pass_targets<'a>(
         .collect()
 }
 
+/// Whether the pass downloads a photo: its timeline copy holds no data here, and for new photos
+/// only, no other copy does either. A new photo put into an album folder in Explorer is on this
+/// PC already, so a second copy in `Photos\` would only take the space twice.
+pub fn needs_download(mode: Mode, timeline_cloud_only: bool, any_copy_local: bool) -> bool {
+    timeline_cloud_only && !(mode == Mode::New && any_copy_local)
+}
+
+/// The arrivals a fill found that the user did not free in this session.
+pub fn fresh_arrivals(uids: &[String], freed_now: &HashSet<String>) -> Vec<String> {
+    uids.iter().filter(|uid| !freed_now.contains(*uid)).cloned().collect()
+}
+
+/// Takes the photos the user freed off the pass's lists, so it does not download them again.
+/// Every photo kept: they join the freed list and leave the kept one. New photos only: they
+/// leave the arrivals still waiting. Returns which lists changed, as (freed, kept, pending).
+pub fn after_free(
+    mode: Mode,
+    uids: &[String],
+    freed: &mut HashSet<String>,
+    kept: &mut HashSet<String>,
+    pending: &mut HashSet<String>,
+) -> (bool, bool, bool) {
+    match mode {
+        Mode::All => {
+            let freed_before = freed.len();
+            freed.extend(uids.iter().cloned());
+            let kept_before = kept.len();
+            for uid in uids {
+                kept.remove(uid);
+            }
+            (freed.len() != freed_before, kept.len() != kept_before, false)
+        }
+        Mode::New => {
+            let before = pending.len();
+            for uid in uids {
+                pending.remove(uid);
+            }
+            (false, false, pending.len() != before)
+        }
+        Mode::Off => (false, false, false),
+    }
+}
+
+/// Which copy of a photo was freed: its own in `Photos\`, or one in an album or another folder
+/// beside the timeline.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FreedCopy {
+    Timeline,
+    Album,
+}
+
+/// The kind of copy at `rel`, given the photo's timeline copy.
+pub fn freed_copy(rel: &str, timeline: Option<&str>) -> FreedCopy {
+    if timeline.is_some_and(|t| t.eq_ignore_ascii_case(rel)) {
+        FreedCopy::Timeline
+    } else {
+        FreedCopy::Album
+    }
+}
+
+/// Whether freeing this copy takes its photo off the pass's lists. The timeline copy is the
+/// photo itself. Another copy counts only for new photos only, where downloading the photo
+/// into `Photos\` would bring back what was just freed; a pass that keeps every photo keeps
+/// the timeline copy as before.
+pub fn free_counts(mode: Mode, copy: FreedCopy) -> bool {
+    copy == FreedCopy::Timeline || mode == Mode::New
+}
+
+/// What the provider does with a dehydration Windows asks it about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OsFree {
+    /// The app's own Free up, which records what it freed itself.
+    Pass,
+    /// Freed by Windows: allowed, and recorded like the app's Free up.
+    Record,
+    Refuse,
+}
+
+/// While every photo is kept, only the user frees a copy, with the app's Free up or Explorer's
+/// "Free up space" (`unpinned`), never Windows by itself. Anything freed otherwise is recorded,
+/// so the pass does not download it again whether it is running, paused or off. A copy the
+/// folder's index does not list (`listed`), such as the one left of a photo deleted from Drive
+/// for good, may be the only one there is, and nothing but the app frees it.
+pub fn os_free(mode: Mode, ours: bool, listed: bool, unpinned: bool) -> OsFree {
+    if ours {
+        OsFree::Pass
+    } else if !listed || (mode == Mode::All && !unpinned) {
+        OsFree::Refuse
+    } else {
+        OsFree::Record
+    }
+}
+
 /// What to do with the copies whose photos left the listing, from Drive's answer for each.
 #[derive(Default, Debug, PartialEq)]
 pub struct Release {
@@ -125,8 +218,11 @@ pub struct Release {
 
 /// Decides from each photo's fate ("trashed", "gone", "hidden", "present", "unknown").
 ///
-/// A hidden photo's copy goes whatever the mode and whoever downloaded it, because a copy in
-/// the plain folder is outside the lock that guards it. A trashed one goes only while every
+/// "hidden" is the sidecar's answer for a hidden photo Drive still has: its copy goes whatever
+/// the mode and whoever downloaded it, because a copy in the plain folder is outside the lock
+/// that guards it, and the photo is still behind that lock. A hidden photo in the trash or
+/// deleted for good is answered "trashed" or "gone" and decided as any photo, so the only copy
+/// left of one stays as the user's own. A trashed one goes only while every
 /// photo is kept and only when this mode downloaded it: the photo is still in the Proton trash,
 /// so nothing is lost, and restoring it brings it back. Anything else stays.
 pub fn release_decision(
@@ -151,6 +247,89 @@ pub fn release_decision(
         out.let_go.extend(trashed);
     }
     out
+}
+
+/// The full uid of a downloaded copy in `Photos\` that matches a hidden photo, for Drive to be
+/// asked about it before the copy goes. `tail` is the end of the uid the copy carries, `hidden`
+/// the matching entry of the hidden list (a full uid, or a bare link id), and `listed` the uids
+/// of this fill, which share the volume of the user's photos. None when it cannot be told, and
+/// the copy then stays.
+pub fn hidden_copy_uid<'a>(tail: &str, hidden: &str, listed: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    if hidden.contains('~') {
+        return Some(hidden.to_string());
+    }
+    let (volume_end, link) = tail.rsplit_once('~')?;
+    if link.is_empty() || volume_end.is_empty() || link != hidden {
+        return None;
+    }
+    listed
+        .into_iter()
+        .filter_map(|u| u.rsplit_once('~').map(|(volume, _)| volume))
+        .find(|volume| volume.ends_with(volume_end))
+        .map(|volume| format!("{volume}~{link}"))
+}
+
+/// What a photo deleted in Explorer whose delete did not reach the Proton trash needs next.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Untrashed {
+    /// Nothing more: it is in the trash or gone, or back in the library after the trash was
+    /// asked for it once more, which is a restore and stands.
+    Done,
+    /// Ask the trash for it once more.
+    Ask,
+    /// Drive did not answer for it: asked about again on the next round.
+    Wait,
+}
+
+/// Decides from Drive's answer for the photo ("trashed", "gone", "hidden", "present",
+/// "unknown") and whether the trash was asked again for it once already.
+pub fn untrashed_step(fate: Option<&str>, asked: bool) -> Untrashed {
+    match fate {
+        Some("trashed" | "gone") => Untrashed::Done,
+        Some("present" | "hidden") if asked => Untrashed::Done,
+        Some("present" | "hidden") => Untrashed::Ask,
+        _ => Untrashed::Wait,
+    }
+}
+
+/// The photos `trashPhotos` answered as now in the trash: its answer is one entry per photo.
+pub fn trashed_uids(answer: &serde_json::Value) -> HashSet<String> {
+    answer
+        .as_array()
+        .map(|results| {
+            results
+                .iter()
+                .filter(|r| r.get("ok").and_then(|v| v.as_bool()) == Some(true))
+                .filter_map(|r| r.get("uid").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The marker on a line of the untrashed list for a photo the trash has not been asked about
+/// again yet.
+const NOT_ASKED: &str = " new";
+
+/// The untrashed list, uid to whether the trash was asked again for it once already. A bare uid
+/// was asked, which is also what the builds before wrote, after asking the trash again on every
+/// round.
+pub fn parse_untrashed(text: &str) -> HashMap<String, bool> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| match l.strip_suffix(NOT_ASKED) {
+            Some(uid) => (uid.trim().to_string(), false),
+            None => (l.to_string(), true),
+        })
+        .filter(|(uid, _)| !uid.is_empty())
+        .collect()
+}
+
+pub fn join_untrashed(list: &HashMap<String, bool>) -> String {
+    let mut lines: Vec<String> =
+        list.iter().map(|(uid, asked)| if *asked { uid.clone() } else { format!("{uid}{NOT_ASKED}") }).collect();
+    lines.sort_unstable();
+    lines.join("\n")
 }
 
 /// One uid per line, blank lines skipped.
@@ -220,7 +399,12 @@ mod win {
         freed: HashSet<String>,
         pending: HashSet<String>,
         held: HashSet<String>,
-        untrashed: HashSet<String>,
+        /// Photos deleted in Explorer whose delete did not reach the trash, to whether the trash
+        /// was asked again for them once already.
+        untrashed: HashMap<String, bool>,
+        /// Photos the user freed in this session, kept in memory only. A fill that was already
+        /// listing when the user freed space can name one of them as new after the free up ran.
+        freed_now: HashSet<String>,
     }
 
     fn state() -> &'static Mutex<State> {
@@ -273,7 +457,11 @@ mod win {
             st.freed = read_list(app, FREED_FILE);
             st.pending = read_list(app, PENDING_FILE);
             st.held = read_list(app, HELD_FILE);
-            st.untrashed = read_list(app, UNTRASHED_FILE);
+            st.untrashed = crate::secure_store::read_sealed(app, UNTRASHED_FILE)
+                .ok()
+                .flatten()
+                .map(|t| parse_untrashed(&t))
+                .unwrap_or_default();
             st.loaded = true;
         }
         st
@@ -281,11 +469,6 @@ mod win {
 
     pub fn mode(app: &AppHandle) -> Mode {
         loaded(app).mode.unwrap_or(Mode::Off)
-    }
-
-    /// Whether the user asked for every photo on this PC.
-    pub fn keeps_all(app: &AppHandle) -> bool {
-        mode(app) == Mode::All
     }
 
     pub fn set_mode(app: &AppHandle, next: Mode) {
@@ -311,28 +494,59 @@ mod win {
         *WAITING.lock().unwrap() = None;
     }
 
+    /// Stops a pass that is running at its next photo, without forgetting anything.
+    pub fn interrupt() {
+        GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Photos that arrived since the last fill, for "New photos only".
     pub fn add_arrivals(app: &AppHandle, uids: &[String]) {
         if uids.is_empty() || mode(app) != Mode::New {
             return;
         }
         let mut st = loaded(app);
-        st.pending.extend(uids.iter().cloned());
+        let fresh = fresh_arrivals(uids, &st.freed_now);
+        if fresh.is_empty() {
+            return;
+        }
+        st.pending.extend(fresh);
         write_list(app, PENDING_FILE, &st.pending);
     }
 
     /// The user freed these: the pass leaves them in the cloud from now on.
     pub fn note_freed(app: &AppHandle, uids: &[String]) {
-        let mut st = loaded(app);
-        if st.mode != Some(Mode::All) || uids.is_empty() {
+        if uids.is_empty() {
             return;
         }
-        st.freed.extend(uids.iter().cloned());
-        for uid in uids {
-            st.kept.remove(uid);
+        let mut st = loaded(app);
+        let st = &mut *st;
+        st.freed_now.extend(uids.iter().cloned());
+        let mode = st.mode.unwrap_or(Mode::Off);
+        let (freed, kept, pending) = after_free(mode, uids, &mut st.freed, &mut st.kept, &mut st.pending);
+        if freed {
+            write_list(app, FREED_FILE, &st.freed);
         }
-        write_list(app, FREED_FILE, &st.freed);
-        write_list(app, KEPT_FILE, &st.kept);
+        if kept {
+            write_list(app, KEPT_FILE, &st.kept);
+        }
+        if pending {
+            write_list(app, PENDING_FILE, &st.pending);
+        }
+    }
+
+    /// An album's copies were freed: the arrivals among its photos are not downloaded into
+    /// `Photos\` either. The photo's own timeline copy is not touched by that, so a pass that
+    /// keeps every photo keeps it as before.
+    pub fn note_album_freed(app: &AppHandle, uids: &[String]) {
+        note_copy_freed(app, uids, FreedCopy::Album);
+    }
+
+    /// Copies of one kind that were freed, recorded the way the app's Free up records them.
+    pub fn note_copy_freed(app: &AppHandle, uids: &[String], copy: FreedCopy) {
+        if uids.is_empty() || !free_counts(mode(app), copy) {
+            return;
+        }
+        note_freed(app, uids);
     }
 
     /// The user downloaded these again, so the pass may keep them.
@@ -348,9 +562,16 @@ mod win {
     }
 
     /// Everything was freed up: keeping every photo would only download it all again.
-    pub fn freed_everything(app: &AppHandle) {
+    pub fn freed_everything(app: &AppHandle, uids: &[String]) {
         if mode(app) == Mode::All {
             set_mode(app, Mode::New);
+        }
+        // The arrivals still waiting were freed with the rest.
+        let mut st = loaded(app);
+        st.freed_now.extend(uids.iter().cloned());
+        if !st.pending.is_empty() {
+            st.pending.clear();
+            write_list(app, PENDING_FILE, &st.pending);
         }
     }
 
@@ -358,9 +579,13 @@ mod win {
     /// again, and the trash is asked once more on the next round.
     pub fn note_untrashed(app: &AppHandle, uid: &str) {
         let mut st = loaded(app);
-        if st.untrashed.insert(uid.to_string()) {
-            write_list(app, UNTRASHED_FILE, &st.untrashed);
+        if st.untrashed.insert(uid.to_string(), false) != Some(false) {
+            write_untrashed(app, &st.untrashed);
         }
+    }
+
+    fn write_untrashed(app: &AppHandle, list: &HashMap<String, bool>) {
+        let _ = crate::secure_store::write_sealed(app, UNTRASHED_FILE, &join_untrashed(list));
     }
 
     pub fn kept(app: &AppHandle) -> HashSet<String> {
@@ -512,7 +737,10 @@ mod win {
 
     /// One round: ask the trash again for what Explorer could not put there, then download.
     fn round(app: &AppHandle) {
-        if !crate::cloud_mount::show_in_explorer_enabled() || crate::cloud_mount::detaching() {
+        if !crate::cloud_mount::show_in_explorer_enabled()
+            || crate::cloud_mount::detaching()
+            || !crate::cloud_mount::sync_root_available()
+        {
             return;
         }
         let generation = GENERATION.load(Ordering::SeqCst);
@@ -537,9 +765,14 @@ mod win {
             Mode::All => crate::cloud_mount::timeline_uids(),
             _ => loaded(app).pending.iter().cloned().collect(),
         };
+        let downloads = |uid: &str| {
+            let local_elsewhere = mode == Mode::New && crate::cloud_mount::any_copy_local(uid);
+            needs_download(mode, crate::cloud_mount::is_cloud_only(uid), local_elsewhere)
+        };
         let targets = {
             let st = loaded(app);
-            pass_targets(candidates.iter().map(String::as_str), crate::cloud_mount::is_cloud_only, &st.freed, &st.untrashed)
+            let untrashed: HashSet<String> = st.untrashed.keys().cloned().collect();
+            pass_targets(candidates.iter().map(String::as_str), downloads, &st.freed, &untrashed)
         };
         if mode == Mode::New {
             // An arrival that is local already, or gone from the folder, needs nothing more.
@@ -567,7 +800,8 @@ mod win {
                 || PAUSED.load(Ordering::SeqCst)
                 || self::mode(app) != mode
                 || crate::cloud_mount::detaching()
-                || !crate::cloud_mount::show_in_explorer_enabled();
+                || !crate::cloud_mount::show_in_explorer_enabled()
+                || !crate::cloud_mount::sync_root_available();
             if stop {
                 break;
             }
@@ -611,22 +845,62 @@ mod win {
         publish(app);
     }
 
+    /// Asks Drive about each photo deleted in Explorer whose delete did not reach the trash,
+    /// and asks the trash once more for the ones still in the library. A photo back in the
+    /// library after that one more try was restored, and is not deleted again.
     fn retry_untrashed(app: &AppHandle) {
-        let uids: Vec<String> = loaded(app).untrashed.iter().cloned().collect();
-        if uids.is_empty() {
+        let list: Vec<(String, bool)> = loaded(app).untrashed.iter().map(|(u, a)| (u.clone(), *a)).collect();
+        if list.is_empty() {
             return;
         }
-        let trashed = crate::sidecar_rpc(app, "trashPhotos", serde_json::json!({ "uids": uids }))
-            .ok()
-            .and_then(|r| r.get("ok").and_then(|v| v.as_bool()))
-            .unwrap_or(false);
-        if trashed {
-            let mut st = loaded(app);
-            for uid in &uids {
+        let uids: Vec<&String> = list.iter().map(|(uid, _)| uid).collect();
+        let Ok(answer) = crate::sidecar_rpc(app, "mountFates", serde_json::json!({ "uids": uids })) else {
+            return;
+        };
+        let fates: HashMap<String, String> = serde_json::from_value(answer).unwrap_or_default();
+        let mut done: Vec<(String, bool)> = Vec::new();
+        let mut ask: Vec<String> = Vec::new();
+        for (uid, asked) in &list {
+            match untrashed_step(fates.get(uid).map(String::as_str), *asked) {
+                Untrashed::Done => done.push((uid.clone(), *asked)),
+                Untrashed::Ask => ask.push(uid.clone()),
+                Untrashed::Wait => {}
+            }
+        }
+        let mut asked_now: Vec<String> = Vec::new();
+        let mut reached = 0usize;
+        if !ask.is_empty() {
+            if let Ok(answer) = crate::sidecar_rpc(app, "trashPhotos", serde_json::json!({ "uids": ask })) {
+                let took = trashed_uids(&answer);
+                for uid in ask {
+                    if took.contains(&uid) {
+                        reached += 1;
+                        done.push((uid, false));
+                    } else {
+                        asked_now.push(uid);
+                    }
+                }
+            }
+        }
+        if done.is_empty() && asked_now.is_empty() {
+            return;
+        }
+        let mut st = loaded(app);
+        // A photo deleted in Explorer again meanwhile is a new delete, and stays as it was noted.
+        for (uid, asked) in &done {
+            if st.untrashed.get(uid) == Some(asked) {
                 st.untrashed.remove(uid);
             }
-            write_list(app, UNTRASHED_FILE, &st.untrashed);
-            crate::note(app, &format!("[keep] {} photos deleted in Explorer reached the trash", uids.len()));
+        }
+        for uid in &asked_now {
+            if st.untrashed.get(uid) == Some(&false) {
+                st.untrashed.insert(uid.clone(), true);
+            }
+        }
+        write_untrashed(app, &st.untrashed);
+        drop(st);
+        if reached > 0 {
+            crate::note(app, &format!("[keep] {reached} photos deleted in Explorer reached the trash"));
         }
     }
 }
@@ -690,6 +964,125 @@ mod tests {
     }
 
     #[test]
+    fn freeing_new_photos_takes_them_off_the_waiting_arrivals() {
+        let (mut freed, mut kept, mut pending) = (set(&[]), set(&["k"]), set(&["a", "b", "c"]));
+        let changed = after_free(Mode::New, &uids(&["a", "c", "x"]), &mut freed, &mut kept, &mut pending);
+        assert_eq!(changed, (false, false, true));
+        assert_eq!(pending, set(&["b"]));
+        assert!(freed.is_empty());
+        assert_eq!(kept, set(&["k"]));
+    }
+
+    #[test]
+    fn freeing_with_every_photo_kept_moves_them_to_the_freed_list() {
+        let (mut freed, mut kept, mut pending) = (set(&["f"]), set(&["a", "k"]), set(&[]));
+        let changed = after_free(Mode::All, &uids(&["a", "b"]), &mut freed, &mut kept, &mut pending);
+        assert_eq!(changed, (true, true, false));
+        assert_eq!(freed, set(&["f", "a", "b"]));
+        assert_eq!(kept, set(&["k"]));
+    }
+
+    #[test]
+    fn freeing_with_nothing_kept_changes_no_list() {
+        let (mut freed, mut kept, mut pending) = (set(&[]), set(&["k"]), set(&["a"]));
+        let changed = after_free(Mode::Off, &uids(&["a", "k"]), &mut freed, &mut kept, &mut pending);
+        assert_eq!(changed, (false, false, false));
+        assert_eq!(pending, set(&["a"]));
+        assert_eq!(kept, set(&["k"]));
+    }
+
+    #[test]
+    fn freeing_photos_not_on_any_list_changes_nothing() {
+        let (mut freed, mut kept, mut pending) = (set(&[]), set(&[]), set(&["a"]));
+        assert_eq!(after_free(Mode::New, &uids(&["z"]), &mut freed, &mut kept, &mut pending), (false, false, false));
+    }
+
+    #[test]
+    fn a_photo_freed_while_a_fill_ran_is_not_an_arrival() {
+        let arrivals = fresh_arrivals(&uids(&["a", "b", "c"]), &set(&["b"]));
+        assert_eq!(arrivals, uids(&["a", "c"]));
+        assert!(fresh_arrivals(&uids(&["b"]), &set(&["b"])).is_empty());
+    }
+
+    #[test]
+    fn a_new_photo_with_a_local_album_copy_is_not_downloaded_again() {
+        assert!(needs_download(Mode::New, true, false));
+        assert!(!needs_download(Mode::New, true, true));
+        assert!(!needs_download(Mode::New, false, true));
+        // Keeping every photo still fills the timeline copy itself.
+        assert!(needs_download(Mode::All, true, true));
+        assert!(!needs_download(Mode::All, false, true));
+    }
+
+    #[test]
+    fn windows_frees_by_itself_only_while_not_every_photo_is_kept() {
+        assert_eq!(os_free(Mode::All, false, true, false), OsFree::Refuse);
+        assert_eq!(os_free(Mode::New, false, true, false), OsFree::Record);
+        assert_eq!(os_free(Mode::Off, false, true, false), OsFree::Record);
+        for mode in [Mode::Off, Mode::New, Mode::All] {
+            assert_eq!(os_free(mode, true, true, false), OsFree::Pass);
+            assert_eq!(os_free(mode, true, true, true), OsFree::Pass);
+        }
+    }
+
+    #[test]
+    fn a_copy_the_index_does_not_list_is_freed_only_by_the_app() {
+        for mode in [Mode::Off, Mode::New, Mode::All] {
+            assert_eq!(os_free(mode, false, false, false), OsFree::Refuse);
+            assert_eq!(os_free(mode, false, false, true), OsFree::Refuse);
+            assert_eq!(os_free(mode, true, false, true), OsFree::Pass);
+        }
+    }
+
+    #[test]
+    fn explorers_free_up_space_frees_even_with_every_photo_kept() {
+        for mode in [Mode::Off, Mode::New, Mode::All] {
+            assert_eq!(os_free(mode, false, true, true), OsFree::Record);
+        }
+    }
+
+    #[test]
+    fn a_photo_freed_with_every_photo_kept_stays_in_the_cloud() {
+        let (mut freed, mut kept, mut pending) = (set(&[]), set(&["a", "b"]), set(&[]));
+        assert!(free_counts(Mode::All, freed_copy("Photos\\a.jpg", Some("Photos\\a.jpg"))));
+        after_free(Mode::All, &uids(&["a"]), &mut freed, &mut kept, &mut pending);
+        let targets = pass_targets(["a", "b"], |_| true, &freed, &set(&[]));
+        assert_eq!(targets, uids(&["b"]));
+    }
+
+    #[test]
+    fn only_the_timeline_copy_is_the_photo_itself() {
+        let timeline = Some("Photos\\IMG_1.jpg");
+        assert_eq!(freed_copy("Photos\\IMG_1.jpg", timeline), FreedCopy::Timeline);
+        assert_eq!(freed_copy("photos\\img_1.JPG", timeline), FreedCopy::Timeline);
+        assert_eq!(freed_copy("Albums\\Summer\\IMG_1.jpg", timeline), FreedCopy::Album);
+        assert_eq!(freed_copy("Photos\\Favorites\\IMG_1.jpg", timeline), FreedCopy::Album);
+        assert_eq!(freed_copy("Albums\\Summer\\IMG_1.jpg", None), FreedCopy::Album);
+    }
+
+    #[test]
+    fn an_album_copy_freed_counts_only_for_new_photos() {
+        for mode in [Mode::Off, Mode::New, Mode::All] {
+            assert!(free_counts(mode, FreedCopy::Timeline));
+        }
+        assert!(free_counts(Mode::New, FreedCopy::Album));
+        assert!(!free_counts(Mode::All, FreedCopy::Album));
+        assert!(!free_counts(Mode::Off, FreedCopy::Album));
+    }
+
+    #[test]
+    fn a_new_photo_windows_freed_is_not_downloaded_when_the_pass_resumes() {
+        // The pass was paused, so nothing trimmed the arrivals before Windows freed one.
+        let (mut freed, mut kept, mut pending) = (set(&[]), set(&[]), set(&["a", "b"]));
+        assert_eq!(os_free(Mode::New, false, true, false), OsFree::Record);
+        assert!(free_counts(Mode::New, freed_copy("Albums\\Trip\\a.jpg", Some("Photos\\a.jpg"))));
+        after_free(Mode::New, &uids(&["a"]), &mut freed, &mut kept, &mut pending);
+        let candidates: Vec<&str> = pending.iter().map(String::as_str).collect();
+        let targets = pass_targets(candidates, |_| true, &freed, &set(&[]));
+        assert_eq!(targets, uids(&["b"]));
+    }
+
+    #[test]
     fn a_photo_missing_from_the_listing_alone_is_never_let_go_of() {
         let kept = set(&["a", "b"]);
         let out = release_decision(&uids(&["a", "b"]), &fates(&[("a", "unknown"), ("b", "present")]), &kept, Mode::All);
@@ -706,11 +1099,56 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_photo_leaves_the_plain_folder_in_every_mode() {
+    fn a_hidden_photo_still_on_drive_leaves_the_plain_folder_in_every_mode() {
+        // "hidden" is answered only once Drive said the photo is still there.
         let f = fates(&[("h", "hidden")]);
         for mode in [Mode::Off, Mode::New, Mode::All] {
             assert_eq!(release_decision(&uids(&["h"]), &f, &HashSet::new(), mode).let_go, uids(&["h"]));
         }
+    }
+
+    #[test]
+    fn a_hidden_photo_deleted_for_good_keeps_its_only_copy() {
+        // Hidden and gone is answered "gone": the copy stays, kept or downloaded by hand alike.
+        let f = fates(&[("h", "gone")]);
+        for mode in [Mode::Off, Mode::New, Mode::All] {
+            let kept = release_decision(&uids(&["h"]), &f, &set(&["h"]), mode);
+            assert!(kept.let_go.is_empty());
+            assert_eq!(kept.forget, uids(&["h"]));
+            let by_hand = release_decision(&uids(&["h"]), &f, &HashSet::new(), mode);
+            assert_eq!(by_hand, Release::default());
+        }
+    }
+
+    #[test]
+    fn a_hidden_photo_drive_did_not_answer_for_keeps_its_copy() {
+        let f = fates(&[("h", "unknown")]);
+        for mode in [Mode::Off, Mode::New, Mode::All] {
+            assert_eq!(release_decision(&uids(&["h"]), &f, &set(&["h"]), mode), Release::default());
+            assert_eq!(release_decision(&uids(&["h"]), &HashMap::new(), &set(&["h"]), mode), Release::default());
+        }
+    }
+
+    #[test]
+    fn a_hidden_photo_in_the_trash_goes_only_by_the_trash_rule() {
+        let f = fates(&[("h", "trashed")]);
+        assert!(release_decision(&uids(&["h"]), &f, &HashSet::new(), Mode::All).let_go.is_empty());
+        assert!(release_decision(&uids(&["h"]), &f, &set(&["h"]), Mode::New).let_go.is_empty());
+        assert_eq!(release_decision(&uids(&["h"]), &f, &set(&["h"]), Mode::All).let_go, uids(&["h"]));
+    }
+
+    #[test]
+    fn a_hidden_copy_is_named_by_its_full_uid_for_drive() {
+        let listed = ["VOLUMEabcdef==~link1", "VOLUMEabcdef==~link2"];
+        // An album photo is hidden by its full uid.
+        assert_eq!(hidden_copy_uid("Eabcdef==~x", "VOL~x", listed).as_deref(), Some("VOL~x"));
+        // A photo hidden on its own is a bare link id: the volume comes from the listing.
+        assert_eq!(hidden_copy_uid("abcdef==~hid9", "hid9", listed).as_deref(), Some("VOLUMEabcdef==~hid9"));
+        // A volume nothing listed ends with, or a tail without one, tells nothing: the copy stays.
+        assert_eq!(hidden_copy_uid("zzzz==~hid9", "hid9", listed), None);
+        assert_eq!(hidden_copy_uid("hid9", "hid9", listed), None);
+        assert_eq!(hidden_copy_uid("abcdef==~other", "hid9", listed), None);
+        assert_eq!(hidden_copy_uid("abcdef==~hid9", "hid9", std::iter::empty()), None);
     }
 
     #[test]
@@ -754,5 +1192,46 @@ mod tests {
         let original = set(&["b~x", "a~y"]);
         assert_eq!(parse_list(&join_list(&original)), original);
         assert_eq!(parse_list("\n a \n\n"), set(&["a"]));
+    }
+
+    #[test]
+    fn the_trash_is_asked_once_more_and_a_restore_after_that_stands() {
+        assert_eq!(untrashed_step(Some("present"), false), Untrashed::Ask);
+        assert_eq!(untrashed_step(Some("hidden"), false), Untrashed::Ask);
+        assert_eq!(untrashed_step(Some("present"), true), Untrashed::Done);
+        assert_eq!(untrashed_step(Some("hidden"), true), Untrashed::Done);
+        for asked in [false, true] {
+            assert_eq!(untrashed_step(Some("trashed"), asked), Untrashed::Done);
+            assert_eq!(untrashed_step(Some("gone"), asked), Untrashed::Done);
+            assert_eq!(untrashed_step(Some("unknown"), asked), Untrashed::Wait);
+            assert_eq!(untrashed_step(None, asked), Untrashed::Wait);
+        }
+    }
+
+    #[test]
+    fn the_trash_answer_is_read_per_photo() {
+        let answer = serde_json::json!([
+            { "uid": "a", "ok": true },
+            { "uid": "b", "ok": false, "error": "no" },
+            { "ok": true },
+            { "uid": "c" },
+        ]);
+        assert_eq!(trashed_uids(&answer), set(&["a"]));
+        // The shape the earlier reading expected is no answer at all.
+        assert!(trashed_uids(&serde_json::json!({ "ok": true })).is_empty());
+        assert!(trashed_uids(&serde_json::json!([])).is_empty());
+    }
+
+    #[test]
+    fn the_untrashed_list_keeps_whether_the_trash_was_asked() {
+        let list: HashMap<String, bool> = [("v~a".to_string(), false), ("v~b".to_string(), true)].into_iter().collect();
+        let text = join_untrashed(&list);
+        assert_eq!(text, "v~a new\nv~b");
+        assert_eq!(parse_untrashed(&text), list);
+        // What the builds before wrote: bare uids, each asked on every round already.
+        let legacy = parse_untrashed("v~c\n\n v~d \n");
+        assert_eq!(legacy.get("v~c"), Some(&true));
+        assert_eq!(legacy.get("v~d"), Some(&true));
+        assert_eq!(legacy.len(), 2);
     }
 }

@@ -244,14 +244,15 @@ export function buildColorMatrix(adj: Adjustments): ColorMatrix | null {
     );
   }
 
+  // Highlights: a gain anchored at black, so positive brightens and negative pulls back the
+  // bright end most while black stays black.
   if (adj.highlights !== 0) {
-    const hScale = 1 - adj.highlights / 200;
-    const hOffset = -adj.highlights * 0.3;
+    const hScale = 1 + adj.highlights / 400;
     combined = concat(
       [
-        hScale, 0, 0, 0, hOffset,
-        0, hScale, 0, 0, hOffset,
-        0, 0, hScale, 0, hOffset,
+        hScale, 0, 0, 0, 0,
+        0, hScale, 0, 0, 0,
+        0, 0, hScale, 0, 0,
         0, 0, 0, 1, 0,
       ],
       combined,

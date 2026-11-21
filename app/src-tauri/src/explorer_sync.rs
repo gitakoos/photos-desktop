@@ -29,6 +29,9 @@
 //! the folder is then filled again from the library, which puts back whatever the
 //! library did not take and brings the copies a move left behind.
 //!
+//! The marks Explorer's "Always keep on this device" and "Free up space" leave on a file
+//! are handed to the provider as they come, outside the batches.
+//!
 //! What the app itself does in the folder (making its folders, clearing placeholders
 //! the library no longer has) is registered as its own beforehand and is not read back.
 
@@ -37,7 +40,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::explorer_rules::{self as rules, Action, Change, Library, RawEvent, RawKind};
@@ -90,6 +94,33 @@ pub fn note_moved_out(rel: &str) {
     mark(&MOVED_OUT, rel, MOVED_OUT_FOR);
 }
 
+/// How long the photo a placeholder carried is remembered after Explorer deleted, moved or
+/// renamed it, for the batch that reads the change back.
+const IDENTITY_FOR: Duration = Duration::from_secs(60);
+
+fn identities() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    static IDENTITIES: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+    IDENTITIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The photo the placeholder at `rel` carries, from the provider's callback as Explorer
+/// deletes, moves or renames it. The change is read back once the file is gone from that path,
+/// and then this, not the name, says which photo it was.
+pub fn note_identity(rel: &str, uid: &str) {
+    if uid.is_empty() {
+        return;
+    }
+    let mut m = identities().lock().unwrap();
+    let now = Instant::now();
+    m.retain(|_, (_, until)| *until > now);
+    m.insert(rel.to_lowercase(), (uid.to_string(), now + IDENTITY_FOR));
+}
+
+fn identity_at(rel: &str) -> Option<String> {
+    let m = identities().lock().unwrap();
+    m.get(&rel.to_lowercase()).filter(|(_, until)| *until > Instant::now()).map(|(uid, _)| uid.clone())
+}
+
 /// A path under the folder's root, relative to it, or None for one outside it.
 pub fn relative(root: &Path, path: &Path) -> Option<String> {
     path.strip_prefix(root).ok().map(|r| r.to_string_lossy().into_owned())
@@ -107,20 +138,73 @@ fn ignorable(rel: &str) -> bool {
         || name.ends_with(".crdownload")
 }
 
-/// Starts watching the folder, once per process.
+/// A running watcher, and what it takes to make it let go of the folder.
+struct Watching {
+    stop: Arc<AtomicBool>,
+    /// The folder's handle while the watcher holds one, so a read waiting for news can be cancelled.
+    handle: Arc<AtomicIsize>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+static WATCHING: Mutex<Option<Watching>> = Mutex::new(None);
+
+/// Whether the slot holds a watcher that still runs.
+fn watching(slot: &Option<Watching>) -> bool {
+    slot.as_ref().is_some_and(|w| !w.thread.is_finished())
+}
+
+/// Starts watching the folder. A watcher that runs already is left alone.
 pub fn start(app: tauri::AppHandle, root: PathBuf) {
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    STARTED.call_once(|| {
-        let (tx, rx) = channel();
-        let watch_root = root.clone();
-        let watch_app = app.clone();
-        std::thread::spawn(move || watch(watch_app, watch_root, tx));
-        std::thread::spawn(move || gather(app, rx));
-    });
+    let mut slot = WATCHING.lock().unwrap_or_else(|p| p.into_inner());
+    if watching(&slot) {
+        return;
+    }
+    let (tx, rx) = channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = Arc::new(AtomicIsize::new(0));
+    let watch_app = app.clone();
+    let (watch_stop, watch_handle) = (stop.clone(), handle.clone());
+    let thread = std::thread::spawn(move || watch(watch_app, root, tx, watch_stop, watch_handle));
+    std::thread::spawn(move || gather(app, rx));
+    *slot = Some(Watching { stop, handle, thread });
+}
+
+/// Stops watching and lets go of the folder. Returns once the watcher has ended, or false if it
+/// did not end in time.
+pub fn stop() -> bool {
+    stop_within(Duration::from_secs(5))
+}
+
+fn stop_within(limit: Duration) -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::IO::CancelIoEx;
+    let Some(watching) = WATCHING.lock().unwrap_or_else(|p| p.into_inner()).take() else {
+        return true;
+    };
+    watching.stop.store(true, Ordering::SeqCst);
+    // A cancel that lands before the watcher has begun its read finds nothing to cancel, so
+    // it is repeated until the watcher is gone.
+    let until = Instant::now() + limit;
+    while !watching.thread.is_finished() {
+        let raw = watching.handle.load(Ordering::SeqCst);
+        if raw != 0 {
+            let _ = unsafe { CancelIoEx(HANDLE(raw as *mut core::ffi::c_void), None) };
+        }
+        if Instant::now() >= until {
+            // Not ended in time: it is told to go on and stays the folder's watcher, so a move
+            // that stops here leaves the folder watched.
+            watching.stop.store(false, Ordering::SeqCst);
+            *WATCHING.lock().unwrap_or_else(|p| p.into_inner()) = Some(watching);
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = watching.thread.join();
+    true
 }
 
 /// Reads the folder's change notifications and forwards them, one event at a time.
-fn watch(app: tauri::AppHandle, root: PathBuf, tx: Sender<RawEvent>) {
+fn watch(app: tauri::AppHandle, root: PathBuf, tx: Sender<RawEvent>, stop: Arc<AtomicBool>, held: Arc<AtomicIsize>) {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -135,11 +219,17 @@ fn watch(app: tauri::AppHandle, root: PathBuf, tx: Sender<RawEvent>) {
         }
     };
     let handle = HANDLE(dir.as_raw_handle());
+    held.store(handle.0 as isize, Ordering::SeqCst);
     let mut buf = vec![0u64; 16_384];
     loop {
+        // The handle is published above, so a stop either cancels the read or is seen here.
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
         let mut got = 0u32;
         let filter = FILE_NOTIFY_CHANGE_FILE_NAME
             | FILE_NOTIFY_CHANGE_DIR_NAME
+            | FILE_NOTIFY_CHANGE_ATTRIBUTES
             | FILE_NOTIFY_CHANGE_LAST_WRITE
             | FILE_NOTIFY_CHANGE_SIZE;
         let read = unsafe {
@@ -156,8 +246,10 @@ fn watch(app: tauri::AppHandle, root: PathBuf, tx: Sender<RawEvent>) {
             )
         };
         if let Err(e) = read {
-            crate::note(&app, &format!("[explorer] watcher stopped: {e:?}"));
-            return;
+            if !stop.load(Ordering::SeqCst) {
+                crate::note(&app, &format!("[explorer] watcher stopped: {e:?}"));
+            }
+            break;
         }
         if got == 0 {
             // More happened than fit in the buffer: nothing to read back reliably, so the
@@ -177,6 +269,11 @@ fn watch(app: tauri::AppHandle, root: PathBuf, tx: Sender<RawEvent>) {
             let name: Vec<u16> =
                 (0..len).map(|i| unsafe { std::ptr::read_unaligned(name_at.add(i * 2) as *const u16) }).collect();
             let rel = String::from_utf16_lossy(&name);
+            // Explorer's "Always keep on this device" and "Free up space" change only a mark,
+            // which the provider acts on.
+            if info.Action == FILE_ACTION_MODIFIED && crate::cloud_mount::pin_mark(info.FileAttributes).is_some() {
+                crate::cloud_mount::pin_mark_changed(&app, rel.clone());
+            }
             let kind = match info.Action {
                 FILE_ACTION_ADDED => Some(RawKind::Added),
                 FILE_ACTION_REMOVED => Some(RawKind::Removed),
@@ -195,6 +292,7 @@ fn watch(app: tauri::AppHandle, root: PathBuf, tx: Sender<RawEvent>) {
                         placeholder: info.FileAttributes & 0x400 != 0,
                     };
                     if tx.send(event).is_err() {
+                        held.store(0, Ordering::SeqCst);
                         return;
                     }
                 }
@@ -205,6 +303,7 @@ fn watch(app: tauri::AppHandle, root: PathBuf, tx: Sender<RawEvent>) {
             offset += info.NextEntryOffset as usize;
         }
     }
+    held.store(0, Ordering::SeqCst);
 }
 
 /// Gathers events into batches, each read once the folder has been quiet for a moment.
@@ -253,11 +352,25 @@ fn gather(app: tauri::AppHandle, rx: Receiver<RawEvent>) {
 /// The library as the folder shows it: which photo a path holds, which album a folder is.
 struct Index {
     photos: HashMap<String, String>,
+    known: std::collections::HashSet<String>,
+}
+
+impl Index {
+    fn new(photos: HashMap<String, String>) -> Index {
+        let known = photos.values().cloned().collect();
+        Index { photos, known }
+    }
 }
 
 impl Library for Index {
+    /// The photo the file carried, as the provider was told when it went, and only a photo of
+    /// this library; the folder's index by name only for a file the provider was not asked
+    /// about.
     fn photo_at(&self, rel: &str) -> Option<String> {
-        self.photos.get(&rel.to_lowercase()).cloned()
+        match identity_at(rel) {
+            Some(uid) => self.known.contains(&uid).then_some(uid),
+            None => self.photos.get(&rel.to_lowercase()).cloned(),
+        }
     }
     fn album_named(&self, folder: &str) -> Option<String> {
         crate::cloud_mount::album_for_folder(folder)
@@ -273,7 +386,7 @@ fn apply(app: &tauri::AppHandle, batch: &[RawEvent]) {
     if changes.is_empty() {
         return;
     }
-    let index = Index { photos: crate::cloud_mount::photos_by_path() };
+    let index = Index::new(crate::cloud_mount::photos_by_path());
     let mut refresh = false;
     for change in &changes {
         if let Change::Removed { rel, .. } = change {
@@ -645,6 +758,30 @@ fn watch_uploads(app: &tauri::AppHandle) {
 /// folder. Removed at sign-out, so the next account starts from a fresh look.
 pub const SEEN_FILE: &str = "explorer-seen.enc";
 
+/// Adds files to the last look, as if they had been there then, so they are never uploaded as
+/// new. Without an earlier look nothing is new anyway, and nothing is written.
+pub fn note_seen(app: &tauri::AppHandle, rels: &[String]) {
+    if rels.is_empty() {
+        return;
+    }
+    let Ok(Some(text)) = crate::secure_store::read_sealed(app, SEEN_FILE) else { return };
+    let merged = with_seen(&text, rels);
+    let _ = crate::secure_store::write_sealed(app, SEEN_FILE, &merged);
+}
+
+/// The last look's list with `rels` added, each once, in the look's lower case.
+fn with_seen(text: &str, rels: &[String]) -> String {
+    let mut lines: Vec<String> = text.lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
+    let mut known: std::collections::HashSet<String> = lines.iter().cloned().collect();
+    for rel in rels {
+        let rel = rel.to_lowercase();
+        if known.insert(rel.clone()) {
+            lines.push(rel);
+        }
+    }
+    lines.join("\n")
+}
+
 /// Which of the ordinary files now in the folder are new since the last look. With no
 /// earlier look there is nothing to compare against, and nothing is new: the files a
 /// version before two-way sync left there, or copies another account kept at its
@@ -668,7 +805,7 @@ pub fn upload_waiting(app: &tauri::AppHandle) {
             }
         }
     }
-    let index = Index { photos: crate::cloud_mount::photos_by_path() };
+    let index = Index::new(crate::cloud_mount::photos_by_path());
     let mut present: Vec<String> = Vec::new();
     for folder in folders {
         let Ok(entries) = std::fs::read_dir(root.join(&folder)) else { continue };
@@ -704,11 +841,72 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_watcher_that_does_not_stop_in_time_goes_on_and_one_that_ended_counts_as_gone() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let quit = Arc::new(AtomicBool::new(false));
+        let (thread_stop, thread_quit) = (stop.clone(), quit.clone());
+        // Busy for a while before it looks at its stop flag, as a watcher held up in a read.
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            while !thread_stop.load(Ordering::SeqCst) && !thread_quit.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        *WATCHING.lock().unwrap() = Some(Watching { stop: stop.clone(), handle: Arc::new(AtomicIsize::new(0)), thread });
+        assert!(!stop_within(Duration::from_millis(50)));
+        assert!(!stop.load(Ordering::SeqCst), "told to go on");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(watching(&WATCHING.lock().unwrap()), "still the folder's watcher after the stop timed out");
+
+        quit.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!watching(&WATCHING.lock().unwrap()), "an ended watcher leaves room for a new one");
+        assert!(stop_within(Duration::from_millis(50)));
+        assert!(WATCHING.lock().unwrap().is_none());
+    }
+
+    #[test]
     fn only_files_that_arrived_since_the_last_look_are_uploaded() {
         let now = vec!["Photos\\kept.jpg".to_string(), "Photos\\new.jpg".to_string()];
         assert!(new_since(&now, None).is_empty(), "a first look uploads nothing");
         let seen: std::collections::HashSet<String> = ["photos\\kept.jpg".to_string()].into_iter().collect();
         assert_eq!(new_since(&now, Some(&seen)), vec!["Photos\\new.jpg".to_string()]);
+    }
+
+    #[test]
+    fn copies_turned_into_plain_files_by_a_new_registration_are_not_uploaded() {
+        let merged = with_seen("photos\\kept.jpg", &["Photos\\Edited.jpg".to_string(), "Albums\\Trip\\B.jpg".to_string()]);
+        let seen: std::collections::HashSet<String> = merged.lines().map(str::to_string).collect();
+        let now = vec![
+            "Photos\\kept.jpg".to_string(),
+            "Photos\\Edited.jpg".to_string(),
+            "Albums\\Trip\\B.jpg".to_string(),
+            "Photos\\new.jpg".to_string(),
+        ];
+        assert_eq!(new_since(&now, Some(&seen)), vec!["Photos\\new.jpg".to_string()]);
+        assert_eq!(with_seen(&merged, &["photos\\edited.jpg".to_string()]), merged, "each file is noted once");
+    }
+
+    #[test]
+    fn a_photo_is_known_by_what_its_file_carried_not_by_its_name() {
+        let photos: HashMap<String, String> = [
+            ("photos\\identity-test.jpg".to_string(), "v~a".to_string()),
+            ("photos\\identity-test (2).jpg".to_string(), "v~b".to_string()),
+            ("photos\\identity-test (3).jpg".to_string(), "v~c".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let index = Index::new(photos);
+        // The name leads to `a`, the file carried `b`: `b` it was.
+        note_identity("Photos\\Identity-Test.jpg", "v~b");
+        assert_eq!(index.photo_at("Photos\\identity-test.jpg"), Some("v~b".to_string()));
+        // A photo this library does not have is nothing to act on, whatever the name says.
+        note_identity("Photos\\identity-test (2).jpg", "other~x");
+        assert_eq!(index.photo_at("Photos\\identity-test (2).jpg"), None);
+        // A file the provider was not asked about is known by the index.
+        note_identity("Photos\\identity-test (3).jpg", "");
+        assert_eq!(index.photo_at("Photos\\IDENTITY-TEST (3).jpg"), Some("v~c".to_string()));
+        assert_eq!(index.photo_at("Photos\\identity-test (4).jpg"), None);
     }
 
     static TEST_MARKS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();

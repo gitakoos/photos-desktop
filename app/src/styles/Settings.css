@@ -306,6 +306,11 @@ label.st-row:hover,
   color: var(--fg-mute);
 }
 
+/* Under a group of rows it keeps a little air from the last card. */
+.st-rows + .st-note {
+  margin-top: 10px;
+}
+
 /* The same line carrying a refusal instead of an explanation. */
 .st-note.bad {
   color: var(--error);
@@ -696,20 +701,25 @@ label.st-row:hover,
 .st-status {
   color: var(--fg-dim);
 }
-/* A small info button beside a setting's name; what it says opens below the description. */
+/* A small info button beside a setting's name; what it says opens below the description.
+   Centred on the name's line and kept inside its height, so the row matches the others. */
+.st-label:has(> .st-info) {
+  display: flex;
+  align-items: center;
+}
 .st-info {
   display: inline-flex;
+  flex: none;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-left: 6px;
+  width: 20px;
+  height: 20px;
+  margin: -2px 0 -2px 4px;
   padding: 0;
-  vertical-align: -5px;
   border: none;
   border-radius: 999px;
   background: transparent;
-  color: var(--fg-mute);
+  color: var(--fg-dim);
   cursor: pointer;
 }
 .st-info:hover,
@@ -720,6 +730,19 @@ label.st-row:hover,
 .st-info:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+.st-info:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* The status line of the backup, with its refresh button at the end. */
+.st-sync {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.st-sync > .st-info {
+  margin: -2px 0;
 }
 /* A line under a setting that warns rather than explains. */
 .st-desc.bad {

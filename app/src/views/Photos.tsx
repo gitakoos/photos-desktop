@@ -24,6 +24,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -35,7 +36,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { rpc } from "../lib/rpc";
-import { locale } from "../lib/format";
+import { refreshSharedBackup } from "../lib/backupRefresh";
+import { timelineReadOnReturn } from "../lib/timelineRefresh";
+import { formatBytes, locale } from "../lib/format";
 import { downloadMessage, downloadPhotos, type SaveProgress } from "../lib/download";
 import { pinOffline, unpinOffline, watchOffline } from "../lib/offline";
 import { DownloadProgress } from "../components/DownloadProgress";
@@ -48,16 +51,27 @@ import { SearchField, TopStrip, type SearchPill, type SearchSuggestion } from ".
 import { foldPhrase, termAtEnd, termsStartedAtEnd, wordForms, type SearchTerm } from "../lib/searchTerms";
 import { Settings, DEFAULT_SETTINGS, type AppSettings, type Category as SettingsCategory } from "./Settings";
 import { applyTheme } from "../lib/theme";
-import { Albums, type Album, type AlbumSort } from "./Albums";
+import { Albums, type Album } from "./Albums";
+import {
+  readAlbumLayout,
+  readAlbumOrder,
+  readAlbumSort,
+  readPhotoOrders,
+  type AlbumPhotoOrder,
+  type AlbumSort,
+} from "../lib/albumView";
+import { CalendarView, type CalendarMonth } from "../components/CalendarView";
 import { Shared, type Invitation, type SharedItem, type Tab } from "./Shared";
 import { Trash } from "./Trash";
 import { Duplicates } from "./Duplicates";
 import { FixDates } from "./FixDates";
 import { Hidden, type HiddenAccess } from "./Hidden";
 import { useHidden } from "../hooks/useHidden";
+import { useAlbumOrder } from "../hooks/useAlbumOrder";
 import {
   CallMadeIcon,
   CallMergeIcon,
+  CalendarViewIcon,
   CallReceivedIcon,
   ChevronLeftIcon,
   CloseIcon,
@@ -71,6 +85,7 @@ import {
   HeartIcon,
   LabelIcon,
   ListIcon,
+  SlideshowIcon,
   LibraryAddIcon,
   LockIcon,
   MapIcon,
@@ -93,8 +108,14 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   CalendarIcon,
+  PlaceIcon,
+  CompressIcon,
+  CollageIcon,
+  GifIcon,
   ChevronDownIcon,
   DeleteForeverIcon,
+  DragHandleIcon,
+  SpinnerIcon,
   ImageIcon,
   MotionPhotoIcon,
   PanoramaIcon,
@@ -103,7 +124,7 @@ import {
   SortIcon,
   TextIcon,
 } from "../components/icons";
-import { dateLabel, inDate, parseDateQuery, type DateQuery } from "../lib/dateQuery";
+import { dateLabel, inDate, type DateQuery } from "../lib/dateQuery";
 import { MEDIA_EXTENSIONS, Upload } from "../components/Upload";
 import {
   CollectionPage,
@@ -120,15 +141,35 @@ import {
 } from "../components/Library";
 import { MapView, type MapPoint } from "../components/MapView";
 import { ImportReview } from "../components/ImportReview";
-import { AlbumAddPhotos } from "../components/AlbumAddPhotos";
+import { AlbumAddPhotos, type PickerSearch } from "../components/AlbumAddPhotos";
 import { LabelPicker } from "../components/LabelPicker";
+import { PhotoLabels } from "../components/PhotoLabels";
 import { useLocalLabels } from "../hooks/useLocalLabels";
+import { useLabelKeywords, useLabelSearch } from "../hooks/useLabelSearch";
+import { useLeaving } from "../hooks/useLeaving";
+import { NO_LABELS, labelIndex, labelUsage, matchesLabels, pruneLabels, type LabelFilter } from "../lib/labelFilter";
+import { labelKey } from "../lib/labels";
+import {
+  FIELD,
+  alternatives,
+  dateAtEnd,
+  foldText,
+  hasQuote,
+  matchesAlternatives,
+  metaText,
+  pillText,
+  restAfterPill,
+  resultsTitle,
+  stripped,
+} from "../lib/searchQuery";
+import { indexNames, unsettledUids, type IndexedName } from "../lib/nameIndex";
+import { coalesced } from "../lib/coalesced";
 import { Lightbox } from "../components/Lightbox";
 import { Confirm } from "../components/Confirm";
 import { ContextMenu, type MenuAction, type MenuAt } from "../components/ContextMenu";
 import { AlbumPicker, AlbumPhotoLossDialog, NameDialog } from "../components/AlbumDialogs";
 import { ShareDialog } from "../components/ShareDialog";
-import { FilterPanel, type MediaType } from "../components/FilterPanel";
+import { FILTER_LEAVE_MS, FilterPanel, type FilterPage, type MediaType } from "../components/FilterPanel";
 import { PhotoGrid, PhotoGridSkeleton } from "../components/PhotoGrid";
 import { VirtualSections } from "../components/VirtualSections";
 import {
@@ -141,21 +182,32 @@ import { useThumbnails } from "../hooks/useThumbnails";
 import { DebugHud } from "../components/DebugHud";
 import { Marquee, SelectionBar, useSelection } from "../hooks/useSelection";
 import { useLocalFaces } from "../hooks/useLocalFaces";
+import { driveReadKinds, migrateSettings, peopleOnOffer, searchFromCopiesOnly, searchOnOffer } from "../lib/driveModel";
 import { inTimelineOrder, isScanSpeed, scanBusy, statusLine, type PersonView } from "../lib/localFaces";
 import { PersonActions, PersonPicker } from "../components/PersonActions";
 import { PersonFindPanel } from "../components/PersonFindPanel";
 import { DateEditPanel } from "../components/DateEditPanel";
+import { PlaceEditPanel } from "../components/PlaceEditPanel";
+import { MetaEditPanel, type MetaKind } from "../components/MetaEditPanel";
+import { GifMaker } from "../components/GifMaker";
+import { Collage } from "../components/Collage";
+import { canSelectForCollage } from "../lib/collageLayout";
 import { photoSpanLabel } from "../lib/albumSpan";
 import type { DateEditMode, DateEditStatus } from "../lib/dateEdit";
+import type { CompressStatus } from "../lib/compression";
 import { PhotoFaces } from "../components/PhotoFaces";
 import { useWarmViews } from "../hooks/useWarmViews";
 import { CATEGORIES, isVideo, TAG, withFavorite } from "../lib/tags";
 import { cachedMediaType } from "../lib/mediaTypes";
 import { useUploads } from "../hooks/useUploads";
-import { useLang, useT } from "../lib/i18n";
-import { isWindows } from "../lib/platform";
+import { LANGS, useLang, useT } from "../lib/i18n";
+import { applyValues, changedValues, chosenValues, type AppliedValue } from "../lib/settingsSyncMap";
+import { isMac, isWindows } from "../lib/platform";
 import { onThisDay, seasons } from "../lib/memories";
+import { matchTheme, pillsByItself, themeEntries, themeNameKey, themePhotos, THEME_ROW_LIMIT, type ThemesReply } from "../lib/themes";
 import { dropPreview, prefetchAfter } from "../lib/previewStore";
+import { unwarmedBatches, warmWholeBatch } from "../lib/warmBatches";
+import { forgetNames } from "../lib/photoNames";
 import "../styles/Photos.css";
 
 /** Each category's mark in the filter menu, where there is one to draw. */
@@ -176,6 +228,7 @@ type TimelineItem = { uid: string; captureTime: number; tags: number[] };
 /** Photos asked about per call while the map gathers places. */
 const PLACES_BATCH = 2000;
 type NodeMeta = { name: string; mediaType: string | null };
+const NO_ENTRIES: LibraryEntry[] = [];
 type View = "photos" | "albums" | "shared" | "trash";
 
 /**
@@ -202,11 +255,30 @@ const WHEEL_STEP = 60;
 const DATE_PILL_MS = 700;
 /** How often the phone's copies on Drive are looked at again, and how stale they may be when
  *  the window comes back before they are. */
+/** What the settings sync checks a value against: the defaults a reset goes back to, and the languages here. */
+const SYNC_CTX = { defaults: DEFAULT_SETTINGS, langs: LANGS.map((l) => l.value) };
+/** How often the window asks the sidecar for settings it took in from Drive. */
+const SETTINGS_PULL_MS = 30 * 1000;
+
+/**
+ * Set when the saved settings could not be read (the keystore refused its key). The page then
+ * runs on defaults, and saving those over the real settings would lose them, the app lock
+ * included, so nothing is saved for the rest of the session.
+ */
+let settingsUnreadable = false;
+
+/** Keeps the settings, unless they could not be read this session. */
+function saveSettings(settings: AppSettings): Promise<unknown> {
+  if (settingsUnreadable) return Promise.resolve();
+  return invoke("store_set", { name: "settings", value: JSON.stringify(settings) });
+}
 const DRIVE_REFRESH_MS = 15 * 60 * 1000;
 const DRIVE_REFRESH_ON_FOCUS_MS = 5 * 60 * 1000;
 /** A search by what a photo shows waits for this much typed, and for the typing to settle. */
 const SEMANTIC_MIN_CHARS = 3;
 const SEMANTIC_SETTLE_MS = 350;
+/** How often the themes are asked again while the classification is still catching up. */
+const THEMES_POLL_MS = 2500;
 const WHEEL_STEP_MS = 140;
 
 // The album LIST's own zoom ladder (minimum card width in px). The first step is the
@@ -217,7 +289,9 @@ const ALBUM_SIZES = [190, 230, 280, 340, 420];
 const ALBUM_SORTS: { key: AlbumSort; labelKey: string }[] = [
   { key: "activity", labelKey: "albums.sortActivity" },
   { key: "name", labelKey: "albums.sortName" },
+  { key: "newest", labelKey: "albums.sortNewest" },
   { key: "count", labelKey: "albums.sortCount" },
+  { key: "custom", labelKey: "albums.sortCustom" },
 ];
 
 function monthKey(ts: number): string {
@@ -252,12 +326,15 @@ function AlbumHero({
   cover,
   title,
   sub,
+  accent = false,
   children,
 }: {
   heroRef: RefObject<HTMLElement | null>;
   cover: string | null | undefined;
   title: string;
   sub: string;
+  /** The title in the accent colour, as a mode such as arranging shows it. */
+  accent?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -266,7 +343,9 @@ function AlbumHero({
         {cover ? <img src={cover} alt="" draggable={false} /> : <div className="g-cell-ph" />}
       </div>
       <div className="g-albumhero-meta">
-        <h1 className="g-albumhero-title">{title}</h1>
+        <h1 className="g-albumhero-title" style={accent ? { color: "var(--accent)" } : undefined}>
+          {title}
+        </h1>
         <div className="g-albumhero-sub">{sub}</div>
         {/* The album's actions, at the masthead's bottom-right like the web. */}
         <div className="g-albumhero-actions">{children}</div>
@@ -300,20 +379,23 @@ export function Photos({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   // Timeline content filter (view state, not persisted): multi-select categories
-  // combined OR, plus a single media type. Both drive the grid in real time.
+  // combined OR, a single media type, and the picked labels (any of them, or all). All of
+  // them drive the grid in real time; the search shows the labels as its pills.
   const [categories, setCategories] = useState<Set<string>>(new Set());
   const [mediaType, setMediaType] = useState<MediaType>("all");
+  const [labelFilter, setLabelFilter] = useState<LabelFilter>(NO_LABELS);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [filterPage, setFilterPage] = useState<FilterPage>("filters");
+  // Where the panel hangs from in the sidebar layout: under the filter button at the right.
+  const [filterAnchor, setFilterAnchor] = useState<{ x: number; y: number } | undefined>(undefined);
   // The timeline's order, from the toolbar's sort menu: by when a photo was taken (in
   // months) or by its name (one grid), newest or A first unless turned round.
   const [timelineSort, setTimelineSort] = useState<{ by: "taken" | "name"; asc: boolean }>({
     by: "taken",
     asc: false,
   });
-  // The toolbar menu dropped from its button: the sort, the filter, or the albums' sort.
-  const [toolMenu, setToolMenu] = useState<{ kind: "sort" | "filter" | "albumSort"; x: number; y: number } | null>(
-    null,
-  );
+  // The toolbar menu dropped from its button: the sort, or the albums' sort.
+  const [toolMenu, setToolMenu] = useState<{ kind: "sort" | "albumSort"; x: number; y: number } | null>(null);
   const [view, setView] = useState<View>("photos");
   // Lifted so the open album's header can share the top bar row.
   const [albumOpen, setAlbumOpen] = useState<Album | null>(null);
@@ -325,16 +407,18 @@ export function Photos({
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   // The album list's own search query (transient) and sort order, plus where the sort menu opens.
   const [albumQuery, setAlbumQuery] = useState("");
-  const [albumSort, setAlbumSort] = useState<AlbumSort>("activity");
+  const [albumArranging, setAlbumArranging] = useState(false);
   const [albumSortAt, setAlbumSortAt] = useState<{ x: number; y: number } | null>(null);
   // A shared album looked into, lifted for the same reason as the one above: the
   // header its back button lives in belongs to this row.
   const [sharedAlbumOpen, setSharedAlbumOpen] = useState<SharedItem | null>(null);
   // The people or the labels the phone saved to Drive, opened from the Albums tab's tiles.
   const [libraryPage, setLibraryPage] = useState<LibraryPageKind | null>(null);
+  // The Calendar's month, kept while one of its days is looked at; null is the newest month with photos.
+  const [calendarMonth, setCalendarMonth] = useState<CalendarMonth | null>(null);
   // One of the Collection's sections opened in full. Kept while its photos are looked at, so
   // the way back from them returns to it.
-  const [collectionSection, setCollectionSection] = useState<"onthisday" | "seasons" | null>(null);
+  const [collectionSection, setCollectionSection] = useState<"onthisday" | "seasons" | "themes" | null>(null);
   // The timeline narrowed to one person, one label or the offline set, and where it was
   // opened from, which its back button returns to.
   const [uidFilter, setUidFilter] = useState<{
@@ -464,13 +548,38 @@ export function Photos({
   }, [view, loadInvitations]);
   // Lifted so the trash's count and its empty button can share the top bar row.
   const [trashCount, setTrashCount] = useState<number | null>(null);
+  /** What the Trash view lists: Empty trash destroys these and nothing trashed since. */
+  const trashListed = useRef<string[]>([]);
+  const onTrashListed = useCallback((uids: string[] | null) => {
+    trashListed.current = uids ?? [];
+    setTrashCount(uids ? uids.length : null);
+  }, []);
+  /** What the emptying under way is destroying, then what it destroyed and how many it could not. */
+  const emptyingListed = useRef<string[]>([]);
+  const emptied = useRef<{ gone: string[]; failed: number }>({ gone: [], failed: 0 });
+  /**
+   * Emptying the trash: "asking" while the request runs, then "server" while Proton is still
+   * deleting in the background and the trash is read again until what it destroyed is gone.
+   */
+  const [emptying, setEmptying] = useState<{ stage: "asking" | "server"; left: number | null } | null>(null);
+  /** Reloads the Trash view alone, without the rest of the library. */
+  const [trashReload, setTrashReload] = useState(0);
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
 
   const [confirmTrash, setConfirmTrash] = useState(false);
-  const [confirmEmpty, setConfirmEmpty] = useState(false);
+  /** Empty trash waiting for its confirm, with what the Trash view listed when it was asked. */
+  const [confirmEmpty, setConfirmEmpty] = useState<string[] | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [saveProgress, setSaveProgress] = useState<SaveProgress | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Compress on Drive: the photos waiting for the confirm, and the run it started, followed while it lasts.
+  const [compressAsk, setCompressAsk] = useState<string[] | null>(null);
+  // The video the GIF maker is open for.
+  const [gifFor, setGifFor] = useState<string | null>(null);
+  // The photos the collage maker is open for.
+  const [collageFor, setCollageFor] = useState<string[] | null>(null);
+  const [compressRun, setCompressRun] = useState(false);
+  const [compressStatus, setCompressStatus] = useState<CompressStatus | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // Escape belongs to the lightbox while it is open.
   const sel = useSelection(scrollRef, lightboxIdx === null);
@@ -499,12 +608,15 @@ export function Photos({
   const [query, setQuery] = useState("");
   const [meta, setMeta] = useState<Record<string, NodeMeta>>({});
   const [indexing, setIndexing] = useState(false);
-  /** How far the search index has got, so a run cut short can pick up where it was. */
-  const indexedUpTo = useRef(0);
+  /** The photos the search index has asked about, so a run cut short picks up with the rest. */
+  const indexSettled = useRef(new Set<string>());
 
   // Search is always on the bar now, so "engaged" is what a focus or a query makes it,
   // and that is what turns the index build on and shows the type row under the bar.
   const searchActive = searchFocused || query.trim().length > 0;
+  // The album picker's own search reads the same index.
+  const [pickerSearching, setPickerSearching] = useState(false);
+  const indexWanted = searchActive || pickerSearching;
 
   // Once the timeline has loaded (the sidecar is signed in), fill the Explorer
   // "Proton Photos" folder with cloud-photo placeholders. Once per session.
@@ -622,34 +734,49 @@ export function Photos({
   // Warm the whole thumbnail cache in the background so scrolling to any month is
   // instant instead of decrypting on demand. Gentle: small batches with a pause
   // between, and it stands aside whenever something more urgent needs the sidecar.
+  //
+  // The timeline arrives a page at a time, and each page starts this again. What was
+  // warmed is remembered across those restarts, so a new page carries on where the last
+  // pass stopped rather than going back through the whole library from the top, and the
+  // pass a new page replaces lets go of its request, so it is dropped from the host's
+  // queue instead of waiting there for its turn.
+  const warmedRef = useRef(new Set<string>());
   useEffect(() => {
     if (items.length === 0) return;
-    let cancelled = false;
+    const stop = new AbortController();
     const uids = items.map((it) => it.uid);
     (async () => {
       // Kept small so one uninterruptible warm request is only ever a few
       // thumbnails: an interactive call waits at most one short batch, not twelve.
       const BATCH = 4;
-      for (let i = 0; i < uids.length && !cancelled; i += BATCH) {
+      for (const batch of unwarmedBatches(uids, warmedRef.current, BATCH)) {
+        if (stop.signal.aborted) break;
         // Stand aside while a photo is open, the mount is hydrating, or another
         // view is on screen and wants the channel for its own data.
         while (
-          !cancelled &&
+          !stop.signal.aborted &&
           (lightboxOpenRef.current || mountBusyRef.current || offTimelineRef.current)
         ) {
           await new Promise((r) => setTimeout(r, 300));
         }
-        if (cancelled) break;
+        if (stop.signal.aborted) break;
+        // The sidecar fetches only a couple of missing thumbnails per call and counts
+        // what the batch now has cached, so a batch is asked for again until all of it is
+        // ready, and remembered only then. One that stops getting further (a photo with
+        // no thumbnail, a stalled fetch) is left for a later pass to try again.
         try {
-          await rpc("warmThumbnails", { uids: uids.slice(i, i + BATCH) });
+          const whole = await warmWholeBatch(batch, (uids) =>
+            rpc<{ ready: number }>("warmThumbnails", { uids }, { signal: stop.signal }),
+          );
+          if (whole) for (const uid of batch) warmedRef.current.add(uid);
         } catch {
-          /* keep warming the rest */
+          /* keep warming the rest; a batch let go of is warmed by the next pass */
         }
         await new Promise((r) => setTimeout(r, 400)); // yield to on-screen requests
       }
     })();
     return () => {
-      cancelled = true;
+      stop.abort();
     };
   }, [items.length]);
 
@@ -664,6 +791,14 @@ export function Photos({
   // Whether the saved settings have been read; until then the defaults stand in, and the
   // hide setting is not known either.
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const { setLang } = useLang();
+  // The settings as last committed here, for telling a choice from a load: only `updateSettings`
+  // reports a difference to the sidecar, never the load, the migration or a value taken in from Drive.
+  const settingsRef = useRef<AppSettings>(settings);
+  // Set once the choices already made are stamped, so what Drive brings never lands before them.
+  const settingsSyncReady = useRef(false);
+  // What the window showed of the last pull, handed back on the next so the sidecar can let it go.
+  const settingsShown = useRef<{ id: string; t: number }[]>([]);
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
 
   // The open album's header actions, raised into the top bar in the album view.
@@ -673,11 +808,25 @@ export function Photos({
   /** The open shared album's photo uids, for its masthead's Download. */
   const [sharedAlbumPhotoUids, setSharedAlbumPhotoUids] = useState<string[]>([]);
   const [albumMoreAt, setAlbumMoreAt] = useState<{ x: number; y: number } | null>(null);
+  // The open album's photo order, and arranging it by hand: the masthead holds the controls,
+  // the album view the order being made, so the masthead hands each press down as a command.
+  const albumPhotoOrder = useAlbumOrder(albumOpen?.uid ?? null);
+  const [photoArranging, setPhotoArranging] = useState(false);
+  const [arrangeCommand, setArrangeCommand] = useState<{ kind: "start" | "end" | "done" | "cancel"; n: number }>({
+    kind: "done",
+    n: 0,
+  });
+  const [arrangeState, setArrangeState] = useState({ selected: 0, changed: false });
+  const arrange = (kind: "start" | "end" | "done" | "cancel") => setArrangeCommand((c) => ({ kind, n: c.n + 1 }));
+  useEffect(() => {
+    setPhotoArranging(false);
+  }, [albumOpen?.uid, view]);
   // The open album's photos' first and last date, which its header shows, and a counter the
   // More menu's "Contents" raises to open the viewer on that list.
   const [albumSpan, setAlbumSpan] = useState<[number, number] | null>(null);
   const [sharedSpan, setSharedSpan] = useState<[number, number] | null>(null);
   const [albumContents, setAlbumContents] = useState(0);
+  const [albumSlideshow, setAlbumSlideshow] = useState(0);
   const [addPhotosOpen, setAddPhotosOpen] = useState(false);
   /** Where the open album's "Add photos" choice opens: from the library or from disk. */
   const [addPhotosAt, setAddPhotosAt] = useState<{ x: number; y: number } | null>(null);
@@ -711,20 +860,33 @@ export function Photos({
   // a photo back in the timeline. Stable identity, so the upload poller is not
   // restarted on every render.
   const bumpReload = useCallback(() => setReloadKey((k) => k + 1), []);
+  // Reads the timeline again and nothing else (no album walk, no search index from the top): for
+  // a photo changed on Drive from another device, which the sidecar hears from Drive's event feed.
+  const [timelineKey, setTimelineKey] = useState(0);
+  const bumpTimeline = useCallback(() => setTimelineKey((k) => k + 1), []);
+  // When the last timeline read finished, for the read on the window's return.
+  const timelineReadAt = useRef(0);
   // F5 and Ctrl+R read the page again where it is, instead of reloading the window back to the
   // timeline; the shell's Reload asks for the same. Ctrl+Shift+R still reloads the window.
+  // Either also refreshes what the shared backup carries, started alongside and not waited for.
+  const backupOn = useRef(false);
+  backupOn.current = settings.sharedBackup;
   useEffect(() => {
+    const userRefresh = () => {
+      bumpReload();
+      refreshSharedBackup(backupOn.current, navigator.onLine, rpc);
+    };
     const onKey = (e: KeyboardEvent) => {
       const refresh = (e.key === "F5" && !e.ctrlKey && !e.shiftKey) || (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === "r");
       if (!refresh) return;
       e.preventDefault();
-      bumpReload();
+      userRefresh();
     };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("pfp-refresh", bumpReload);
+    window.addEventListener("pfp-refresh", userRefresh);
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("pfp-refresh", bumpReload);
+      window.removeEventListener("pfp-refresh", userRefresh);
     };
   }, [bumpReload]);
   const uploads = useUploads(bumpReload);
@@ -733,7 +895,11 @@ export function Photos({
   // token is asked for here and let go on the way out, which is a lock or a sign-out.
   useEffect(() => {
     void connectThumbServer();
-    return () => disconnectThumbServer();
+    return () => {
+      disconnectThumbServer();
+      // The photo names the viewer kept go with the session that showed them.
+      forgetNames();
+    };
   }, []);
 
   /** Photos and videos picked from this computer, uploaded straight into `album`. */
@@ -761,6 +927,14 @@ export function Photos({
       void un.then((f) => f());
     };
   }, []);
+
+  // A photo added, changed, trashed, restored or deleted on Drive from another device.
+  useEffect(() => {
+    const un = listen("timeline-changed", bumpTimeline);
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [bumpTimeline]);
 
   // A brief confirmation toast (download results) that clears itself.
   useEffect(() => {
@@ -799,16 +973,9 @@ export function Photos({
       try {
         const raw = await invoke<string | null>("store_get", { name: "settings" });
         if (raw) {
-          const saved = JSON.parse(raw);
-          // The faces' share with the phone became the shared backup of everything.
-          if (saved.sharedBackup === undefined && typeof saved.faceSync === "boolean") saved.sharedBackup = saved.faceSync;
-          delete saved.faceSync;
-          const merged: AppSettings = { ...DEFAULT_SETTINGS, ...saved };
-          // Faces and the search are on or off now: what showed the phone's alone is on, here
-          // and put together with the phone's through the shared backup.
-          if (merged.driveFaces && !merged.localFaces) merged.localFaces = true;
-          merged.driveFaces = false;
-          if (merged.semanticSearch && !merged.localSearch) merged.localSearch = true;
+          // The faces' share with the phone became the shared backup of everything, and the two
+          // switches under it mean the scan and the indexing on this PC.
+          const merged: AppSettings = { ...DEFAULT_SETTINGS, ...migrateSettings(JSON.parse(raw)) };
           if (!isScanSpeed(merged.scanSpeed)) merged.scanSpeed = null;
           // The sidebar layout is the app's only layout now; one saved off from before still opens it.
           merged.sidebarLayout = true;
@@ -817,26 +984,76 @@ export function Photos({
             merged.palette = "default";
             merged.amoled = true;
           }
+          settingsRef.current = merged;
           setSettings(merged);
           applyTheme(merged.theme, merged.palette, merged.amoled);
           if (merged.whatsNewSeen !== WHATS_NEW_ID) setWhatsNewOpen(true);
         } else {
           // A first start has nothing new to compare against.
           const fresh = { ...DEFAULT_SETTINGS, whatsNewSeen: WHATS_NEW_ID };
+          settingsRef.current = fresh;
           setSettings(fresh);
-          void invoke("store_set", { name: "settings", value: JSON.stringify(fresh) }).catch(() => {});
+          void saveSettings(fresh).catch(() => {});
         }
       } catch {
-        /* fall back to defaults */
+        // Defaults for now, never saved over what could not be read.
+        settingsUnreadable = true;
       }
       setSettingsLoaded(true);
     })();
   }, []);
 
   function updateSettings(next: AppSettings) {
+    const changed = changedValues(settingsRef.current, next, SYNC_CTX);
+    settingsRef.current = next;
     setSettings(next);
-    void invoke("store_set", { name: "settings", value: JSON.stringify(next) }).catch(() => {});
+    void saveSettings(next).catch(() => {});
+    if (changed.length > 0) void rpc("settingsSyncReport", { values: changed }).catch(() => {});
   }
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  // The settings other devices saved to Drive, taken in by the sidecar, shown here and kept.
+  const pullSettings = useCallback(async () => {
+    if (!settingsSyncReady.current) return;
+    try {
+      const { applied } = await rpc<{ applied: AppliedValue[] }>("settingsSyncPull", { done: settingsShown.current });
+      settingsShown.current = [];
+      if (applied.length === 0) return;
+      const { next, changed } = applyValues(settingsRef.current, applied, SYNC_CTX);
+      if (changed.length > 0) {
+        settingsRef.current = next;
+        setSettings(next);
+        if (changed.some((k) => k === "theme" || k === "palette" || k === "amoled")) {
+          applyTheme(next.theme, next.palette, next.amoled);
+        }
+        void saveSettings(next)
+          .catch(() => {})
+          .then(() => {
+            if (changed.includes("lang")) setLang(next.lang);
+          });
+      }
+      settingsShown.current = applied.map(({ id, t }) => ({ id, t }));
+    } catch {
+      /* asked again shortly */
+    }
+  }, [setLang]);
+
+  // The choices made before the feature are stamped once, and from then on what Drive brings is taken.
+  useEffect(() => {
+    if (!settingsLoaded) return;
+    void rpc("albumOrderSeed", { modes: readPhotoOrders(settingsRef.current.albumPhotoOrder) }).catch(() => {});
+    void rpc("settingsSyncReport", { seed: true, values: chosenValues(settingsRef.current, SYNC_CTX) })
+      .catch(() => {})
+      .then(() => {
+        settingsSyncReady.current = true;
+        void pullSettings();
+      });
+    const every = window.setInterval(() => void pullSettings(), SETTINGS_PULL_MS);
+    return () => window.clearInterval(every);
+  }, [settingsLoaded, pullSettings]);
 
   // Tell the shell it is in the sidebar layout, so the window chrome can step aside:
   // the sidebar rises the full height of the window and owns the brand, and the title
@@ -869,11 +1086,88 @@ export function Photos({
   const setAlbumZoom = (next: number) =>
     updateSettings({ ...settings, albumZoom: Math.min(ALBUM_SIZES.length - 1, Math.max(0, next)) });
 
+  // How the album list is ordered and drawn, in the settings. The sort and the arrangement ride
+  // the shared backup with the other synced settings; the layout stays on this computer.
+  const albumSort: AlbumSort = readAlbumSort(settings.albumSort);
+  const albumLayout = readAlbumLayout(settings.albumLayout);
+  const albumOrder = useMemo(() => readAlbumOrder(settings.albumOrder), [settings.albumOrder]);
+  const setAlbumSort = (next: AlbumSort) => updateSettings({ ...settings, albumSort: next });
+  const arranging = albumArranging && view === "albums" && !albumOpen && !libraryPage;
+  const albumViewActions: MenuAction[] = [
+    ...ALBUM_SORTS.map((s) => ({
+      key: `sort:${s.key}`,
+      label: t(s.labelKey),
+      checked: albumSort === s.key,
+      onSelect: () => setAlbumSort(s.key),
+    })),
+    {
+      key: "view:grid",
+      label: t("albums.viewGrid"),
+      checked: albumLayout === "grid",
+      separator: true,
+      onSelect: () => updateSettings({ ...settings, albumLayout: "grid" }),
+    },
+    {
+      key: "view:list",
+      label: t("albums.viewList"),
+      checked: albumLayout === "list",
+      onSelect: () => updateSettings({ ...settings, albumLayout: "list" }),
+    },
+    {
+      key: "arrange",
+      label: t("albums.arrange"),
+      separator: true,
+      onSelect: () => {
+        updateSettings({ ...settings, albumSort: "custom" });
+        setAlbumArranging(true);
+      },
+    },
+  ];
+  // The open album's photo order. Custom without an order made yet starts arranging, from the order shown.
+  const albumPhotoMode: AlbumPhotoOrder = albumPhotoOrder.mode ?? "newest";
+  const setPhotoOrder = (order: AlbumPhotoOrder) => {
+    if (order === "custom" && albumPhotoOrder.order.length === 0) {
+      setPhotoArranging(true);
+      return;
+    }
+    void albumPhotoOrder.setMode(order).catch((e) => setToast(String(e)));
+  };
+  // Escape ends the rearranging, as Done does.
+  useEffect(() => {
+    if (!arranging) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAlbumArranging(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [arranging]);
+
   // Album membership costs a walk over every album, so only resolve it when the
   // hide setting is actually on. Android takes the same "zero cost when off" path.
   //
   // The timeline waits for it rather than showing album photos that then vanish: the copy
   // from the last start answers at once, and only a first start waits for the walk.
+  const hidingAlbumPhotos = useRef(false);
+  hidingAlbumPhotos.current = settingsLoaded && settings.hideAlbumPhotos;
+  /** How many walks have answered, so the copy from the last start never replaces a fresh answer. */
+  const membersAnswered = useRef(0);
+  // One walk at a time: a reload, a setting change or a change on Drive during a walk asks for one
+  // more walk after it, never a second walk alongside.
+  const walkAlbumMembers = useMemo(
+    () =>
+      coalesced(async () => {
+        if (!hidingAlbumPhotos.current) return;
+        try {
+          const uids = await rpc<string[]>("getAlbumPhotoUids");
+          membersAnswered.current++;
+          if (hidingAlbumPhotos.current) setAlbumMembers(new Set(uids));
+        } catch {
+          // Nothing is hidden if membership cannot be resolved, rather than nothing shown.
+          if (hidingAlbumPhotos.current) setAlbumMembers((known) => known ?? new Set());
+        }
+      }),
+    [],
+  );
   useEffect(() => {
     if (!settingsLoaded) return;
     if (!settings.hideAlbumPhotos) {
@@ -881,29 +1175,25 @@ export function Photos({
       return;
     }
     let cancelled = false;
-    let fresh = false;
+    const answered = membersAnswered.current;
     (async () => {
       try {
         const cached = await rpc<string[] | null>("cachedAlbumPhotoUids");
-        if (!cancelled && !fresh && cached) setAlbumMembers(new Set(cached));
+        if (!cancelled && membersAnswered.current === answered && cached) setAlbumMembers(new Set(cached));
       } catch {
-        /* the walk below answers instead */
+        /* the walk answers instead */
       }
     })();
-    (async () => {
-      try {
-        const uids = await rpc<string[]>("getAlbumPhotoUids");
-        fresh = true;
-        if (!cancelled) setAlbumMembers(new Set(uids));
-      } catch {
-        // Nothing is hidden if membership cannot be resolved, rather than nothing shown.
-        if (!cancelled) setAlbumMembers((known) => known ?? new Set());
-      }
-    })();
+    walkAlbumMembers();
     return () => {
       cancelled = true;
     };
-  }, [settingsLoaded, settings.hideAlbumPhotos, reloadKey]);
+  }, [settingsLoaded, settings.hideAlbumPhotos, reloadKey, walkAlbumMembers]);
+  // A photo added to an album or taken out of one on another device, or one that arrived already in
+  // an album, changes what the timeline hides.
+  useEffect(() => {
+    if (timelineKey > 0) walkAlbumMembers();
+  }, [timelineKey, walkAlbumMembers]);
   /** The timeline can be drawn: what it hides is known. */
   const hidingKnown = settingsLoaded && (!settings.hideAlbumPhotos || albumMembers !== null);
 
@@ -948,6 +1238,7 @@ export function Photos({
           if (page.items.length === 0) await new Promise((r) => setTimeout(r, TIMELINE_POLL_MS));
         }
         timelineShown.current = true;
+        timelineReadAt.current = Date.now();
         setItems(all);
         setLoading(false);
         // Thumbnails load lazily per visible cell (see thumbStore), so a large
@@ -962,14 +1253,13 @@ export function Photos({
     return () => {
       cancelled = true;
     };
-    // Re-runs after an upload so new photos appear without a restart.
-  }, [reloadKey]);
+    // Re-runs after an upload so new photos appear without a restart, and after a change on Drive.
+  }, [reloadKey, timelineKey]);
 
-  // A reload re-reads the whole timeline, so a position in the old list says nothing
-  // about the new one: index it again from the top, which is also how anything
-  // uploaded since gets in.
+  // A reload asks for every name again, so a photo renamed elsewhere is found by its new name.
+  // A change on Drive asks only for the photos the index has not seen.
   useEffect(() => {
-    indexedUpTo.current = 0;
+    indexSettled.current = new Set();
   }, [reloadKey]);
 
   // The SDK has no server-side search, so we build a local index of names and
@@ -978,40 +1268,49 @@ export function Photos({
   // pauses it and coming back carries on from there, so the index never stops partway
   // and answers "no matches" for everything past that point.
   useEffect(() => {
-    if (!searchActive || indexedUpTo.current >= items.length) return;
+    if (!indexWanted) return;
+    const todo = unsettledUids(items, indexSettled.current);
+    if (todo.length === 0) return;
     let cancelled = false;
     setIndexing(true);
+    // Each update copies the whole map and refilters the library, so batches are
+    // committed at most every FLUSH_MS (the first at once).
+    const FLUSH_MS = 250;
+    let pending: Record<string, NodeMeta> = {};
+    let flushedAt = 0;
+    const flush = () => {
+      const batch = pending;
+      pending = {};
+      flushedAt = performance.now();
+      if (Object.keys(batch).length > 0) setMeta((prev) => ({ ...prev, ...batch }));
+    };
 
     (async () => {
-      const BATCH = 150; // the SDK batches node lookups server side
-      for (let i = indexedUpTo.current; i < items.length && !cancelled; i += BATCH) {
-        const uids = items.slice(i, i + BATCH).map((t) => t.uid);
-        try {
-          const res = await rpc<{ uid: string; name: string; mediaType: string | null }[]>(
-            "getMetadata",
-            { uids },
-          );
-          if (cancelled) return;
-          setMeta((prev) => {
-            const next = { ...prev };
-            for (const r of res) next[r.uid] = { name: r.name, mediaType: r.mediaType };
-            return next;
-          });
-        } catch {
-          /* one bad batch must not stop the rest */
-        }
-        indexedUpTo.current = Math.min(i + BATCH, items.length);
+      await indexNames(
+        todo,
+        indexSettled.current,
+        (uids) => rpc<IndexedName[]>("getMetadata", { uids }),
+        (answer) => {
+          for (const r of answer) pending[r.uid] = { name: r.name, mediaType: r.mediaType };
+          if (performance.now() - flushedAt >= FLUSH_MS) flush();
+        },
+        () => cancelled,
+      );
+      if (!cancelled) {
+        flush();
+        setIndexing(false);
       }
-      if (!cancelled) setIndexing(false);
     })();
 
     return () => {
       cancelled = true;
+      // What was fetched counts as indexed, so it must not be dropped.
+      flush();
       // Here rather than past the guard above: an interrupted run never reaches that
       // line, which is what left "Indexing…" on screen for the rest of the session.
       setIndexing(false);
     };
-  }, [searchActive, items]);
+  }, [indexWanted, items]);
 
   const toggleCategory = useCallback((key: string) => {
     setCategories((prev) => {
@@ -1025,9 +1324,10 @@ export function Photos({
   const resetFilter = useCallback(() => {
     setCategories(new Set());
     setMediaType("all");
+    setLabelFilter(NO_LABELS);
   }, []);
 
-  const activeFilterCount = categories.size + (mediaType === "all" ? 0 : 1);
+  const activeFilterCount = categories.size + (mediaType === "all" ? 0 : 1) + labelFilter.keys.length;
   // The Drive copies name photos by link id; the timeline knows them as `volume~link`.
   const byLinkId = useMemo(() => {
     const m = new Map<string, TimelineItem>();
@@ -1054,7 +1354,7 @@ export function Photos({
     setSettings((s) => {
       if (!s.localFaces) return s;
       const next = { ...s, localFaces: false };
-      void invoke("store_set", { name: "settings", value: JSON.stringify(next) }).catch(() => {});
+      void saveSettings(next).catch(() => {});
       return next;
     });
   }, []);
@@ -1065,7 +1365,7 @@ export function Photos({
     settings.faceAutoMerge,
     settings.faceFindMore,
     settings.sharedBackup,
-    settings.semanticSearch && settings.localSearch,
+    settings.localSearch,
     facesOffElsewhere,
     settings.scanSpeed,
   );
@@ -1087,14 +1387,16 @@ export function Photos({
     const people = localFaces.people;
     const named = (people?.named ?? []).map(toEntry).filter((e) => e.uids.length > 0);
     const unnamed = (people?.unnamed ?? []).map(toEntry).filter((e) => e.uids.length > 0);
+    const hidden = (people?.hidden ?? []).map(toEntry).filter((e) => e.uids.length > 0);
     const byId = new Map([...named, ...unnamed].map((e) => [e.personId!, e]));
     const suggestions = (people?.suggestions ?? [])
       .map((s) => ({ unnamed: byId.get(s.unnamed), named: byId.get(s.named) }))
       .filter((s): s is { unnamed: LibraryEntry; named: LibraryEntry } => !!s.unnamed && !!s.named);
-    return { loaded: people !== null, named, unnamed, suggestions };
+    return { loaded: people !== null, named, unnamed, hidden, suggestions };
   }, [localFaces.people, timelineOrder, t]);
   const drivePeople = useMemo(() => toEntries(drive?.data?.people), [toEntries, drive]);
-  const peopleEntries = settings.localFaces ? localEntries.named : drivePeople;
+  // The people other devices saved show with the scan here off, while the backup is on.
+  const peopleEntries = settings.localFaces ? localEntries.named : settings.sharedBackup ? drivePeople : NO_ENTRIES;
   const scanLine = useMemo(() => {
     if (!settings.localFaces || !scanBusy(localFaces.status)) return null;
     const line = statusLine(localFaces.status);
@@ -1125,6 +1427,7 @@ export function Photos({
   const [peopleMenu, setPeopleMenu] = useState<{ x: number; y: number; entry: LibraryEntry } | null>(null);
   const [mergeFor, setMergeFor] = useState<LibraryEntry | null>(null);
   const [rejectPeople, setRejectPeople] = useState<string[] | null>(null);
+  const [hidePeople, setHidePeople] = useState<string[] | null>(null);
   // Set once after another account signed out: its File Explorer folder was turned off, and
   // this many files it downloaded are still in the folder.
   const [explorerOff, setExplorerOff] = useState<number | null>(null);
@@ -1143,12 +1446,91 @@ export function Photos({
   const [dateStatus, setDateStatus] = useState<DateEditStatus | null>(null);
   const [dateRun, setDateRun] = useState(false);
   const [dateEditMode, setDateEditMode] = useState<DateEditMode>("set");
+  // The photos the place editor is open for; its runs share the date editor's queue.
+  const [placeEditUids, setPlaceEditUids] = useState<string[] | null>(null);
+  // The photos the description and strip editor is open for; its runs share the queue too.
+  const [metaEdit, setMetaEdit] = useState<{ kind: MetaKind; uids: string[] } | null>(null);
+  const runKind = useRef<"date" | "place" | "meta">("date");
+  const startedRun = (kind: "date" | "place" | "meta" = "date") => {
+    runKind.current = kind;
+    setDateRun(true);
+  };
+  const openPlaceEdit = (uids: string[]) => {
+    if (uids.length === 0) return;
+    setDateEditUids(null);
+    setMetaEdit(null);
+    setPlaceEditUids(uids);
+  };
+  const openMetaEdit = (uids: string[], kind: MetaKind) => {
+    if (uids.length === 0) return;
+    setDateEditUids(null);
+    setPlaceEditUids(null);
+    setMetaEdit({ kind, uids });
+  };
+  /** Counts the opens, so each one starts the panel afresh rather than on the last run's result. */
+  const [dateEditOpens, setDateEditOpens] = useState(0);
   /** Opens the date editor beside the grid for `uids`; the viewer opens its own beside the photo. */
   const openDateEdit = (uids: string[], mode: DateEditMode = "set") => {
     if (uids.length === 0) return;
+    setPlaceEditUids(null);
+    setMetaEdit(null);
     setDateEditMode(mode);
     setDateEditUids(uids);
+    // While a run goes on the panel keeps following it, and shows how it ended.
+    if (!dateRun) setDateEditOpens((n) => n + 1);
   };
+  // Compress on Drive: a run a restart cut short is followed too; the grid reloads as copies replace originals.
+  useEffect(() => {
+    void rpc<CompressStatus>("cloudCompressStatus")
+      .then((s) => s.running && setCompressRun(true))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!compressRun) return;
+    let stopped = false;
+    let seen = 0;
+    const ask = async () => {
+      try {
+        const s = await rpc<CompressStatus>("cloudCompressStatus");
+        if (stopped) return;
+        setCompressStatus(s);
+        if (s.compressed >= seen + 10 || (!s.running && s.compressed > seen)) {
+          seen = s.compressed;
+          bumpReload();
+        }
+        if (!s.running) {
+          setCompressRun(false);
+          setCompressStatus(null);
+          setToast(
+            t(s.cancelled ? "compress.stopped" : "compress.toast", {
+              compressed: s.compressed,
+              saved: formatBytes(s.savedBytes),
+              kept: s.kept + s.failed,
+            }),
+          );
+          return;
+        }
+      } catch {
+        /* asked again below */
+      }
+      if (!stopped) window.setTimeout(ask, 1000);
+    };
+    void ask();
+    return () => {
+      stopped = true;
+    };
+  }, [compressRun]);
+  async function startCompress(uids: string[]) {
+    setCompressAsk(null);
+    try {
+      await rpc("startCloudCompress", { uids });
+      sel.clear();
+      setCompressRun(true);
+    } catch (e) {
+      setToast(String(e));
+    }
+  }
+
   // A run a restart cut short carries on by itself in the sidecar: followed here too.
   useEffect(() => {
     void rpc<DateEditStatus>("dateEditStatus")
@@ -1171,7 +1553,12 @@ export function Photos({
         }
         if (!s.running) {
           setDateRun(false);
-          setToast(t("dateEdit.toast", { changed: s.changed, failed: s.failed }));
+          setToast(
+            t(
+              runKind.current === "place" ? "placeEdit.toast" : runKind.current === "meta" ? "metaEdit.toast" : "dateEdit.toast",
+              { changed: s.changed, failed: s.failed },
+            ),
+          );
           return;
         }
       } catch {
@@ -1257,21 +1644,61 @@ export function Photos({
     [toEntries, localLabels.labels],
   );
   const openLabelPicker = () => setPickLabels([...selected].map((uid) => uid.slice(uid.indexOf("~") + 1)));
-
-  // A name or a label typed into the search finds that person's or label's photos, matched
-  // as the names are folded elsewhere: case and accents aside, anywhere in the name.
-  const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase().trim();
-  // A month and a year at the end of the strip's search ("2026 january", "jan 2026") are a
-  // date, as on Android: the photos of that month, year, or month of every year.
-  const dateQ = useMemo(
-    () => parseDateQuery(query, lang),
-    [query, lang],
+  // The labels with photos, most used first, and each photo's labels: read live from the labels,
+  // so a label put on or taken off a photo filters again at once.
+  const labelsByUse = useMemo(() => labelUsage(labelEntries), [labelEntries]);
+  const labelsOfPhoto = useMemo(() => labelIndex(labelEntries), [labelEntries]);
+  const labelNames = useMemo(
+    () => new Map(localLabels.labels.map((l) => [labelKey(l.name), l.name])),
+    [localLabels.labels],
   );
-  const textQuery = dateQ ? dateQ.rest : query;
+  // A picked label the account no longer has (deleted, renamed, labels turned off) leaves the filter.
+  useEffect(() => {
+    if (settings.driveLabels && !localLabels.loaded) return;
+    setLabelFilter((f) => pruneLabels(f, localLabels.labels.map((l) => l.name)));
+  }, [settings.driveLabels, localLabels.loaded, localLabels.labels]);
+  const filterToolRef = useRef<HTMLButtonElement>(null);
+  /** Opens the filter panel on `page`: in the sidebar layout under its button at the right. */
+  const openFilter = (page: FilterPage) => {
+    const from = settings.sidebarLayout
+      ? (filterToolRef.current ?? stripSearch.current?.parentElement)?.getBoundingClientRect()
+      : undefined;
+    setFilterAnchor(from ? { x: from.right, y: from.bottom + 6 } : undefined);
+    setFilterPage(page);
+    setFilterOpen(true);
+  };
+  // The page stays as it was while the panel fades out; opening sets it again.
+  const closeFilter = useCallback(() => setFilterOpen(false), []);
+  const filterShown = useLeaving(filterOpen, FILTER_LEAVE_MS);
+
+  const fold = (text: string) => foldText(text).trim();
+  // The label keyword typed at the end of the search ("labels", "labels:beach") offers the
+  // labels as chips; the text before it is what the rest of the search reads.
+  const labelKeywords = useLabelKeywords();
+  const labelSearch = useLabelSearch({
+    query,
+    setQuery,
+    usage: labelsByUse,
+    names: labelNames,
+    filter: labelFilter,
+    setFilter: setLabelFilter,
+    keywords: labelKeywords,
+    onMore: () => openFilter("labels"),
+  });
+  const labelTyping = labelSearch.typing;
+  // A label search finds exactly the labelled photos: no content, theme, name or album matches.
+  const labelSearching = labelFilter.keys.length > 0 || labelTyping !== null;
+  // A quoted term asks for that exact text only, so neither content nor theme search runs.
+  const contentSearchOff = labelSearching || hasQuote(query);
+  // A month and a year at the end of the strip's search ("2026 january", "jan 2026") are a
+  // date, as on Android: the photos of that month, year, or month of every year. Never inside
+  // quotes, nor in the label keyword's text.
+  const dateQ = useMemo(() => (labelTyping ? null : dateAtEnd(query, lang)), [labelTyping, query, lang]);
+  const textQuery = dateQ ? dateQ.rest : labelTyping ? labelTyping.rest : query;
   // The date a pause in the typing turned into a pill. A date typed after it takes over.
   const [datePin, setDatePin] = useState<DateQuery | null>(null);
-  // People and labels picked into the search as pills: their photos only, every pill at once.
-  const [namePins, setNamePins] = useState<{ kind: "people" | "labels"; name: string; uids: Set<string> }[]>([]);
+  // People picked into the search as pills: their photos only, every pill at once.
+  const [namePins, setNamePins] = useState<{ name: string; uids: Set<string> }[]>([]);
   useEffect(() => {
     if (!dateQ) return;
     const id = setTimeout(() => {
@@ -1282,17 +1709,44 @@ export function Photos({
   }, [dateQ]);
   const activeDate = dateQ ?? datePin;
   const searching = query.trim() !== "" || datePin !== null || namePins.length > 0;
-  const namedMatches = useMemo(() => {
-    const q = fold(textQuery);
-    if (q.length < 2) return [];
-    return [
-      ...peopleEntries.map((entry) => ({ kind: "people" as const, entry })),
-      ...labelEntries.map((entry) => ({ kind: "labels" as const, entry })),
-    ].filter(({ entry }) => fold(entry.name).includes(q));
+  // Each photo's people and labels, folded and joined so a quoted phrase never spans two names.
+  const namesOfPhoto = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const entry of [...peopleEntries, ...labelEntries]) {
+      const name = foldText(entry.name);
+      for (const uid of entry.uids) {
+        const had = out.get(uid);
+        out.set(uid, had === undefined ? name : had + FIELD + name);
+      }
+    }
+    return out;
+  }, [peopleEntries, labelEntries]);
+  // A photo's name and type folded once per index entry, not again as each batch comes in.
+  const metaFolded = useRef(new WeakMap<NodeMeta, string>());
+  const metaTextOf = (m: NodeMeta): string => {
+    let text = metaFolded.current.get(m);
+    if (text === undefined) {
+      text = metaText(m.name, m.mediaType);
+      metaFolded.current.set(m, text);
+    }
+    return text;
+  };
+  // The album picker searches its photos by the same texts and labels.
+  const pickerFieldsOf = useCallback(
+    (uid: string, namesOff: boolean) => {
+      const m = meta[uid];
+      return [m ? metaTextOf(m) : undefined, namesOff ? undefined : namesOfPhoto.get(uid)];
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textQuery, peopleEntries, labelEntries]);
-  const namedUids = useMemo(() => new Set(namedMatches.flatMap(({ entry }) => entry.uids)), [namedMatches]);
-  const query_ = textQuery.trim().toLowerCase();
+    [meta, namesOfPhoto],
+  );
+  const pickerSearch = useMemo<PickerSearch>(
+    () => ({ fieldsOf: pickerFieldsOf, labels: labelsByUse, labelNames, labelsOfPhoto, onActive: setPickerSearching }),
+    [pickerFieldsOf, labelsByUse, labelNames, labelsOfPhoto],
+  );
+  // Comma for any, space for all, a quoted span as one exact term.
+  const textAlternatives = useMemo(() => alternatives(textQuery), [textQuery]);
+  const hasText = textAlternatives.length > 0;
 
   const filtered = useMemo(() => {
     // A person, a label or the offline set is the whole question: no category, search or
@@ -1323,9 +1777,16 @@ export function Photos({
         : items;
 
     // Android parity: the album-hide only applies to the unfiltered timeline. A
-    // category selection (Favorites, Videos, ...) deliberately bypasses it, and so does a
-    // search, which looks for photos wherever they are filed.
-    if (selectedCats.length === 0 && !searching && settings.hideAlbumPhotos && albumMembers && albumMembers.size > 0) {
+    // category or label selection (Favorites, Videos, ...) deliberately bypasses it, and so
+    // does a search, which looks for photos wherever they are filed.
+    if (
+      selectedCats.length === 0 &&
+      labelFilter.keys.length === 0 &&
+      !searching &&
+      settings.hideAlbumPhotos &&
+      albumMembers &&
+      albumMembers.size > 0
+    ) {
       base = base.filter((it) => !albumMembers.has(it.uid));
     }
 
@@ -1344,21 +1805,35 @@ export function Photos({
 
     if (activeDate) base = base.filter((it) => inDate(it.captureTime, activeDate));
     for (const pin of namePins) base = base.filter((it) => pin.uids.has(it.uid));
-    if (query_) {
+    if (labelFilter.keys.length > 0) base = base.filter((it) => matchesLabels(it.uid, labelFilter, labelsOfPhoto));
+    if (hasText) {
       base = base.filter((it) => {
-        if (namedUids.has(it.uid)) return true;
+        // A photo not indexed yet is found only by its people and labels.
         const m = meta[it.uid];
-        if (!m) return false; // not indexed yet
-        return m.name.toLowerCase().includes(query_) || (m.mediaType ?? "").toLowerCase().includes(query_);
+        return matchesAlternatives(textAlternatives, [
+          m ? metaTextOf(m) : undefined,
+          labelSearching ? undefined : namesOfPhoto.get(it.uid),
+        ]);
       });
     }
     return ordered(base);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, allItems, categories, mediaType, query_, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namedUids, offlineAlbumItems, hidden]);
+  }, [items, allItems, categories, mediaType, labelFilter, labelsOfPhoto, textAlternatives, labelSearching, activeDate, namePins, searching, timelineSort, meta, settings.hideAlbumPhotos, albumMembers, uidFilter, namesOfPhoto, offlineAlbumItems, hidden]);
 
+
+  // The photos the Calendar lays out are the timeline's own, hidden ones out, and the ones
+  // filed in albums out too while "hide photos in albums" is on.
+  const calendarItems = useMemo(
+    () =>
+      settings.hideAlbumPhotos && albumMembers && albumMembers.size > 0
+        ? items.filter((it) => !albumMembers.has(it.uid))
+        : items,
+    [items, settings.hideAlbumPhotos, albumMembers],
+  );
 
   // What the phone's copies are read for, from the settings: each kind on its own switch.
-  const driveKinds = `${settings.driveFaces}:${settings.driveLabels}:${settings.semanticSearch}:${settings.localFaces || settings.sharedBackup}`;
+  const readKinds = driveReadKinds(settings);
+  const driveKinds = `${readKinds.faces}:${readKinds.labels}:${readKinds.search}:${readKinds.faceData}`;
   // Detailed diagnostics: every photo and file step noted, not only the slow ones.
   useEffect(() => {
     if (settingsLoaded) void rpc("diagSetDetailed", { on: settings.diagDetailed }).catch(() => {});
@@ -1374,6 +1849,7 @@ export function Photos({
       videos: settings.compressVideos,
       videoTier: settings.compressVideoTier,
       codec: settings.compressCodec,
+      local: settings.compressLocal,
     }).catch(() => {});
   }, [
     settingsLoaded,
@@ -1383,6 +1859,7 @@ export function Photos({
     settings.compressVideos,
     settings.compressVideoTier,
     settings.compressCodec,
+    settings.compressLocal,
   ]);
 
   // The shared backup reads the same kinds each round before it saves this computer's copies.
@@ -1390,12 +1867,9 @@ export function Photos({
     if (!settingsLoaded) return;
     void rpc("sharedBackupSet", {
       on: settings.sharedBackup,
-      faces: settings.driveFaces,
-      labels: settings.driveLabels,
-      search: settings.semanticSearch,
       // With the backup on, the face copies are read with face recognition off too: a delete of
       // the face data everywhere made on another device reaches this PC through them.
-      faceData: settings.localFaces || settings.sharedBackup,
+      ...readKinds,
     }).catch(() => {});
   }, [settingsLoaded, settings.sharedBackup, driveKinds]);
   const loadDrive = useCallback(
@@ -1404,13 +1878,13 @@ export function Photos({
       setDrive((d) => ({ state: "loading", data: d?.data ?? null, at: d?.at ?? 0 }));
       rpc<DriveCollections>("getDriveCollections", {
         refresh,
-        faces: settings.driveFaces,
-        labels: settings.driveLabels,
-        search: settings.semanticSearch,
         // Faces found on this PC are set beside the phone's, so its copy is read for them too.
-        faceData: settings.localFaces || settings.sharedBackup,
+        ...readKinds,
       })
-        .then((data) => setDrive({ state: "ready", data, at: Date.now() }))
+        .then((data) => {
+          setDrive({ state: "ready", data, at: Date.now() });
+          void pullSettings();
+        })
         .catch(() =>
           setDrive((d) => (d?.data ? { ...d, state: "ready" } : { state: "failed", data: null, at: d?.at ?? 0 })),
         );
@@ -1433,26 +1907,80 @@ export function Photos({
   useEffect(() => {
     if (!settingsLoaded) return;
     const every = window.setInterval(() => loadDrive(true), DRIVE_REFRESH_MS);
+    // Back in front: the photos feed looks now, and the timeline is read again here only when the
+    // feed is not to be trusted and the last read is over a minute old.
+    const timelineBack = () =>
+      void timelineReadOnReturn(timelineReadAt.current, navigator.onLine, (m) => rpc<{ healthy: boolean }>(m)).then(
+        (again) => again && bumpTimeline(),
+      );
     const onFocus = () => {
+      // The shared backup looks whether another device saved something; it asks Drive at most once a minute.
+      void rpc("sharedBackupCheck").catch(() => {});
+      timelineBack();
       if (driveAt.current > 0 && Date.now() - driveAt.current > DRIVE_REFRESH_ON_FOCUS_MS) loadDrive(true);
     };
+    // The quick look runs only while the window is on screen; the host says so as the window goes
+    // to the tray and back, and the page says how it starts (a launch into the tray never shows it).
+    const shown = () => void rpc("sharedBackupShown", { shown: document.visibilityState === "visible" }).catch(() => {});
+    shown();
+    const onShown = () => {
+      shown();
+      if (document.visibilityState === "visible") {
+        void rpc("sharedBackupCheck").catch(() => {});
+        timelineBack();
+      }
+    };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onShown);
     return () => {
       window.clearInterval(every);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onShown);
     };
-  }, [settingsLoaded, loadDrive]);
+  }, [settingsLoaded, loadDrive, bumpTimeline]);
 
   // Search by what a photo shows: the phone's index on Drive, asked once the typing settles.
-  const semanticOn =
-    settings.semanticSearch &&
-    (settings.localSearch
-      ? (localFaces.status?.search?.indexed ?? 0) > 0
-      : (drive?.data?.searchPhotos ?? 0) > 0);
+  const copyPhotos = drive?.data?.searchPhotos ?? 0;
+  const semanticOn = settings.localSearch ? (localFaces.status?.search?.indexed ?? 0) > 0 : searchOnOffer(settings, copyPhotos);
+  // With indexing off the query is embedded by the text model, fetched once the copies hold vectors.
+  const textModelNeeded = searchFromCopiesOnly(settings, copyPhotos);
+  useEffect(() => {
+    if (textModelNeeded) void rpc("semanticModelDownload").catch(() => {});
+  }, [textModelNeeded]);
   const [semanticHits, setSemanticHits] = useState<TimelineItem[]>([]);
+  // The themes (Food, Beach, ...) of the same index: asked while the Collection is open or a typed
+  // word names one, and again while the classification catches up or the index grows.
+  const [themeReply, setThemeReply] = useState<ThemesReply | null>(null);
+  const themeSlug = useMemo(
+    () => (semanticOn && !contentSearchOff ? matchTheme(textQuery) : null),
+    [semanticOn, contentSearchOff, textQuery],
+  );
+  const themesWanted =
+    semanticOn && ((view === "albums" && libraryPage === "collection") || themeSlug !== null);
+  const indexedPhotos = settings.localSearch ? (localFaces.status?.search?.indexed ?? 0) : copyPhotos;
+  useEffect(() => {
+    if (!themesWanted) return;
+    let live = true;
+    let timer: number | undefined;
+    const ask = () =>
+      rpc<ThemesReply>("themes").then(
+        (reply) => {
+          if (!live) return;
+          setThemeReply(reply);
+          if (reply.syncing) timer = window.setTimeout(ask, THEMES_POLL_MS);
+        },
+        () => undefined,
+      );
+    ask();
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
+  }, [themesWanted, indexedPhotos]);
+  const themeGroups = semanticOn ? (themeReply?.themes ?? []) : [];
   useEffect(() => {
     const q = textQuery.trim();
-    if (!semanticOn || q.length < SEMANTIC_MIN_CHARS) {
+    if (!semanticOn || contentSearchOff || q.length < SEMANTIC_MIN_CHARS) {
       setSemanticHits([]);
       return;
     }
@@ -1470,22 +1998,28 @@ export function Photos({
       live = false;
       window.clearTimeout(id);
     };
-  }, [semanticOn, textQuery, byLinkId]);
+  }, [semanticOn, contentSearchOff, textQuery, byLinkId]);
   /** The photos found by what they show and not already by their words, narrowed as the rest. */
   const semanticItems = useMemo(() => {
-    if (semanticHits.length === 0 || !searching || uidFilter) return [];
+    // A theme the query names comes first, best match first, then what the words describe.
+    const named = themeSlug ? themePhotos(themeGroups, themeSlug, byLinkId) : [];
+    const candidates = named.length > 0 ? [...named, ...semanticHits] : semanticHits;
+    if (candidates.length === 0 || !searching || uidFilter) return [];
     const shownAlready = new Set(filtered.map((it) => it.uid));
     const selectedCats = CATEGORIES.filter((c) => categories.has(c.key));
-    return semanticHits.filter(
+    const seen = new Set<string>();
+    return candidates.filter(
       (it) =>
         !shownAlready.has(it.uid) &&
+        !seen.has(it.uid) &&
+        (seen.add(it.uid), true) &&
         (!activeDate || inDate(it.captureTime, activeDate)) &&
         namePins.every((pin) => pin.uids.has(it.uid)) &&
         (selectedCats.length === 0 || selectedCats.some((cat) => it.tags?.some((tg) => cat.tags.includes(tg)))) &&
         (mediaType === "all" ||
           (isVideo(it.tags, meta[it.uid]?.mediaType ?? cachedMediaType(it.uid)) ?? false) === (mediaType === "video")),
     );
-  }, [semanticHits, searching, uidFilter, filtered, activeDate, namePins, categories, mediaType, meta]);
+  }, [semanticHits, themeSlug, themeGroups, byLinkId, searching, uidFilter, filtered, activeDate, namePins, categories, mediaType, meta]);
   /** What the grid shows, in its order: the photos found by their words, then by what they show.
    *  The viewer and the selection walk this. */
   const shown = useMemo(
@@ -1547,8 +2081,18 @@ export function Photos({
   }, [places, items]);
 
   // The shortcut row over the album list, in the Android app's order where they overlap.
+  const themeCards = useMemo(
+    () => themeEntries(themeGroups, byLinkId, (slug) => t(themeNameKey(slug))),
+    [themeGroups, byLinkId, t],
+  );
   const collectionSections: CollectionSection[] = [
     { key: "people", title: t("library.people"), entries: peopleEntries, onSeeAll: () => setLibraryPage("people") },
+    {
+      key: "themes",
+      title: t("library.themes"),
+      entries: themeCards.slice(0, THEME_ROW_LIMIT),
+      onSeeAll: () => setCollectionSection("themes"),
+    },
     {
       key: "onthisday",
       title: t("library.onThisDay"),
@@ -1603,6 +2147,12 @@ export function Photos({
     },
     { key: "map", label: t("library.map"), icon: <MapIcon size={18} />, onClick: () => openLibrary("map") },
     {
+      key: "calendar",
+      label: t("library.calendar"),
+      icon: <CalendarViewIcon size={18} />,
+      onClick: () => openLibrary("calendar"),
+    },
+    {
       key: "people",
       label: t("library.people"),
       icon: <FaceIcon size={18} />,
@@ -1616,15 +2166,15 @@ export function Photos({
     },
     {
       key: "offline",
-      label: t("library.offline"),
+      label: t(isMac ? "library.offlineMac" : "library.offline"),
       icon: <OfflinePinIcon size={18} />,
-      onClick: () => openFiltered({ name: t("library.offline"), uids: new Set(offlineUids), back: "albums", offline: true }),
+      onClick: () => openFiltered({ name: t(isMac ? "library.offlineMac" : "library.offline"), uids: new Set(offlineUids), back: "albums", offline: true }),
     },
     { key: "hidden", label: t("library.hidden"), icon: <LockIcon size={18} />, onClick: () => openLibrary("hidden") },
   ];
   const libraryTiles = libraryTilesAll.filter(
     (tile) =>
-      (tile.key !== "people" || settings.driveFaces || settings.localFaces) &&
+      (tile.key !== "people" || peopleOnOffer(settings, drivePeople.length)) &&
       (tile.key !== "labels" || settings.driveLabels),
   );
   /** The sidebar's groups: the photos themselves, the ways into them, and the tools. */
@@ -1667,7 +2217,7 @@ export function Photos({
           selected: view === "albums" && !librarySelected,
           onClick: () => goToView("albums"),
         },
-        ...fromTiles(["shared", "people", "labels", "map", "collection", "offline"]),
+        ...fromTiles(["shared", "people", "labels", "map", "calendar", "collection", "offline"]),
       ],
     },
     {
@@ -1717,6 +2267,26 @@ export function Photos({
       i === null || i < shown.length ? i : shown.length > 0 ? shown.length - 1 : null,
     );
   }, [shown.length]);
+
+  // Saving an edit writes a copy and reloads the timeline, which moves the photos after it along
+  // by one. Once the new timeline is in, the viewer goes to the copy, or back to the photo it
+  // showed when this list does not have the copy, never to the photo now at its old position.
+  // Before the paint, so the photo that slid into place is never shown.
+  const editFocus = useRef<{ copy?: string; from: string; items: TimelineItem[] } | null>(null);
+  function handleEdited(copy?: string) {
+    const from = lightboxIdx !== null ? shown[lightboxIdx]?.uid : undefined;
+    if (from) editFocus.current = { copy, from, items: allItems };
+    bumpReload();
+  }
+  useLayoutEffect(() => {
+    const focus = editFocus.current;
+    if (!focus || focus.items === allItems) return;
+    editFocus.current = null;
+    if (lightboxIdx === null) return;
+    const at = focus.copy ? shown.findIndex((f) => f.uid === focus.copy) : -1;
+    const back = shown.findIndex((f) => f.uid === focus.from);
+    if (at >= 0 || back >= 0) setLightboxIdx(at >= 0 ? at : back);
+  }, [allItems, shown]);
 
   const sections = useMemo(() => {
     if (timelineSort.by === "name") return [{ label: "name", items: filtered }];
@@ -1771,6 +2341,12 @@ export function Photos({
     return items.filter((it) => !inAlbum.has(it.uid));
   }, [items, albumPhotoUids]);
 
+  // The photos the collage's replace picker offers: every timeline photo that is not a video.
+  const collageCandidates = useMemo(
+    () => items.filter((it) => !isVideo(it.tags, cachedMediaType(it.uid))),
+    [items],
+  );
+
   // The open album's cover for the masthead, resolved on demand: the list may not have
   // warmed it if the album was reached from the sidebar.
   const heroCoverUids = useMemo(
@@ -1782,11 +2358,11 @@ export function Photos({
   // The top strip's search also finds albums by name, shown in a row over the photos it
   // finds. Only in the sidebar layout, where that one search stands for the whole library.
   const albumMatches = useMemo(() => {
-    const q = fold(textQuery);
-    if (!q) return [];
+    const q = fold(stripped(textQuery));
+    if (!q || labelSearching) return [];
     return (warm.albums ?? []).filter((a) => !hidden.isAlbum(a.uid) && fold(a.name ?? "").includes(q)).slice(0, 40);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textQuery, warm.albums, hidden]);
+  }, [textQuery, labelSearching, warm.albums, hidden]);
   const albumMatchCovers = useThumbnails(
     useMemo(() => albumMatches.map((a) => a.coverUid).filter((u): u is string => !!u), [albumMatches]),
   );
@@ -1799,8 +2375,8 @@ export function Photos({
   const stripSearch = useRef<HTMLInputElement>(null);
   /**
    * The names the search turns into pills, in the app's language and in English: the
-   * categories, the two types, and the people and labels the phone saved. Videos are the
-   * type rather than the category of the same name, as in the filter menu.
+   * categories, the two types, and the people. Videos are the type rather than the category
+   * of the same name, as in the filter. A label becomes a pill only through its keyword.
    */
   const searchTerms = useMemo(() => {
     const terms: (SearchTerm & { kind: string; icon: ReactNode; apply: () => void })[] = [];
@@ -1834,23 +2410,21 @@ export function Photos({
       icon: <PlayArrowIcon size={17} />,
       apply: () => setMediaType("video"),
     });
-    const named = (kind: "people" | "labels", entry: LibraryEntry) => ({
-      key: `${kind}:${entry.name}`,
-      label: entry.name,
-      forms: [foldPhrase(entry.name)],
-      kind: t(kind === "people" ? "library.people" : "library.labels"),
-      icon: kind === "people" ? <FaceIcon size={17} /> : <LabelIcon size={17} />,
-      apply: () =>
-        setNamePins((pins) =>
-          pins.some((p) => p.kind === kind && p.name === entry.name)
-            ? pins
-            : [...pins, { kind, name: entry.name, uids: new Set(entry.uids) }],
-        ),
-    });
-    for (const entry of peopleEntries) terms.push(named("people", entry));
-    for (const entry of labelEntries) terms.push(named("labels", entry));
+    for (const entry of peopleEntries) {
+      terms.push({
+        key: `people:${entry.name}`,
+        label: entry.name,
+        forms: [foldPhrase(entry.name)],
+        kind: t("library.people"),
+        icon: <FaceIcon size={17} />,
+        apply: () =>
+          setNamePins((pins) =>
+            pins.some((p) => p.name === entry.name) ? pins : [...pins, { name: entry.name, uids: new Set(entry.uids) }],
+          ),
+      });
+    }
     return terms;
-  }, [t, lang, peopleEntries, labelEntries]);
+  }, [t, lang, peopleEntries]);
   /** Picks a term: its pill goes in, and the words that named it leave the text. */
   const pickTerm = (term: (typeof searchTerms)[number], rest: string) => {
     term.apply();
@@ -1858,23 +2432,29 @@ export function Photos({
     setQuery([rest, datePart].filter(Boolean).join(" "));
   };
   // A whole name at the end of the text becomes its pill once the typing pauses, as on Android.
+  // Only the words outside quotes count, and none while the label keyword is typed.
+  const pillReadable = labelTyping ? "" : pillText(textQuery);
   useEffect(() => {
-    const found = termAtEnd(textQuery, searchTerms);
-    if (!found) return;
-    const id = window.setTimeout(() => pickTerm(found.term as (typeof searchTerms)[number], found.rest), DATE_PILL_MS);
+    const found = termAtEnd(pillReadable, searchTerms);
+    if (!found || !pillsByItself(found.term.key, themeSlug)) return;
+    const rest = restAfterPill(textQuery, pillReadable, found.rest);
+    const id = window.setTimeout(() => pickTerm(found.term as (typeof searchTerms)[number], rest), DATE_PILL_MS);
     return () => window.clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textQuery, searchTerms]);
-  /** Empties the search: the text and every pill it holds. */
+  }, [textQuery, pillReadable, searchTerms, themeSlug]);
+  /** Empties the search: the text and the pills it made. A picked label is a filter and stays
+   *  until its own pill is removed. */
   const clearSearch = () => {
     setQuery("");
     setDatePin(null);
     setNamePins([]);
-    resetFilter();
+    setCategories(new Set());
+    setMediaType("all");
   };
-  const searchSuggestions: SearchSuggestion[] = termsStartedAtEnd(textQuery, searchTerms).map(({ term, rest }) => {
+  const searchSuggestions: SearchSuggestion[] = termsStartedAtEnd(pillReadable, searchTerms).map(({ term, rest }) => {
     const full = term as (typeof searchTerms)[number];
-    return { key: full.key, label: full.label, kind: full.kind, icon: full.icon, onPick: () => pickTerm(full, rest) };
+    const left = restAfterPill(textQuery, pillReadable, rest);
+    return { key: full.key, label: full.label, kind: full.kind, icon: full.icon, onPick: () => pickTerm(full, left) };
   });
   /** What narrows the photos besides the text, shown in the strip's search: the date a
    *  pause turned into a pill, the type, the categories. */
@@ -1899,12 +2479,20 @@ export function Photos({
       onRemove: () => toggleCategory(c.key),
     })),
     ...namePins.map((pin) => ({
-      key: `${pin.kind}:${pin.name}`,
+      key: `people:${pin.name}`,
       label: pin.name,
-      icon: pin.kind === "people" ? <FaceIcon size={15} /> : <LabelIcon size={15} />,
+      icon: <FaceIcon size={15} />,
       onRemove: () => setNamePins((pins) => pins.filter((p) => p !== pin)),
     })),
+    ...labelSearch.pills,
   ];
+  // The clear button empties what the search made; label pills go one by one.
+  const searchClearable = query !== "" || searchPills.some((p) => !p.key.startsWith("label:"));
+  /** Labels picked in the filter panel; a new one takes the typed keyword out of the text. */
+  const pickLabelsInPanel = (next: LabelFilter) => {
+    if (labelTyping && next.keys.some((k) => !labelFilter.keys.includes(k))) setQuery(labelTyping.rest);
+    setLabelFilter(next);
+  };
   /** The strip's search reaches the whole library, so a query takes the page to its results. */
   const onGlobalQuery = (q: string) => {
     setQuery(q);
@@ -2084,16 +2672,104 @@ export function Photos({
     }
   }
 
-  /** Destroys the whole trash. The view below refetches once it is done. */
-  async function emptyTrash() {
+  /**
+   * Destroys what the Trash view listed when Empty trash was pressed, then follows Proton until
+   * those are gone. Whatever was trashed since, on another device, stays for the user to see first.
+   */
+  async function emptyTrash(listed: string[]) {
+    emptyingListed.current = listed;
+    setEmptying({ stage: "asking", left: null });
     try {
-      await rpc("emptyTrash");
-      setToast(t("trash.emptied"));
-      bumpReload();
+      const results = await rpc<{ uid: string; ok: boolean }[]>("emptyTrash", { uids: listed });
+      const gone = results.filter((r) => r.ok).map((r) => r.uid);
+      gone.forEach(dropPreview);
+      emptied.current = { gone, failed: results.length - gone.length };
+      setEmptying({ stage: "server", left: null });
     } catch (e) {
+      setEmptying(null);
       setToast(String(e));
     }
   }
+
+  // While the request runs, the listed items still in the trash are counted (listed, not read)
+  // every few seconds, so the count goes down as they go.
+  const emptyingAsking = emptying?.stage === "asking";
+  useEffect(() => {
+    if (!emptyingAsking) return;
+    const uids = emptyingListed.current;
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async () => {
+      const r = await rpc<{ count: number }>("trashCount", { uids }).catch(() => null);
+      if (!live) return;
+      if (r) setEmptying((e) => (e?.stage === "asking" ? { ...e, left: r.count } : e));
+      timer = setTimeout(() => void tick(), 4000);
+    };
+    timer = setTimeout(() => void tick(), 4000);
+    return () => {
+      live = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [emptyingAsking]);
+
+  // Proton may go on deleting after it answered: the destroyed items still in the trash are
+  // counted (listed, not read) every few seconds until none is left, for five minutes at most.
+  // Only the Trash view is read again, once at the end.
+  const emptyingServer = emptying?.stage === "server";
+  const tRef = useRef(t);
+  tRef.current = t;
+  useEffect(() => {
+    if (!emptyingServer) return;
+    let live = true;
+    const since = Date.now();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const { gone, failed } = emptied.current;
+    const tick = async () => {
+      const r = gone.length > 0 ? await rpc<{ count: number }>("trashCount", { uids: gone }).catch(() => null) : { count: 0 };
+      if (!live) return;
+      if (r?.count === 0) {
+        live = false;
+        setEmptying(null);
+        // The Trash view may not be open: what it keeps for next time loses them too.
+        const destroyed = new Set(gone);
+        warm.putTrash((warm.trash ?? []).filter((row) => !destroyed.has(row.uid)));
+        setTrashReload((n) => n + 1);
+        setToast(
+          failed > 0
+            ? tRef.current("trash.partial", { ok: gone.length, failed })
+            : tRef.current("trash.deleted", { count: gone.length }),
+        );
+        return;
+      }
+      if (r) setEmptying((e) => (e ? { ...e, left: r.count } : e));
+      if (Date.now() - since > 5 * 60_000) {
+        live = false;
+        setEmptying(null);
+        // Part gone, part not: every view reads afresh, the trash's kept copy included.
+        bumpReload();
+        setToast(tRef.current("trash.emptyingLater"));
+        return;
+      }
+      timer = setTimeout(() => void tick(), 4000);
+    };
+    void tick();
+    return () => {
+      live = false;
+      if (timer) clearTimeout(timer);
+    };
+    // `warm` and `bumpReload` are read as they stand when the emptying ends.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emptyingServer]);
+  /** The trash's count as shown: what Proton still holds while it empties. */
+  const shownTrashCount = emptying?.left ?? trashCount;
+  const emptyingLine = emptying && (
+    <span className="g-emptying" aria-live="polite">
+      <SpinnerIcon size={14} />
+      {emptying.left
+        ? t("trash.emptyingLeft", { count: emptying.left })
+        : t("trash.emptying")}
+    </span>
+  );
 
   /**
    * Puts the selected photos in an album. The whole selection goes down in one
@@ -2472,7 +3148,7 @@ export function Photos({
     ? {
         kind: "upload",
         label: uploads.progressLabel
-          ? `${t("avatar.uploading")} ${uploads.progressLabel}`
+          ? `${t(uploads.albumStep ? "avatar.addingToAlbum" : "avatar.uploading")} ${uploads.progressLabel}`
           : t("avatar.uploading"),
       }
     : downloading
@@ -2552,6 +3228,20 @@ export function Photos({
     () => selected.size > 0 && [...selected].every((u) => offlineUids.has(u)),
     [selected, offlineUids],
   );
+  // A GIF is made of one video: offered when the selection is exactly that.
+  const oneVideo = useMemo(() => {
+    if (selected.size !== 1) return null;
+    const uid = [...selected][0];
+    const item = items.find((it) => it.uid === uid);
+    return item && isVideo(item.tags, cachedMediaType(uid)) ? uid : null;
+  }, [selected, items]);
+  // A collage is made of two to nine photos, none of them a video.
+  const collageUids = useMemo(() => {
+    if (!canSelectForCollage(selected.size)) return null;
+    const uids = [...selected];
+    const found = uids.map((u) => items.find((it) => it.uid === u));
+    return found.every((it) => it && !isVideo(it.tags, cachedMediaType(it.uid))) ? uids : null;
+  }, [selected, items]);
   const photoActions: MenuAction[] = photoMenu
     ? [
         {
@@ -2567,7 +3257,51 @@ export function Photos({
           key: "editDate",
           label: t("selection.editDate"),
           icon: <CalendarIcon size={14} />,
-          onSelect: () => setDateEditUids([...selected]),
+          onSelect: () => openDateEdit([...selected]),
+        },
+        {
+          key: "editPlace",
+          label: t("selection.editPlace"),
+          icon: <PlaceIcon size={14} />,
+          onSelect: () => openPlaceEdit([...selected]),
+        },
+        {
+          key: "editText",
+          label: t("metaEdit.menuText"),
+          icon: <TextIcon size={14} />,
+          onSelect: () => openMetaEdit([...selected], "text"),
+        },
+        {
+          key: "stripMeta",
+          label: t("metaEdit.menuStrip"),
+          icon: <VisibilityOffIcon size={14} />,
+          onSelect: () => openMetaEdit([...selected], "strip"),
+        },
+        ...(oneVideo
+          ? [
+              {
+                key: "makeGif",
+                label: t("selection.makeGif"),
+                icon: <GifIcon size={14} />,
+                onSelect: () => setGifFor(oneVideo),
+              },
+            ]
+          : []),
+        ...(collageUids
+          ? [
+              {
+                key: "makeCollage",
+                label: t("selection.makeCollage"),
+                icon: <CollageIcon size={14} />,
+                onSelect: () => setCollageFor(collageUids),
+              },
+            ]
+          : []),
+        {
+          key: "compress",
+          label: t("selection.compress"),
+          icon: <CompressIcon size={14} />,
+          onSelect: () => setCompressAsk([...selected]),
         },
         {
           key: "favorite",
@@ -2656,6 +3390,8 @@ export function Photos({
           pills={searchPills}
           onClearAll={clearSearch}
           suggestions={searchSuggestions}
+          labelChips={labelSearch.chips}
+          clearable={searchClearable}
           activity={activity}
           dragging={uploads.dragging}
           onUpload={() => openUpload()}
@@ -2700,6 +3436,8 @@ export function Photos({
                     ? t("library.labels")
                     : uidFilter.back === "map"
                       ? t("library.map")
+                      : uidFilter.back === "calendar"
+                        ? t("library.calendar")
                       : uidFilter.back === "collection"
                         ? t("library.collection")
                         : uidFilter.back === "duplicates"
@@ -2749,6 +3487,9 @@ export function Photos({
                 onReject={async () => {
                   await localFaces.act("facePersonReject", { id: uidFilter.personId });
                 }}
+                onHide={async () => {
+                  await localFaces.act("facePersonHide", { id: uidFilter.personId });
+                }}
                 findOpen={findOpen}
                 onFind={
                   localEntries.named.some((e) => e.personId === uidFilter.personId)
@@ -2764,11 +3505,17 @@ export function Photos({
             <div className="g-pagehead">
               <h1 className="g-pagetitle">
                 {searching
-                  ? t("search.resultsTitle", {
-                      query: [query.trim(), datePin ? dateLabel(datePin, lang) : "", ...namePins.map((p) => p.name)]
+                  ? resultsTitle(
+                      [
+                        query.trim(),
+                        datePin ? dateLabel(datePin, lang) : "",
+                        ...namePins.map((p) => p.name),
+                        ...labelSearch.pills.map((p) => p.label),
+                      ]
                         .filter(Boolean)
                         .join(" "),
-                    })
+                      (q) => t("search.resultsTitle", { query: q }),
+                    )
                   : t("nav.photos")}
               </h1>
               <span className="g-pagesub">
@@ -2787,12 +3534,12 @@ export function Photos({
                 <ChevronDownIcon size={15} />
               </button>
               <button
-                className={`g-tool${activeFilterCount > 0 ? " on" : ""}`}
-                onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                setToolMenu({ kind: "filter", x: r.right, y: r.bottom + 6 });
-              }}
+                ref={filterToolRef}
+                data-filter-trigger
+                className={`g-tool${activeFilterCount > 0 || filterOpen ? " on" : ""}`}
+                onClick={() => (filterOpen ? closeFilter() : openFilter("filters"))}
                 title={t("filter.title")}
+                aria-expanded={filterOpen}
               >
                 <FilterIcon size={16} />
                 {activeFilterCount > 0 && <span className="g-toolbadge">{activeFilterCount}</span>}
@@ -2805,7 +3552,7 @@ export function Photos({
           <>
             <button
               className={`g-filterpill ${activeFilterCount > 0 ? "active" : ""}`}
-              onClick={() => setFilterOpen((o) => !o)}
+              onClick={() => (filterOpen ? closeFilter() : openFilter("filters"))}
               title={t("filter.title")}
             >
               <FilterIcon size={13} />
@@ -2832,6 +3579,8 @@ export function Photos({
               pills={searchPills}
               onClearAll={clearSearch}
               suggestions={searchSuggestions}
+              labelChips={labelSearch.chips}
+              clearable={searchClearable}
               onFocusChange={setSearchFocused}
             />
             <div className="g-spacer" />
@@ -2856,7 +3605,9 @@ export function Photos({
                             ? "fixDates.title"
                           : libraryPage === "hidden"
                             ? "hidden.title"
-                            : "library.map",
+                            : libraryPage === "calendar"
+                              ? "library.calendar"
+                              : "library.map",
                 )}
               </h1>
             </div>
@@ -2882,7 +3633,9 @@ export function Photos({
                   ? t("library.onThisDay")
                   : collectionSection === "seasons"
                     ? t("library.seasons")
-                    : t("library.collection")
+                    : collectionSection === "themes"
+                      ? t("library.themes")
+                      : t("library.collection")
                 : t(
                     libraryPage === "people"
                       ? "library.people"
@@ -2894,7 +3647,9 @@ export function Photos({
                             ? "fixDates.title"
                           : libraryPage === "hidden"
                             ? "hidden.title"
-                            : "library.map",
+                            : libraryPage === "calendar"
+                              ? "library.calendar"
+                              : "library.map",
                   )}
             </span>
             <div className="g-spacer" data-tauri-drag-region={sidebar ? "" : undefined} />
@@ -2903,19 +3658,33 @@ export function Photos({
         {view === "albums" && !albumOpen && !libraryPage && sidebar && (
           <>
             <div className="g-pagehead">
-              <h1 className="g-pagetitle">{t("nav.albums")}</h1>
-              <span className="g-pagesub">{warm.albums ? t(warm.albums.length === 1 ? "albums.countLabel.one" : "albums.countLabel.other", { count: warm.albums.length }) : "\u00a0"}</span>
+              <h1 className="g-pagetitle" style={arranging ? { color: "var(--accent)" } : undefined}>
+                {t(arranging ? "albums.arrange" : "nav.albums")}
+              </h1>
+              <span className="g-pagesub">
+                {arranging
+                  ? t("albums.arrangeSub")
+                  : warm.albums
+                    ? t(warm.albums.length === 1 ? "albums.countLabel.one" : "albums.countLabel.other", { count: warm.albums.length })
+                    : "\u00a0"}
+              </span>
             </div>
             <div className="g-spacer" data-tauri-drag-region="" />
-            <div className="g-tools">
-              <button className="g-tool" onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                setToolMenu({ kind: "albumSort", x: r.right, y: r.bottom + 6 });
-              }} title={t("sort.title")}>
-                <SortIcon size={18} />
-                <ChevronDownIcon size={15} />
+            {arranging ? (
+              <button className="g-uploadbtn" onClick={() => setAlbumArranging(false)}>
+                {t("albums.arrangeDone")}
               </button>
-            </div>
+            ) : (
+              <div className="g-tools">
+                <button className="g-tool" onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  setToolMenu({ kind: "albumSort", x: r.right, y: r.bottom + 6 });
+                }} title={t("sort.title")}>
+                  <SortIcon size={18} />
+                  <ChevronDownIcon size={15} />
+                </button>
+              </div>
+            )}
           </>
         )}
         {view === "albums" && !albumOpen && !libraryPage && !sidebar && (
@@ -3036,7 +3805,8 @@ export function Photos({
                 {!!trashCount && (
                   <button
                     className="g-titleact danger"
-                    onClick={() => setConfirmEmpty(true)}
+                    disabled={!!emptying}
+                    onClick={() => setConfirmEmpty([...trashListed.current])}
                     title={t("trash.emptyAction")}
                     aria-label={t("trash.emptyAction")}
                   >
@@ -3044,7 +3814,8 @@ export function Photos({
                   </button>
                 )}
               </div>
-              <span className="g-pagesub">{t(trashCount === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: trashCount ?? 0 })}</span>
+              <span className="g-pagesub">{t(shownTrashCount === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: shownTrashCount ?? 0 })}</span>
+              {emptyingLine}
             </div>
             <div className="g-spacer" data-tauri-drag-region="" />
           </>
@@ -3054,12 +3825,13 @@ export function Photos({
             {/* No redundant "Trash" label; the nav already says which view this is. A
                 count of nothing is not worth a pill, and neither is emptying an empty
                 trash, so both wait until there is something in there. */}
-            {!!trashCount && <span className="g-headpill count">{trashCount}</span>}
+            {!!shownTrashCount && <span className="g-headpill count">{shownTrashCount}</span>}
             {!!trashCount && (
-              <button className="g-chip danger" onClick={() => setConfirmEmpty(true)}>
+              <button className="g-chip danger" disabled={!!emptying} onClick={() => setConfirmEmpty([...trashListed.current])}>
                 {t("trash.emptyAction")}
               </button>
             )}
+            {emptyingLine}
           </>
         )}
         {((view === "trash" && !sidebar) || (view === "shared" && sharedAlbumOpen)) && (
@@ -3074,7 +3846,9 @@ export function Photos({
             onClick={() => openUpload()}
             title={
               uploads.running
-                ? t("photos.uploadingProgress", { progress: uploads.progressLabel })
+                ? t(uploads.albumStep ? "photos.addingToAlbumProgress" : "photos.uploadingProgress", {
+                    progress: uploads.progressLabel,
+                  })
                 : t("photos.uploadTitle")
             }
           >
@@ -3125,15 +3899,23 @@ export function Photos({
       )}
 
 
-      {view === "photos" && filterOpen && (
+      {view === "photos" && filterShown.value && (
         <FilterPanel
           categories={categories}
           onToggleCategory={toggleCategory}
           mediaType={mediaType}
           onMediaType={setMediaType}
+          labels={labelsByUse}
+          labelFilter={labelFilter}
+          onLabelFilter={pickLabelsInPanel}
+          page={filterPage}
+          onPage={setFilterPage}
+          omitVideoCategory={sidebar}
+          anchor={sidebar ? filterAnchor : undefined}
           activeCount={activeFilterCount}
           onReset={resetFilter}
-          onClose={() => setFilterOpen(false)}
+          onClose={closeFilter}
+          closing={filterShown.leaving}
         />
       )}
 
@@ -3167,7 +3949,7 @@ export function Photos({
       <div
         className={`g-scroll${view === "albums" && libraryPage === "map" ? " map-mode" : ""}${
           (findOpen && view === "photos" && uidFilter?.personId) ||
-          (dateEditUids && (view === "photos" || view === "albums"))
+          ((dateEditUids || placeEditUids || metaEdit) && (view === "photos" || view === "albums"))
             ? " with-panel"
             : ""
         }`}
@@ -3184,12 +3966,51 @@ export function Photos({
               <AlbumHero
                 heroRef={heroRef}
                 cover={albumOpen.coverUid ? albumCoverThumbs[albumOpen.coverUid] : null}
-                title={albumOpen.name || t("albums.untitled")}
-                sub={`${albumSpan ? photoSpanLabel(albumSpan, locale) : albumDateLabel(albumOpen.lastActivityTime)} · ${t(
-                  albumOpen.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other",
-                  { count: albumOpen.photoCount },
-                )}`}
+                title={photoArranging ? t("albums.arrangePhotos") : albumOpen.name || t("albums.untitled")}
+                accent={photoArranging}
+                sub={
+                  photoArranging
+                    ? arrangeState.selected > 0
+                      ? t(arrangeState.selected === 1 ? "selection.count.one" : "selection.count.other", {
+                          count: arrangeState.selected,
+                        })
+                      : t("albums.arrangePhotosSub")
+                    : `${albumSpan ? photoSpanLabel(albumSpan, locale) : albumDateLabel(albumOpen.lastActivityTime)} · ${t(
+                        albumOpen.photoCount === 1 ? "common.photoCount.one" : "common.photoCount.other",
+                        { count: albumOpen.photoCount },
+                      )}`
+                }
               >
+                {photoArranging ? (
+                  <>
+                    <button
+                      className="g-heroact"
+                      title={t("albums.arrangeStart")}
+                      onClick={() => arrange("start")}
+                      disabled={arrangeState.selected === 0}
+                    >
+                      <ArrowUpIcon size={17} />
+                      <span>{t("albums.arrangeStart")}</span>
+                    </button>
+                    <button
+                      className="g-heroact"
+                      title={t("albums.arrangeEnd")}
+                      onClick={() => arrange("end")}
+                      disabled={arrangeState.selected === 0}
+                    >
+                      <ArrowDownIcon size={17} />
+                      <span>{t("albums.arrangeEnd")}</span>
+                    </button>
+                    <button className="g-heroact" title={t("common.cancel")} onClick={() => arrange("cancel")}>
+                      <CloseIcon size={17} />
+                      <span>{t("common.cancel")}</span>
+                    </button>
+                    <button className="g-uploadbtn" onClick={() => arrange("done")}>
+                      {t("albums.arrangeDone")}
+                    </button>
+                  </>
+                ) : (
+                <>
                 <button
                   className="g-heroact"
                   title={t("albums.addPhotos")}
@@ -3232,10 +4053,19 @@ export function Photos({
                   <MoreHorizIcon size={17} />
                   <span>{t("albums.more")}</span>
                 </button>
+                </>
+                )}
               </AlbumHero>
             )}
             {albumOpen && <div className="g-albumhero-spacer" ref={heroSpacerRef} aria-hidden />}
-            {libraryPage === "map" ? (
+            {libraryPage === "calendar" ? (
+              <CalendarView
+                items={calendarItems}
+                month={calendarMonth}
+                onMonth={setCalendarMonth}
+                onOpenDay={(title, uids) => openFiltered({ name: title, uids: new Set(uids), back: "calendar" })}
+              />
+            ) : libraryPage === "map" ? (
               <MapView
                 points={mapPoints}
                 progress={places && !places.finished && places.reading ? { done: places.done, total: places.total } : null}
@@ -3247,7 +4077,11 @@ export function Photos({
             ) : libraryPage === "collection" ? (
               collectionSection ? (
                 <EntryGrid
-                  entries={memoryEntries[collectionSection === "onthisday" ? "onThisDay" : "seasons"]}
+                  entries={
+                    collectionSection === "themes"
+                      ? themeCards
+                      : memoryEntries[collectionSection === "onthisday" ? "onThisDay" : "seasons"]
+                  }
                   cardSize={Math.round((albumCellSize * 140) / 190)}
                   onOpen={(entry) => openFiltered({ name: entry.name, uids: new Set(entry.uids), back: "collection" })}
                 />
@@ -3276,6 +4110,10 @@ export function Photos({
                 }}
                 onRejectFaces={async (faceIds) => {
                   await localFaces.act("faceRejectFaces", { faceIds });
+                }}
+                hidden={localEntries.hidden}
+                onShow={async (entry) => {
+                  await localFaces.act("facePersonShow", { id: entry.personId });
                 }}
                 selected={peopleSel}
                 onToggle={togglePerson}
@@ -3348,6 +4186,18 @@ export function Photos({
                   albumCellSize={albumCellSize}
                   query={albumQuery}
                   sort={albumSort}
+                  layout={albumLayout}
+                  order={albumOrder}
+                  onOrderChange={(order) => updateSettings({ ...settings, albumOrder: order })}
+                  arranging={arranging}
+                  photoOrder={albumPhotoMode}
+                  arrangement={albumPhotoOrder.order}
+                  photoOrderReady={!albumOpen || albumPhotoOrder.ready}
+                  photoArranging={photoArranging && !!albumOpen}
+                  arrangeCommand={arrangeCommand}
+                  onArrangeState={setArrangeState}
+                  onArrangeSave={albumPhotoOrder.save}
+                  onArrangeEnd={() => setPhotoArranging(false)}
                   open={albumOpen}
                   onOpenChange={(a) => {
                     setAlbumOpen(a);
@@ -3360,8 +4210,13 @@ export function Photos({
                   onPhotoUids={setAlbumPhotoUids}
                   onSpan={setAlbumSpan}
                   onEditDate={openDateEdit}
-                  onDateEditStarted={() => setDateRun(true)}
+                  onEditPlace={openPlaceEdit}
+                  onEditMeta={openMetaEdit}
+                  onCompress={setCompressAsk}
+                  onMakeGif={setGifFor}
+                  onDateEditStarted={startedRun}
                   contentsRequest={albumContents}
+                  slideshowRequest={albumSlideshow}
                   onAlbumContext={(album, e) =>
                     setAlbumMenu({ x: e.clientX, y: e.clientY, target: album })
                   }
@@ -3448,9 +4303,9 @@ export function Photos({
         ) : view === "trash" ? (
           <Trash
             cellSize={cellSize}
-            reloadKey={reloadKey}
+            reloadKey={reloadKey + trashReload}
             initial={warm.trash}
-            onCount={setTrashCount}
+            onListed={onTrashListed}
             onRestored={bumpReload}
             onData={warm.putTrash}
           />
@@ -3494,12 +4349,12 @@ export function Photos({
             {!loading && hidingKnown && shown.length === 0 && albumMatches.length === 0 && !error && (
               <div className="g-empty">
                 <p className="g-empty-title">
-                  {activeFilterCount > 0 || query_ ? t("photos.noMatches") : t("photos.noPhotos")}
+                  {activeFilterCount > 0 || hasText ? t("photos.noMatches") : t("photos.noPhotos")}
                 </p>
-                {!(activeFilterCount > 0 || query_) && (
+                {!(activeFilterCount > 0 || hasText) && (
                   <p className="g-empty-sub">{t("photos.noPhotosSub")}</p>
                 )}
-                {query_ && indexing && (
+                {hasText && indexing && (
                   <p className="g-empty-sub">{t("photos.stillIndexing")}</p>
                 )}
               </div>
@@ -3538,15 +4393,42 @@ export function Photos({
       </div>
       {dateEditUids && (view === "photos" || view === "albums") && (
         <DateEditPanel
-          key={dateEditMode}
+          key={`${dateEditMode}-${dateEditOpens}`}
           initialMode={dateEditMode}
           uids={dateEditUids}
           status={dateStatus}
           onStarted={() => {
-            setDateRun(true);
+            setDateStatus(null); // not the last run's result until the first reading of this one
+            startedRun("date");
             sel.clear();
           }}
           onClose={() => setDateEditUids(null)}
+          top={scrollRef.current?.offsetTop ?? 0}
+        />
+      )}
+      {placeEditUids && (view === "photos" || view === "albums") && (
+        <PlaceEditPanel
+          uids={placeEditUids}
+          status={dateStatus}
+          onStarted={() => {
+            startedRun("place");
+            sel.clear();
+          }}
+          onClose={() => setPlaceEditUids(null)}
+          top={scrollRef.current?.offsetTop ?? 0}
+        />
+      )}
+      {metaEdit && (view === "photos" || view === "albums") && (
+        <MetaEditPanel
+          key={metaEdit.kind}
+          kind={metaEdit.kind}
+          uids={metaEdit.uids}
+          status={dateStatus}
+          onStarted={() => {
+            startedRun("meta");
+            sel.clear();
+          }}
+          onClose={() => setMetaEdit(null)}
           top={scrollRef.current?.offsetTop ?? 0}
         />
       )}
@@ -3608,6 +4490,12 @@ export function Photos({
               onSelect: () => setMergeFor(peopleMenu.entry),
             },
             {
+              key: "hide",
+              label: t("faces.hide"),
+              icon: <VisibilityOffIcon size={17} />,
+              onSelect: () => setHidePeople([peopleMenu.entry.personId!]),
+            },
+            {
               key: "reject",
               label: t("faces.notPerson"),
               danger: true,
@@ -3637,6 +4525,22 @@ export function Photos({
             setExplorerOff(null);
             // The File Explorer switch sits on the Storage page on Windows, the one place this shows.
             openSettings("storage");
+          }}
+        />
+      )}
+      {hidePeople && (
+        <Confirm
+          title={t("faces.hideTitle")}
+          message={t("faces.hideMessage")}
+          confirmLabel={t("faces.hideAction")}
+          onCancel={() => setHidePeople(null)}
+          onConfirm={() => {
+            const ids = hidePeople;
+            setHidePeople(null);
+            void runPeople(async () => {
+              for (let i = 0; i < ids.length; i++) await localFaces.act("facePersonHide", { id: ids[i] });
+              setPeopleSel(new Set());
+            });
           }}
         />
       )}
@@ -3735,7 +4639,11 @@ export function Photos({
             onCancel={sel.clear}
             onAddToAlbum={() => setPickAlbum(true)}
             onLabels={settings.driveLabels ? openLabelPicker : undefined}
-            onEditDate={() => setDateEditUids([...selected])}
+            onEditDate={() => openDateEdit([...selected])}
+            onEditPlace={() => openPlaceEdit([...selected])}
+            onCompress={() => setCompressAsk([...selected])}
+            onMakeGif={oneVideo ? () => setGifFor(oneVideo) : undefined}
+            onMakeCollage={collageUids ? () => setCollageFor(collageUids) : undefined}
             onDownload={() => void runSelection(downloadSelected)}
             // Local copies to free exist only in the File Explorer folder, on Windows.
             onFreeUp={isWindows ? () => void runSelection(freeUpSelected) : undefined}
@@ -3820,42 +4728,7 @@ export function Photos({
                     onSelect: () => setTimelineSort((s) => ({ ...s, asc: false })),
                   },
                 ]
-              : toolMenu.kind === "albumSort"
-                ? ALBUM_SORTS.map((s) => ({
-                    key: s.key,
-                    label: t(s.labelKey),
-                    checked: albumSort === s.key,
-                    onSelect: () => setAlbumSort(s.key),
-                  }))
-                : [
-                    ...(
-                      [
-                        ["all", "filter.mediaAll", <CollectionsIcon size={17} />],
-                        ["photo", "filter.mediaPhotos", <ImageIcon size={17} />],
-                        ["video", "filter.videos", <PlayArrowIcon size={17} />],
-                      ] as [MediaType, string, ReactNode][]
-                    ).map(([value, labelKey, icon]) => ({
-                      key: `type:${value}`,
-                      label: t(labelKey),
-                      icon,
-                      checked: mediaType === value,
-                      keepOpen: true,
-                      onSelect: () => setMediaType(value),
-                    })),
-                    // Videos are the type above already, so the category of the same name stays out.
-                    ...CATEGORIES.filter((c) => c.key !== "video").map((c, i) => ({
-                      key: `cat:${c.key}`,
-                      label: t(`category.${c.key}`),
-                      icon: CATEGORY_ICONS[c.key] ?? <ImageIcon size={17} />,
-                      checked: categories.has(c.key),
-                      keepOpen: true,
-                      separator: i === 0,
-                      onSelect: () => toggleCategory(c.key),
-                    })),
-                    ...(activeFilterCount > 0
-                      ? [{ key: "reset", label: t("filter.reset"), separator: true, onSelect: resetFilter }]
-                      : []),
-                  ]
+              : albumViewActions
           }
         />
       )}
@@ -3865,11 +4738,7 @@ export function Photos({
           x={albumSortAt.x}
           y={albumSortAt.y}
           onClose={() => setAlbumSortAt(null)}
-          actions={ALBUM_SORTS.map((s) => ({
-            key: s.key,
-            label: t(s.labelKey),
-            onSelect: () => setAlbumSort(s.key),
-          }))}
+          actions={albumViewActions}
         />
       )}
 
@@ -3913,10 +4782,42 @@ export function Photos({
           onClose={() => setAlbumMoreAt(null)}
           actions={[
             {
+              key: "slideshow",
+              label: t("slideshow.albumPlay"),
+              icon: <SlideshowIcon size={14} />,
+              onSelect: () => setAlbumSlideshow((n) => n + 1),
+            },
+            {
               key: "contents",
               label: t("viewer.contents"),
               icon: <ListIcon size={14} />,
               onSelect: () => setAlbumContents((n) => n + 1),
+            },
+            {
+              key: "photos:newest",
+              label: t("albums.photosNewest"),
+              checked: albumPhotoMode === "newest",
+              separator: true,
+              onSelect: () => setPhotoOrder("newest"),
+            },
+            {
+              key: "photos:oldest",
+              label: t("albums.photosOldest"),
+              checked: albumPhotoMode === "oldest",
+              onSelect: () => setPhotoOrder("oldest"),
+            },
+            {
+              key: "photos:custom",
+              label: t("albums.sortCustom"),
+              checked: albumPhotoMode === "custom",
+              onSelect: () => setPhotoOrder("custom"),
+            },
+            {
+              key: "photos:arrange",
+              label: t("albums.arrangePhotos"),
+              icon: <DragHandleIcon size={14} />,
+              disabled: albumPhotoUids.length < 2,
+              onSelect: () => setPhotoArranging(true),
             },
             {
               key: "rename",
@@ -3976,9 +4877,68 @@ export function Photos({
         />
       )}
 
-      {(downloading || toast) && (
+      {gifFor && (
+        <GifMaker
+          uid={gifFor}
+          onClose={() => setGifFor(null)}
+          onSaved={() => {
+            setGifFor(null);
+            sel.clear();
+            setToast(t("gif.toast"));
+            bumpReload();
+          }}
+        />
+      )}
+
+      {collageFor && (
+        <Collage
+          uids={collageFor}
+          candidates={collageCandidates}
+          cellSize={cellSize}
+          onClose={() => setCollageFor(null)}
+          onSaved={() => {
+            setCollageFor(null);
+            sel.clear();
+            setToast(t("collage.toast"));
+            bumpReload();
+          }}
+        />
+      )}
+
+      {compressAsk && (
+        <Confirm
+          title={t("compress.confirmTitle")}
+          message={t("compress.confirmMessage", { count: compressAsk.length })}
+          confirmLabel={t("compress.confirm", { count: compressAsk.length })}
+          onConfirm={() => void startCompress(compressAsk)}
+          onCancel={() => setCompressAsk(null)}
+        />
+      )}
+
+      {(downloading || toast || compressStatus) && (
         <div className="g-toast">
-          {downloading ? (
+          {!downloading && !toast && compressStatus ? (
+            <div className="g-toast-save cc-toast">
+              <span>
+                {t("compress.running", {
+                  done: compressStatus.done,
+                  total: compressStatus.total,
+                  saved: formatBytes(compressStatus.savedBytes),
+                })}
+              </span>
+              <div className="st-progress" role="progressbar">
+                <div
+                  className="st-progress-fill"
+                  style={{
+                    width: `${compressStatus.total > 0 ? Math.round((100 * (compressStatus.done + compressStatus.current)) / compressStatus.total) : 0}%`,
+                  }}
+                />
+              </div>
+              <button className="cc-stop" onClick={() => void rpc("stopCloudCompress").catch(() => {})}>
+                {t("dateEdit.stop")}
+              </button>
+            </div>
+          ) : downloading ? (
             saveProgress && saveProgress.total > 0 ? (
               <DownloadProgress
                 label={t("download.progress", {
@@ -4053,10 +5013,10 @@ export function Photos({
           confirmLabel={t("confirm.emptyConfirm")}
           danger
           irreversible
-          onCancel={() => setConfirmEmpty(false)}
+          onCancel={() => setConfirmEmpty(null)}
           onConfirm={() => {
-            setConfirmEmpty(false);
-            void emptyTrash();
+            setConfirmEmpty(null);
+            void emptyTrash(confirmEmpty);
           }}
         />
       )}
@@ -4146,15 +5106,29 @@ export function Photos({
       {current && (
         <Lightbox
           uid={current.uid}
-          onDateEditStarted={() => setDateRun(true)}
+          onDateEditStarted={startedRun}
+          onCompress={(uid) => setCompressAsk([uid])}
+          onMakeGif={(uid) => setGifFor(uid)}
           detailsExtra={
-            settings.localFaces ? (
-              <PhotoFaces
-                uid={current.uid}
-                names={localEntries.named.map((e) => e.name)}
-                version={localFaces.status?.version ?? 0}
-                act={localFaces.act}
-              />
+            settings.localFaces || settings.driveLabels ? (
+              <>
+                {settings.driveLabels && (
+                  <PhotoLabels
+                    photoKey={current.uid.slice(current.uid.indexOf("~") + 1)}
+                    labels={localLabels.labels}
+                    act={localLabels.act}
+                    onAdd={() => setPickLabels([current.uid.slice(current.uid.indexOf("~") + 1)])}
+                  />
+                )}
+                {settings.localFaces && (
+                  <PhotoFaces
+                    uid={current.uid}
+                    names={localEntries.named.map((e) => e.name)}
+                    version={localFaces.status?.version ?? 0}
+                    act={localFaces.act}
+                  />
+                )}
+              </>
             ) : undefined
           }
           isLocal={localUids.has(current.uid)}
@@ -4179,7 +5153,7 @@ export function Photos({
           onClose={() => setLightboxIdx(null)}
           onTrashed={handleTrashed}
           onRenamed={handleRenamed}
-          onEdited={bumpReload}
+          onEdited={handleEdited}
           isFavorite={!!current.tags?.includes(TAG.Favorite)}
           onFavoriteChanged={handleFavoriteChanged}
           hiding={
@@ -4208,6 +5182,7 @@ export function Photos({
           candidates={albumCandidates}
           cellSize={cellSize}
           busy={albumBusy}
+          search={pickerSearch}
           onConfirm={(uids) => void addPhotosToOpenAlbum(uids)}
           onClose={() => setAddPhotosOpen(false)}
         />
@@ -4217,6 +5192,7 @@ export function Photos({
         <ImportReview
           items={uploads.review}
           checks={uploads.checks}
+          reasons={uploads.reasons}
           progress={uploads.status.importing}
           onConfirm={(exclude, albums) => {
             openUpload();

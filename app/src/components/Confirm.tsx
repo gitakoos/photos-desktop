@@ -21,7 +21,9 @@
  */
 
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useT } from "../lib/i18n";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/Confirm.css";
 
 type Props = {
@@ -39,6 +41,8 @@ type Props = {
    * on Cancel, so the button has to be aimed at and hit deliberately.
    */
   irreversible?: boolean;
+  /** A notice with nothing to decide: the main button is the only one. */
+  noCancel?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 };
@@ -57,6 +61,7 @@ export function Confirm({
   altLabel,
   onAlt,
   irreversible,
+  noCancel,
   onConfirm,
   onCancel,
 }: Props) {
@@ -73,22 +78,20 @@ export function Confirm({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [onCancel, onConfirm, irreversible]);
 
-  return (
-    <div
-      className="cf-backdrop"
-      onClick={(e) => {
-        // Never let the click reach the lightbox or grid underneath.
-        e.stopPropagation();
-        onCancel();
-      }}
-    >
+  // Drawn at the page's top level: inside a panel with a transform (the viewer's info side),
+  // "fixed" is fixed to that panel, and the dialog was centred on it, half off the window.
+  return createPortal(
+    // The click never reaches the lightbox or grid underneath.
+    <div className="cf-backdrop" {...backdropClose(onCancel)}>
       <div className="cf-panel" role="alertdialog" onClick={(e) => e.stopPropagation()}>
         <h3 className="cf-title">{title}</h3>
         <p className="cf-msg">{message}</p>
         <div className="cf-actions">
-          <button className="cf-btn" autoFocus={irreversible} onClick={onCancel}>
-            {cancelLabel ?? t("common.cancel")}
-          </button>
+          {!noCancel && (
+            <button className="cf-btn" autoFocus={irreversible} onClick={onCancel}>
+              {cancelLabel ?? t("common.cancel")}
+            </button>
+          )}
           {altLabel && onAlt && (
             <button className="cf-btn" onClick={onAlt}>
               {altLabel}
@@ -103,6 +106,7 @@ export function Confirm({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

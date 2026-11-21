@@ -22,7 +22,9 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { barColor, formatBytes, type Account } from "./ProfileMenu";
-import { ChevronDownIcon, ChevronRightIcon, GearIcon, MenuIcon, SignOutIcon } from "./icons";
+import { invoke } from "@tauri-apps/api/core";
+import { ChevronDownIcon, ChevronRightIcon, GearIcon, MenuIcon, PowerIcon, SignOutIcon } from "./icons";
+import { isWindows } from "../lib/platform";
 import { useT } from "../lib/i18n";
 import "../styles/Sidebar.css";
 
@@ -281,6 +283,14 @@ export function Sidebar({
               <GearIcon size={16} />
               {t("settings.title")}
             </button>
+            {/* As in the top-right menu: outside Windows there is no tray Quit to end the app
+                with, so it lives here too. */}
+            {!isWindows && (
+              <button className="g-sb-acctitem" tabIndex={accountOpen ? 0 : -1} onClick={() => void invoke("request_quit")}>
+                <PowerIcon size={16} />
+                {t("menu.quit")}
+              </button>
+            )}
             <button
               className="g-sb-acctitem danger"
               tabIndex={accountOpen ? 0 : -1}

@@ -23,6 +23,7 @@
 .cf-backdrop {
   position: fixed;
   inset: 0;
+  user-select: none;
   z-index: 1100;
   display: grid;
   place-items: center;
@@ -89,4 +90,30 @@
 .cf-btn.danger:hover {
   filter: brightness(1.08);
   color: #fff;
+}
+
+/* The wait while a sign-out saves to Drive: a spinner beside the line, Cancel below. */
+.cf-saving {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 20px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg-primary);
+}
+.cf-saving .cf-spin {
+  display: inline-flex;
+  color: var(--accent);
+  animation: cf-spin 0.9s linear infinite;
+}
+@keyframes cf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-saving .cf-spin {
+    animation: none;
+  }
 }

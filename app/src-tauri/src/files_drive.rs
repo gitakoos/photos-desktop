@@ -170,9 +170,11 @@ fn save_prefs(app: &AppHandle, prefs: &Prefs) {
 }
 
 fn random_hex(bytes: usize) -> String {
-    use aes_gcm::aead::rand_core::RngCore;
+    use aes_gcm::aead::Generate;
     let mut raw = vec![0u8; bytes];
-    aes_gcm::aead::OsRng.fill_bytes(&mut raw);
+    for chunk in raw.chunks_mut(16) {
+        chunk.copy_from_slice(&<[u8; 16]>::generate()[..chunk.len()]);
+    }
     raw.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -180,9 +182,251 @@ fn random_hex(bytes: usize) -> String {
 
 struct Photo {
     uid: String,
+    /// The name it goes by in its folder.
     name: String,
+    /// Its own name, made safe: what `name` was made from.
+    base: String,
     size: u64,
     time_ms: i64,
+}
+
+/// Every name the drive has given out, by folder. A DELETE or a MOVE names a file, and the
+/// file manager sends it from a listing it read earlier, so a name must never come to stand
+/// for another photo: with names given out afresh at each listing, deleting `IMG_1.jpg`
+/// renumbered `IMG_1 (2).jpg` into its place, and the next DELETE trashed the photo that had
+/// been `IMG_1 (3).jpg`. So a photo keeps the name it was first given, and a name once given
+/// to one photo is never given to another (a rename asked for through the drive aside, which
+/// the file manager itself chose). The book is kept sealed per account (`NAMES_FILE`), since a
+/// file manager window outlives an app restart, and goes at sign-out.
+#[derive(Default)]
+struct NameBook {
+    folders: HashMap<String, Names>,
+    /// The account the book belongs to, once loaded for it.
+    account: Option<String>,
+    /// Whether the names were carried over from the last run. Until then a file manager
+    /// window from before may hold names this run gave to other photos (see `unsure`).
+    trusted: bool,
+    /// Changed since it was last saved.
+    dirty: bool,
+    /// Bumped at each listing, so the names a complete listing did not touch can be told.
+    generation: u64,
+}
+
+#[derive(Default)]
+struct Names {
+    by_uid: HashMap<String, Given>,
+    /// Lowercased name to the uid it was given to, the names a photo had before included.
+    owner: HashMap<String, String>,
+}
+
+struct Given {
+    /// The photo's own name, made safe, that `name` was made from.
+    base: String,
+    name: String,
+    /// The day (since 1970) a listing last held it, and the listing.
+    day: u32,
+    seen: u64,
+}
+
+/// A name of a photo no listing has held for this long may go, and only after a complete
+/// listing; the book never holds more than `MAX_NAMES`, unlisted names going first.
+const KEEP_UNLISTED_DAYS: u32 = 30;
+const MAX_NAMES: usize = 250_000;
+/// The sealed file the book is kept in, per account.
+const NAMES_FILE: &str = "drive-names.bin";
+
+fn today() -> u32 {
+    (now_ms() / 86_400_000).max(0) as u32
+}
+
+/// The book as it is sealed: per folder, `[uid, base, name, day]` and the earlier names.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredBook {
+    account: String,
+    folders: HashMap<String, StoredNames>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredNames {
+    names: Vec<(String, String, String, u32)>,
+    former: Vec<(String, String)>,
+}
+
+/// The book's folders: the timeline, the albums' own names, and each album's photos.
+const TIMELINE_NAMES: &str = "photos";
+const ALBUM_NAMES: &str = "albums";
+const TRASH_NAMES: &str = "trash";
+const SHARED_NAMES: &str = "shared";
+
+fn album_names_of(album_uid: &str) -> String {
+    format!("album/{album_uid}")
+}
+
+fn shared_album_names_of(album_uid: &str) -> String {
+    format!("shared/{album_uid}")
+}
+
+impl NameBook {
+    /// The name `uid` goes by in `folder`: the one it was given before while its own name
+    /// (`base`) is unchanged, else the first free one no other photo was ever given there.
+    /// `taken` adds the names the caller's listing holds.
+    fn name(&mut self, folder: &str, uid: &str, base: &str, taken: impl Fn(&str) -> bool) -> String {
+        let (day, seen) = (today(), self.generation);
+        let names = self.folders.entry(folder.to_string()).or_default();
+        if let Some(given) = names.by_uid.get_mut(uid) {
+            if given.base == base && names.owner.get(&given.name.to_lowercase()).map(String::as_str) == Some(uid) {
+                given.seen = seen;
+                if given.day != day {
+                    given.day = day;
+                    self.dirty = true;
+                }
+                return given.name.clone();
+            }
+        }
+        let name = unique_name(base, |c| names.owner.get(c).is_some_and(|o| o != uid) || taken(c));
+        names.owner.insert(name.to_lowercase(), uid.to_string());
+        names.by_uid.insert(uid.to_string(), Given { base: base.to_string(), name: name.clone(), day, seen });
+        self.dirty = true;
+        name
+    }
+
+    /// A name the file manager chose for `uid` by renaming it through the drive.
+    fn rename(&mut self, folder: &str, uid: &str, name: &str) {
+        let (day, seen) = (today(), self.generation);
+        let names = self.folders.entry(folder.to_string()).or_default();
+        if let Some(old) = names.owner.insert(name.to_lowercase(), uid.to_string()) {
+            // The name was another photo's: it is this one's alone now, and that photo, when
+            // the name was still its own (one not listed, in the trash), takes a new one.
+            if old != uid && names.by_uid.get(&old).is_some_and(|g| g.name.to_lowercase() == name.to_lowercase()) {
+                let base = names.by_uid[&old].base.clone();
+                let fresh = unique_name(&base, |c| names.owner.get(c).is_some_and(|o| o != &old) || c == name.to_lowercase());
+                names.owner.insert(fresh.to_lowercase(), old.clone());
+                if let Some(g) = names.by_uid.get_mut(&old) {
+                    g.name = fresh;
+                }
+            }
+        }
+        let given = Given { base: name.to_string(), name: name.to_string(), day, seen };
+        names.by_uid.insert(uid.to_string(), given);
+        self.dirty = true;
+    }
+
+    /// Lets go of the names of photos the complete listing just made (`generation`) did not
+    /// hold, once none has held them for `KEEP_UNLISTED_DAYS`, and beyond `MAX_NAMES` the
+    /// longest unlisted first. A listed photo's name always stays.
+    fn prune(&mut self, today: u32, cap: usize) {
+        let generation = self.generation;
+        let unlisted = |g: &Given| g.seen != generation;
+        let mut drop: Vec<(String, String, u32)> = Vec::new();
+        let mut total = 0usize;
+        for (folder, names) in &self.folders {
+            total += names.by_uid.len();
+            for (uid, g) in &names.by_uid {
+                if unlisted(g) {
+                    drop.push((folder.clone(), uid.clone(), g.day));
+                }
+            }
+        }
+        drop.sort_by_key(|(_, _, day)| *day);
+        let old = drop.iter().take_while(|(_, _, day)| today.saturating_sub(*day) > KEEP_UNLISTED_DAYS).count();
+        let take = old.max(total.saturating_sub(cap)).min(drop.len());
+        if take == 0 {
+            return;
+        }
+        let mut by_folder: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        for (folder, uid, _) in drop.into_iter().take(take) {
+            by_folder.entry(folder).or_default().insert(uid);
+        }
+        for (folder, uids) in by_folder {
+            if let Some(names) = self.folders.get_mut(&folder) {
+                names.by_uid.retain(|u, _| !uids.contains(u));
+                names.owner.retain(|_, u| !uids.contains(u));
+            }
+        }
+        self.folders.retain(|_, n| !n.by_uid.is_empty());
+        self.dirty = true;
+    }
+
+    /// The book for sealing, when it belongs to an account.
+    fn to_stored(&self) -> Option<String> {
+        let account = self.account.clone()?;
+        let folders = self
+            .folders
+            .iter()
+            .map(|(folder, names)| {
+                let current: std::collections::HashSet<String> =
+                    names.by_uid.values().map(|g| g.name.to_lowercase()).collect();
+                let stored = StoredNames {
+                    names: names
+                        .by_uid
+                        .iter()
+                        .map(|(uid, g)| (uid.clone(), g.base.clone(), g.name.clone(), g.day))
+                        .collect(),
+                    former: names
+                        .owner
+                        .iter()
+                        .filter(|(name, _)| !current.contains(*name))
+                        .map(|(name, uid)| (name.clone(), uid.clone()))
+                        .collect(),
+                };
+                (folder.clone(), stored)
+            })
+            .collect();
+        serde_json::to_string(&StoredBook { account, folders }).ok()
+    }
+
+    /// The book sealed for `account`, or `None` when the text is not one, is another
+    /// account's, or does not hold together (two photos under one name).
+    fn from_stored(text: &str, account: &str) -> Option<NameBook> {
+        let stored: StoredBook = serde_json::from_str(text).ok()?;
+        if stored.account != account {
+            return None;
+        }
+        let mut book = NameBook { account: Some(account.to_string()), trusted: true, ..NameBook::default() };
+        for (folder, s) in stored.folders {
+            let mut names = Names::default();
+            for (uid, base, name, day) in s.names {
+                if uid.is_empty() || name.is_empty() || names.owner.insert(name.to_lowercase(), uid.clone()).is_some() {
+                    return None;
+                }
+                names.by_uid.insert(uid, Given { base, name, day, seen: 0 });
+            }
+            for (name, uid) in s.former {
+                if !names.by_uid.contains_key(&uid) || names.owner.insert(name, uid).is_some() {
+                    return None;
+                }
+            }
+            book.folders.insert(folder, names);
+        }
+        Some(book)
+    }
+}
+
+/// Whether `name` carries a number the drive adds to tell apart photos of one name:
+/// `IMG_1 (2).jpg`.
+fn numbered(name: &str) -> bool {
+    let stem = match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    };
+    stem.strip_suffix(')')
+        .and_then(|s| s.rsplit_once(" ("))
+        .is_some_and(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The name a photo of `name`'s own name would take beside it: `IMG_1 (2).jpg`.
+fn second_of(name: &str) -> String {
+    match name.rfind('.') {
+        Some(i) if i > 0 => format!("{} (2){}", &name[..i], &name[i..]),
+        _ => format!("{name} (2)"),
+    }
+}
+
+/// The one book of a running app, shared by every listing and kept across locks, so a file
+/// manager still showing an earlier listing never reaches a different photo by its name.
+fn process_names() -> Arc<Mutex<NameBook>> {
+    static BOOK: std::sync::OnceLock<Arc<Mutex<NameBook>>> = std::sync::OnceLock::new();
+    BOOK.get_or_init(Arc::default).clone()
 }
 
 struct Album {
@@ -225,23 +469,56 @@ struct Index {
     shared_albums: Vec<SharedAlbum>,
     shared_album_names: HashMap<String, usize>,
     built: Option<Instant>,
+    /// The names given out so far, shared with the listings before and after this one.
+    book: Arc<Mutex<NameBook>>,
+}
+
+impl Index {
+    /// An empty listing that gives out names from `book`.
+    fn with_book(book: Arc<Mutex<NameBook>>) -> Index {
+        Index { book, ..Index::default() }
+    }
+
+    /// An empty listing for the next build, keeping every name this one gave out.
+    fn next(&self) -> Index {
+        Index::with_book(self.book.clone())
+    }
 }
 
 /// A folder of photos outside the timeline, with names unique within it.
 #[derive(Default)]
 struct Shelf {
+    /// Its folder in the name book.
+    folder: String,
     photos: Vec<Photo>,
     names: HashMap<String, usize>,
 }
 
 impl Shelf {
-    fn push(&mut self, uid: &str, raw_name: &str, size: u64, time_ms: i64) {
-        if uid.is_empty() || size == 0 || self.photos.iter().any(|p| p.uid == uid) {
+    fn new(folder: &str) -> Shelf {
+        Shelf { folder: folder.to_string(), ..Shelf::default() }
+    }
+
+    fn push(&mut self, book: &mut NameBook, uid: &str, raw_name: &str, size: u64, time_ms: i64) {
+        if uid.is_empty() || size == 0 {
             return;
         }
-        let name = unique_name(&sanitize_name(raw_name), |c| self.names.contains_key(c));
-        self.names.insert(name.to_lowercase(), self.photos.len());
-        self.photos.push(Photo { uid: uid.to_string(), name, size, time_ms });
+        let base = sanitize_name(raw_name);
+        let names = &self.names;
+        let name = book.name(&self.folder, uid, &base, |c| names.contains_key(c));
+        match self.photos.iter().position(|p| p.uid == uid) {
+            // Listed already.
+            Some(at) if self.names.get(&self.photos[at].name.to_lowercase()) == Some(&at) => {}
+            // Taken out earlier while the app ran, and back now: linked in where it was.
+            Some(at) => {
+                self.photos[at].name = name.clone();
+                self.names.insert(name.to_lowercase(), at);
+            }
+            None => {
+                self.names.insert(name.to_lowercase(), self.photos.len());
+                self.photos.push(Photo { uid: uid.to_string(), name, base, size, time_ms });
+            }
+        }
     }
 
     fn remove(&mut self, uid: &str) {
@@ -261,10 +538,11 @@ impl Shelf {
             .map(|(_, p)| p)
     }
 
-    fn from_json(items: Option<&serde_json::Value>) -> Shelf {
-        let mut shelf = Shelf::default();
+    fn from_json(book: &mut NameBook, folder: &str, items: Option<&serde_json::Value>) -> Shelf {
+        let mut shelf = Shelf::new(folder);
         for item in items.and_then(|v| v.as_array()).into_iter().flatten() {
             shelf.push(
+                book,
                 item.get("uid").and_then(|v| v.as_str()).unwrap_or_default(),
                 item.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
                 item.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -286,26 +564,39 @@ impl Index {
         if uid.is_empty() || size == 0 || self.by_uid.contains_key(uid) {
             return;
         }
-        let name = unique_name(&sanitize_name(raw_name), |c| self.photo_names.contains_key(c));
+        let base = sanitize_name(raw_name);
+        let names = &self.photo_names;
+        let name = self.book.lock().unwrap().name(TIMELINE_NAMES, uid, &base, |c| names.contains_key(c));
         self.photo_names.insert(name.to_lowercase(), self.photos.len());
         self.by_uid.insert(uid.to_string(), self.photos.len());
-        self.photos.push(Photo { uid: uid.to_string(), name, size, time_ms });
+        self.photos.push(Photo { uid: uid.to_string(), name, base, size, time_ms });
+    }
+
+    /// The name photo `at` goes by in the folder of album `album_uid`, whose names so far
+    /// are `taken`: made from its name on the timeline.
+    fn album_file_name(&self, album_uid: &str, at: usize, taken: &HashMap<String, usize>) -> String {
+        let p = &self.photos[at];
+        self.book.lock().unwrap().name(&album_names_of(album_uid), &p.uid, &p.name, |c| taken.contains_key(c))
     }
 
     /// The trash and the shared folders, from `listExtrasForMount`.
     fn set_extras(&mut self, extras: &serde_json::Value) {
-        self.trash = Shelf::from_json(extras.get("trash"));
-        self.shared = Shelf::from_json(extras.get("shared"));
+        let mut book = self.book.lock().unwrap();
+        self.trash = Shelf::from_json(&mut book, TRASH_NAMES, extras.get("trash"));
+        self.shared = Shelf::from_json(&mut book, SHARED_NAMES, extras.get("shared"));
         self.shared_albums.clear();
         self.shared_album_names.clear();
         for album in extras.get("sharedAlbums").and_then(|v| v.as_array()).into_iter().flatten() {
             let uid = album.get("uid").and_then(|v| v.as_str()).unwrap_or_default().to_string();
             let raw = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
-            let name = unique_name(&sanitize_name(raw), |c| {
-                self.shared_album_names.contains_key(c) || self.shared.names.contains_key(c)
+            // In `Shared/` beside the photos shared on their own, so from the same names.
+            let (folders, photos) = (&self.shared_album_names, &self.shared.names);
+            let name = book.name(SHARED_NAMES, &format!("album:{uid}"), &sanitize_name(raw), |c| {
+                folders.contains_key(c) || photos.contains_key(c)
             });
+            let shelf = Shelf::from_json(&mut book, &shared_album_names_of(&uid), album.get("photos"));
             self.shared_album_names.insert(name.to_lowercase(), self.shared_albums.len());
-            self.shared_albums.push(SharedAlbum { uid, name, shelf: Shelf::from_json(album.get("photos")) });
+            self.shared_albums.push(SharedAlbum { uid, name, shelf });
         }
     }
 
@@ -313,8 +604,8 @@ impl Index {
     fn trash_photo(&mut self, uid: &str) {
         if let Some(&at) = self.by_uid.get(uid) {
             let p = &self.photos[at];
-            let (name, size, time_ms) = (p.name.clone(), p.size, p.time_ms);
-            self.trash.push(uid, &name, size, time_ms);
+            let (base, size, time_ms) = (p.base.clone(), p.size, p.time_ms);
+            self.trash.push(&mut self.book.lock().unwrap(), uid, &base, size, time_ms);
         }
         self.favorites.remove(uid);
         self.forget_photo(uid);
@@ -322,17 +613,19 @@ impl Index {
 
     /// A photo just restored: out of `Trash/`, back on the timeline.
     fn restore_photo(&mut self, uid: &str) {
-        let restored = self.trash.photos.iter().find(|p| p.uid == uid).map(|p| (p.name.clone(), p.size, p.time_ms));
+        let restored = self.trash.photos.iter().find(|p| p.uid == uid).map(|p| (p.base.clone(), p.size, p.time_ms));
         self.trash.remove(uid);
-        let Some((name, size, time_ms)) = restored else { return };
+        let Some((base, size, time_ms)) = restored else { return };
         if let Some(at) = self.photos.iter().position(|p| p.uid == uid) {
-            // Forgotten earlier while the app ran: linked back in where it was.
-            let name = unique_name(&name, |c| self.photo_names.contains_key(c));
+            // Forgotten earlier while the app ran: linked back in where it was, under the
+            // name it had.
+            let names = &self.photo_names;
+            let name = self.book.lock().unwrap().name(TIMELINE_NAMES, uid, &base, |c| names.contains_key(c));
             self.photos[at].name = name.clone();
             self.photo_names.insert(name.to_lowercase(), at);
             self.by_uid.insert(uid.to_string(), at);
         } else {
-            self.push_photo(uid, &name, size, time_ms);
+            self.push_photo(uid, &base, size, time_ms);
         }
     }
 
@@ -356,27 +649,22 @@ impl Index {
     }
 
     fn add_to_album(&mut self, album_uid: &str, uid: &str) {
-        let (Some(&a), Some(&at)) = (self.album_by_uid.get(album_uid), self.by_uid.get(uid)) else {
-            return;
-        };
-        let album = &mut self.albums[a];
-        if album.files.iter().any(|(_, p)| *p == at) {
-            return;
-        }
-        let name = unique_name(&self.photos[at].name, |c| album.names.contains_key(c));
-        album.names.insert(name.to_lowercase(), album.files.len());
-        album.files.push((name, at));
+        self.add_member(album_uid, uid);
     }
 
     fn rename_photo(&mut self, uid: &str, name: &str) {
         let Some(&at) = self.by_uid.get(uid) else { return };
+        self.book.lock().unwrap().rename(TIMELINE_NAMES, uid, name);
+        self.photos[at].base = name.to_string();
         let old = std::mem::replace(&mut self.photos[at].name, name.to_string());
         self.photo_names.remove(&old.to_lowercase());
         self.photo_names.insert(name.to_lowercase(), at);
-        for album in &mut self.albums {
-            let Some(i) = album.files.iter().position(|(_, p)| *p == at) else { continue };
-            album.names.remove(&album.files[i].0.to_lowercase());
-            let fresh = unique_name(name, |c| album.names.contains_key(c));
+        for a in 0..self.albums.len() {
+            let Some(i) = self.albums[a].files.iter().position(|(_, p)| *p == at) else { continue };
+            let gone = self.albums[a].files[i].0.to_lowercase();
+            self.albums[a].names.remove(&gone);
+            let fresh = self.album_file_name(&self.albums[a].uid, at, &self.albums[a].names);
+            let album = &mut self.albums[a];
             album.names.insert(fresh.to_lowercase(), i);
             album.files[i].0 = fresh;
         }
@@ -384,6 +672,7 @@ impl Index {
 
     fn rename_album(&mut self, uid: &str, name: &str) {
         let Some(&a) = self.album_by_uid.get(uid) else { return };
+        self.book.lock().unwrap().rename(ALBUM_NAMES, uid, name);
         let old = std::mem::replace(&mut self.albums[a].name, name.to_string());
         self.album_names.remove(&old.to_lowercase());
         self.album_names.insert(name.to_lowercase(), a);
@@ -447,13 +736,17 @@ impl Index {
                 continue;
             }
             let raw = album.get("name").and_then(|v| v.as_str()).unwrap_or("Album");
-            let name = unique_name(&sanitize_name(raw), |c| self.album_names.contains_key(c));
+            let names = &self.album_names;
+            let name = self.book.lock().unwrap().name(ALBUM_NAMES, uid, &sanitize_name(raw), |c| names.contains_key(c));
             let mut entry = Album { uid: uid.to_string(), name, files: Vec::new(), names: HashMap::new() };
             for member in album.get("uids").and_then(|v| v.as_array()).into_iter().flatten() {
                 // A photo the timeline does not list (one shared into the album by
                 // someone else) has no name or size here, as on Windows.
                 let Some(&at) = member.as_str().and_then(|u| self.by_uid.get(u)) else { continue };
-                let file = unique_name(&self.photos[at].name, |c| entry.names.contains_key(c));
+                if entry.files.iter().any(|(_, i)| *i == at) {
+                    continue;
+                }
+                let file = self.album_file_name(uid, at, &entry.names);
                 entry.names.insert(file.to_lowercase(), entry.files.len());
                 entry.files.push((file, at));
             }
@@ -467,12 +760,11 @@ impl Index {
     /// dragged there is there when the file manager looks again.
     fn add_member(&mut self, album_uid: &str, photo_uid: &str) {
         let (Some(&a), Some(&at)) = (self.album_by_uid.get(album_uid), self.by_uid.get(photo_uid)) else { return };
-        let photo_name = self.photos[at].name.clone();
-        let entry = &mut self.albums[a];
-        if entry.files.iter().any(|(_, i)| *i == at) {
+        if self.albums[a].files.iter().any(|(_, i)| *i == at) {
             return;
         }
-        let file = unique_name(&photo_name, |c| entry.names.contains_key(c));
+        let file = self.album_file_name(album_uid, at, &self.albums[a].names);
+        let entry = &mut self.albums[a];
         entry.names.insert(file.to_lowercase(), entry.files.len());
         entry.files.push((file, at));
     }
@@ -616,6 +908,9 @@ struct Drive {
     notices: Mutex<HashMap<Notice, usize>>,
     /// Whether this process has already retried the staged uploads an earlier one left.
     retried: AtomicBool,
+    /// The folders a file manager has listed (a PROPFIND of depth 1) since the names were
+    /// last set up, by lowercased path (see `unsure`).
+    listed: Mutex<std::collections::HashSet<String>>,
     /// Whether deleting and renaming reach the library (the Settings option).
     edits: AtomicBool,
     /// Whether `Photos/` is split into year and month folders (the Settings option).
@@ -699,7 +994,7 @@ pub fn start(app: &AppHandle) {
         uid,
         live: AtomicBool::new(false),
         session: AtomicU64::new(0),
-        index: RwLock::new(Index::default()),
+        index: RwLock::new(Index::with_book(process_names())),
         refreshing: Mutex::new((false, false)),
         refresh_soon: AtomicBool::new(false),
         watching_uploads: AtomicBool::new(false),
@@ -709,6 +1004,7 @@ pub fn start(app: &AppHandle) {
         folders: Mutex::new(HashMap::new()),
         staged: Mutex::new(Vec::new()),
         retried: AtomicBool::new(false),
+        listed: Mutex::new(std::collections::HashSet::new()),
         notices: Mutex::new(HashMap::new()),
         edits: AtomicBool::new(prefs.edits),
         by_date: AtomicBool::new(prefs.by_date),
@@ -792,7 +1088,10 @@ pub fn session_ended() {
     let Some(d) = drive() else { return };
     d.live.store(false, Ordering::SeqCst);
     d.session.fetch_add(1, Ordering::SeqCst);
-    *d.index.write().unwrap() = Index::default();
+    {
+        let mut index = d.index.write().unwrap();
+        *index = index.next();
+    }
     d.folders.lock().unwrap().clear();
     d.staged.lock().unwrap().clear();
     sweep_hydrated(&d, true);
@@ -882,11 +1181,15 @@ fn build(d: &Drive) {
     // The first listing of a session fills the live one page by page, so the file manager
     // shows photos while a large library is still being read. A later rebuild is made on
     // the side and swapped in whole, so nothing a user is looking at blinks out meanwhile.
+    // The names this account's drive gave out in earlier runs, before the first photo is named.
+    if !names_ready(d) {
+        return;
+    }
     let first = d.index.read().unwrap().photos.is_empty();
     // The first listing is what the file manager waits on, so the window says it is under
     // way; a later rebuild is a quiet check and names nothing.
     let _doing = first.then(|| crate::cloud_mount::Doing::new(&d.app, "fill", None, None));
-    let mut fresh = Index::default();
+    let mut fresh = d.index.read().unwrap().next();
     let mut offset = 0u64;
     // Sized the way the Explorer folder's fill is: a cold page resolves every photo in it
     // over the network and starts small, one answered from cache costs milliseconds.
@@ -951,6 +1254,8 @@ fn build(d: &Drive) {
     // call, so a library with many albums never runs one call past the host's deadline.
     const ALBUM_PAGE: u64 = 12;
     let mut albums: Vec<serde_json::Value> = Vec::new();
+    // Whether every part of the library was read, which alone lets unlisted names go.
+    let mut complete = true;
     let mut offset = 0u64;
     loop {
         let page = match crate::sidecar_rpc(
@@ -962,6 +1267,7 @@ fn build(d: &Drive) {
             Err(e) => {
                 crate::note(&d.app, &format!("[drive] albums skipped: {e}"));
                 albums.clear();
+                complete = false;
                 break;
             }
         };
@@ -981,6 +1287,7 @@ fn build(d: &Drive) {
     let extras = crate::sidecar_rpc(&d.app, "listExtrasForMount", serde_json::json!({}))
         .unwrap_or_else(|e| {
             crate::note(&d.app, &format!("[drive] trash and shared skipped: {e}"));
+            complete = false;
             serde_json::json!({})
         });
     let mut live = d.index.write().unwrap();
@@ -1001,6 +1308,99 @@ fn build(d: &Drive) {
         &d.app,
         &format!("[drive] listing: {} photos, {} albums", live.photos.len(), live.albums.len()),
     );
+    let stored = {
+        let mut book = live.book.lock().unwrap();
+        if complete {
+            book.prune(today(), MAX_NAMES);
+        }
+        let stored = if book.dirty { book.to_stored() } else { None };
+        if stored.is_some() {
+            book.dirty = false;
+        }
+        stored
+    };
+    drop(live);
+    if let Some(text) = stored {
+        if let Err(e) = crate::secure_store::write_sealed(&d.app, NAMES_FILE, &text) {
+            crate::note(&d.app, &format!("[drive] names not saved: {e}"));
+            process_names().lock().unwrap().dirty = true;
+        }
+    }
+}
+
+/// Sets the name book up for the signed-in account, once per account: the one sealed by an
+/// earlier run, or a new one that is not trusted (see `unsure`). Also starts a listing's
+/// generation. False when the account cannot be told, and nothing is listed then.
+fn names_ready(d: &Drive) -> bool {
+    let book = d.index.read().unwrap().book.clone();
+    let account = {
+        let b = book.lock().unwrap();
+        b.account.clone()
+    };
+    let who = match crate::sidecar_rpc(&d.app, "whoami", serde_json::json!({})) {
+        Ok(v) => v.get("email").and_then(|e| e.as_str()).map(|e| e.trim().to_lowercase()),
+        Err(_) => None,
+    };
+    let Some(who) = who.filter(|w| !w.is_empty()) else {
+        crate::note(&d.app, "[drive] listing waits: the account is not known yet");
+        return false;
+    };
+    if account.as_deref() != Some(who.as_str()) {
+        let text = crate::secure_store::read_sealed(&d.app, NAMES_FILE);
+        let loaded = load_names(text, &who);
+        if !loaded.trusted {
+            crate::note(&d.app, "[drive] no names from an earlier run; numbered names wait for a fresh listing");
+        }
+        *book.lock().unwrap() = loaded;
+        d.listed.lock().unwrap().clear();
+    }
+    book.lock().unwrap().generation += 1;
+    true
+}
+
+/// The book read back for `account`: the sealed one, or, when there is none, it cannot be
+/// read, does not parse or is another account's, a new one that is not trusted.
+fn load_names(text: Result<Option<String>, String>, account: &str) -> NameBook {
+    text.ok()
+        .flatten()
+        .and_then(|t| NameBook::from_stored(&t, account))
+        .unwrap_or_else(|| NameBook { account: Some(account.to_string()), dirty: true, ..NameBook::default() })
+}
+
+/// The account signed out or another signed in: its names go from memory and from disk.
+pub fn forget_names(app: &AppHandle) {
+    *process_names().lock().unwrap() = NameBook::default();
+    if let Some(d) = drive() {
+        d.listed.lock().unwrap().clear();
+    }
+    if let Ok(dir) = crate::secure_store::app_dir(app) {
+        let _ = std::fs::remove_file(dir.join(NAMES_FILE));
+    }
+}
+
+/// Whether a DELETE or MOVE of `segs` could reach a photo other than the one the file manager
+/// means. That can only be when the names did not carry over from the last run (the book was
+/// missing or unreadable) and the file manager has not listed the folder since: a window left
+/// open across the restart may still show names this run gave to other photos. A numbered
+/// name (`IMG_1 (2).jpg`) is then refused, and so is a plain one that has a numbered one
+/// beside it, until the folder has been listed once.
+fn unsure(d: &Drive, index: &Index, segs: &[String], node: &Node) -> bool {
+    if !matches!(node, Node::Photo { .. } | Node::Dir(Dir::Album { .. })) {
+        return false;
+    }
+    let Some((name, parent)) = segs.split_last() else { return false };
+    let trusted = index.book.lock().unwrap().trusted;
+    let listed = d.listed.lock().unwrap().contains(&key_of(parent));
+    doubtful(trusted, listed, name, || {
+        let mut beside = parent.to_vec();
+        beside.push(second_of(name));
+        resolve(d, index, &beside).is_some()
+    })
+}
+
+/// The rule of `unsure`: `has_second` tells whether a numbered name stands beside `name`.
+fn doubtful(trusted: bool, listed: bool, name: &str, has_second: impl FnOnce() -> bool) -> bool {
+    !trusted && !listed && (numbered(name) || has_second())
 }
 
 // ---- Downloaded copies ----
@@ -1902,6 +2302,22 @@ fn etag_of(uid: &str, size: u64) -> String {
     format!("\"{h:016x}-{size:x}\"")
 }
 
+/// The tag a listing gave `node`, when it is a file.
+fn etag_of_node(node: &Node) -> Option<String> {
+    match node {
+        Node::Photo { uid, size, .. } => Some(etag_of(uid, *size)),
+        Node::Staged { path, size, .. } => Some(etag_of(&path.to_string_lossy(), *size)),
+        Node::Dir(_) => None,
+    }
+}
+
+/// Whether a request that names the file it expects (`If-Match`, a tag the listing gave)
+/// would reach another one. Such a request is refused rather than acted on.
+fn stale(if_match: Option<&str>, node: &Node) -> bool {
+    let (Some(wanted), Some(tag)) = (if_match.map(str::trim), etag_of_node(node)) else { return false };
+    wanted != "*" && !wanted.split(',').any(|t| t.trim().trim_start_matches("W/") == tag)
+}
+
 fn href(token: &str, segs: &[String], dir: bool) -> String {
     let mut out = format!("/{token}/");
     for (i, s) in segs.iter().enumerate() {
@@ -1917,13 +2333,11 @@ fn href(token: &str, segs: &[String], dir: bool) -> String {
 }
 
 fn prop_entry(xml: &mut String, token: &str, segs: &[String], node: &Node, fallback_ms: i64) {
-    let (dir, size, time_ms, etag) = match node {
-        Node::Dir(Dir::Folder(f)) => (true, 0, f.made_ms, None),
-        Node::Dir(_) => (true, 0, fallback_ms, None),
-        Node::Photo { uid, size, time_ms, .. } => (false, *size, *time_ms, Some(etag_of(uid, *size))),
-        Node::Staged { size, time_ms, path, .. } => {
-            (false, *size, *time_ms, Some(etag_of(&path.to_string_lossy(), *size)))
-        }
+    let etag = etag_of_node(node);
+    let (dir, size, time_ms) = match node {
+        Node::Dir(Dir::Folder(f)) => (true, 0, f.made_ms),
+        Node::Dir(_) => (true, 0, fallback_ms),
+        Node::Photo { size, time_ms, .. } | Node::Staged { size, time_ms, .. } => (false, *size, *time_ms),
     };
     xml.push_str("<D:response><D:href>");
     xml.push_str(&xml_escape(&href(token, segs, dir)));
@@ -1958,6 +2372,9 @@ fn propfind(d: &Arc<Drive>, request: &mut Request, segs: &[String]) -> Answer {
         refresh(d);
     }
     let Some(node) = resolve(d, &index, segs) else { return text(404, "Not found") };
+    if let (false, Node::Dir(_)) = (depth0, &node) {
+        d.listed.lock().unwrap().insert(key_of(segs));
+    }
 
     let started = now_ms();
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><D:multistatus xmlns:D=\"DAV:\">");
@@ -2184,29 +2601,21 @@ fn put(d: &Arc<Drive>, request: &mut Request, segs: &[String]) -> Answer {
     if std::fs::create_dir_all(&folder).is_err() {
         return text(507, "No room to take this file");
     }
-    let path = folder.join(name);
     // The original's modification time, which GVfs sends along: the upload falls back on
     // it for a file with no date of its own, as it does for a file dropped on the window.
     let modified = header(request, "X-OC-Mtime")
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(|secs| UNIX_EPOCH + Duration::from_secs(secs));
-    let written = File::create(&path).and_then(|mut f| {
-        let n = std::io::copy(request.as_reader(), &mut f)?;
-        f.sync_all()?;
-        if let Some(time) = modified {
-            let _ = f.set_modified(time);
-        }
-        Ok(n)
-    });
-    let size = match written {
-        Ok(n) if n > 0 => n,
-        Ok(_) => {
+    let expected = request.body_length().map(|n| n as u64);
+    let (path, size) = match stage_body(&folder, name, request.as_reader(), expected, modified) {
+        Ok(staged) => staged,
+        Err(failure) => {
             let _ = std::fs::remove_dir_all(&folder);
-            return text(403, "An empty file is not a photo or a video");
-        }
-        Err(_) => {
-            let _ = std::fs::remove_dir_all(&folder);
-            return text(500, "The file did not arrive whole");
+            return match failure {
+                Staging::Empty => text(403, "An empty file is not a photo or a video"),
+                Staging::Short => text(400, "The file did not arrive whole"),
+                Staging::Failed => text(507, "No room to take this file"),
+            };
         }
     };
     d.staged.lock().unwrap().push(Staged {
@@ -2225,6 +2634,90 @@ fn put(d: &Arc<Drive>, request: &mut Request, segs: &[String]) -> Answer {
     let d = d.clone();
     std::thread::spawn(move || upload_staged(&d, path, target, favorite));
     text(201, "Created")
+}
+
+/// Beside a staged copy that arrived whole: its length, written before the copy takes its
+/// own name. A copy is written under `.<name>.part` until then, so a write cut short (the
+/// connection lost, the app ended) is never mistaken for the file.
+const WHOLE_NOTE: &str = ".whole";
+const PART_SUFFIX: &str = ".part";
+
+/// Why a PUT's body was not staged.
+#[derive(Debug, PartialEq)]
+enum Staging {
+    Empty,
+    /// Fewer or more bytes than the request said it carried, or the connection broke off.
+    Short,
+    /// The disk would not take it.
+    Failed,
+}
+
+/// Write a PUT's body into `folder` as `name`: under a temporary name until it is all there
+/// (as long as `expected`, when the client gave a length) and on disk, then under its own,
+/// with its length noted beside it. Answers the staged file and its length.
+fn stage_body(
+    folder: &Path,
+    name: &str,
+    body: &mut dyn Read,
+    expected: Option<u64>,
+    modified: Option<SystemTime>,
+) -> Result<(PathBuf, u64), Staging> {
+    let part = folder.join(format!(".{name}{PART_SUFFIX}"));
+    let mut file = File::create(&part).map_err(|_| Staging::Failed)?;
+    let n = std::io::copy(body, &mut file).map_err(|_| Staging::Short)?;
+    if n == 0 {
+        return Err(Staging::Empty);
+    }
+    if expected.is_some_and(|e| e != n) {
+        return Err(Staging::Short);
+    }
+    if let Some(time) = modified {
+        let _ = file.set_modified(time);
+    }
+    file.sync_all().map_err(|_| Staging::Failed)?;
+    drop(file);
+    let mut note = File::create(folder.join(WHOLE_NOTE)).map_err(|_| Staging::Failed)?;
+    std::io::Write::write_all(&mut note, n.to_string().as_bytes()).map_err(|_| Staging::Failed)?;
+    note.sync_all().map_err(|_| Staging::Failed)?;
+    let path = folder.join(name);
+    std::fs::rename(&part, &path).map_err(|_| Staging::Failed)?;
+    if let Ok(dir) = File::open(folder) {
+        let _ = dir.sync_all();
+    }
+    Ok((path, n))
+}
+
+/// What an earlier run left in one staging folder.
+#[derive(Debug, PartialEq)]
+enum Leftover {
+    /// A copy that arrived whole: uploaded again.
+    Whole(PathBuf),
+    /// No copy under its own name: a write cut short before it was answered, so nothing was
+    /// promised for it and the file manager kept the original.
+    CutShort,
+    /// A copy whose length is not the one noted when it arrived: left where it is, never
+    /// uploaded as the photo and never deleted.
+    Damaged(PathBuf),
+}
+
+fn leftover(folder: &Path) -> Leftover {
+    let files: Vec<PathBuf> = std::fs::read_dir(folder)
+        .map(|r| r.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    let staged = files.into_iter().find(|p| {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        !name.starts_with('.') && p.is_file() && UPLOADABLE.contains(&crate::local_file::extension_of(&name).as_str())
+    });
+    let Some(path) = staged else { return Leftover::CutShort };
+    let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+    match std::fs::read_to_string(folder.join(WHOLE_NOTE)) {
+        Ok(noted) if size > 0 && noted.trim().parse::<u64>().ok() == Some(size) => Leftover::Whole(path),
+        Ok(_) => Leftover::Damaged(path),
+        // Staged before copies were noted. That version answered only once the write had
+        // ended, and the copy may be the only one left, so it goes up as it did then.
+        Err(_) if size > 0 => Leftover::Whole(path),
+        Err(_) => Leftover::Damaged(path),
+    }
 }
 
 /// The file next to a staged copy that names the album it goes into, so a copy whose
@@ -2268,6 +2761,71 @@ fn upload_staged(d: &Arc<Drive>, path: PathBuf, target: Option<Arc<Mutex<Target>
     }
 }
 
+/// Beside a staged copy whose original is in the trash already, so an upload tried again
+/// does not put a second one there.
+const KEPT_NOTE: &str = ".kept";
+/// Where an original is linked from on its way to the trash: beside `pfp-drop/`, never in it,
+/// so one put back from the trash is never taken for a staged copy and uploaded or deleted.
+const ORIGINALS_DIR: &str = "pfp-originals";
+
+/// A staged copy is about to go up as a lighter copy, and the library will hold nothing
+/// better of it: the file manager deleted the original when it moved the file in. So the
+/// full-quality bytes go to the desktop's trash first, as the File Explorer folder sends its
+/// original to the Recycle Bin. Asked by the sidecar, which uploads the original as it is
+/// when this fails.
+pub fn keep_original(path: &str) -> Result<serde_json::Value, String> {
+    let d = drive().ok_or("the drive is not running")?;
+    let staged = Path::new(path);
+    let folder = staged_folder(&d.drop_root, staged).ok_or("not a staged copy")?;
+    keep_original_in(&d.drop_root, &folder, staged, crate::local_file::recycle)?;
+    Ok(serde_json::Value::Null)
+}
+
+/// The staging folder of `staged`, when it is a file of the drive's own staging and nothing else.
+fn staged_folder(drop_root: &Path, staged: &Path) -> Option<PathBuf> {
+    let name = staged.file_name()?.to_string_lossy().into_owned();
+    if name.starts_with('.') || !std::fs::symlink_metadata(staged).ok()?.is_file() {
+        return None;
+    }
+    let folder = staged.parent()?;
+    let root = std::fs::canonicalize(drop_root).ok()?;
+    (std::fs::canonicalize(folder.parent()?).ok()? == root).then(|| folder.to_path_buf())
+}
+
+/// Puts a copy of `staged` in the trash with `trash`, by a second link to its bytes (or a
+/// copy, where the disk takes no links), leaving the staged copy itself for the upload.
+fn keep_original_in(
+    drop_root: &Path,
+    folder: &Path,
+    staged: &Path,
+    trash: impl Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if folder.join(KEPT_NOTE).exists() {
+        return Ok(());
+    }
+    let name = staged.file_name().ok_or("no name")?;
+    let place = drop_root.parent().ok_or("no cache folder")?.join(ORIGINALS_DIR).join(random_hex(8));
+    private_dir(&place);
+    let original = place.join(name);
+    let linked = std::fs::hard_link(staged, &original).is_ok()
+        || (std::fs::copy(staged, &original).is_ok()
+            && File::open(&original).and_then(|f| f.sync_all()).is_ok()
+            && std::fs::metadata(&original).ok().map(|m| m.len()) == std::fs::metadata(staged).ok().map(|m| m.len()));
+    if !linked {
+        let _ = std::fs::remove_dir_all(&place);
+        return Err("the original could not be set aside".into());
+    }
+    if let Err(e) = trash(&original) {
+        let _ = std::fs::remove_dir_all(&place);
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir(&place);
+    if let Ok(mut note) = File::create(folder.join(KEPT_NOTE)) {
+        let _ = std::io::Write::write_all(&mut note, b"1").and_then(|_| note.sync_all());
+    }
+    Ok(())
+}
+
 /// Staged copies an earlier session did not get into the library, uploaded again. Each
 /// sits in its own folder under `pfp-drop/`, with the album it was meant for beside it.
 /// A copy that is already in the library comes back as a duplicate and is only deleted.
@@ -2275,19 +2833,16 @@ fn retry_staged(d: &Arc<Drive>) {
     let Ok(folders) = std::fs::read_dir(&d.drop_root) else { return };
     let mut retried = 0usize;
     for folder in folders.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-        let files: Vec<PathBuf> = std::fs::read_dir(&folder)
-            .map(|r| r.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default();
-        let staged = files.iter().find(|p| {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            !name.starts_with('.')
-                && p.is_file()
-                && UPLOADABLE.contains(&crate::local_file::extension_of(&name).as_str())
-        });
-        let Some(path) = staged.cloned() else {
-            // A write cut short before it was answered: nothing was promised for it.
-            let _ = std::fs::remove_dir_all(&folder);
-            continue;
+        let path = match leftover(&folder) {
+            Leftover::Whole(path) => path,
+            Leftover::CutShort => {
+                let _ = std::fs::remove_dir_all(&folder);
+                continue;
+            }
+            Leftover::Damaged(_) => {
+                crate::note(&d.app, "[drive] a staged copy is not the length it arrived with; left as it is");
+                continue;
+            }
         };
         let target = std::fs::read_to_string(folder.join(ALBUM_NOTE))
             .ok()
@@ -2353,6 +2908,7 @@ fn copy(d: &Drive, request: &Request, segs: &[String]) -> Answer {
 }
 
 const EDITS_OFF: &str = "Deleting and renaming in Files is turned off in Photos for Proton";
+const RELIST: &str = "Photos for Proton has restarted: open this folder again first";
 
 /// A sidecar call that changes the library, true when it reports success: a call that
 /// answers per photo (trash, album removal) succeeds only when its one photo did.
@@ -2374,13 +2930,21 @@ fn changed(d: &Drive, method: &str, params: serde_json::Value) -> bool {
 
 /// DELETE. What it does depends on where (see `Deletion`); nothing is ever deleted for
 /// good from here, and with the option off only what is not in the library yet goes.
-fn delete(d: &Drive, segs: &[String]) -> Answer {
+fn delete(d: &Drive, request: &Request, segs: &[String]) -> Answer {
     let Some((_, parent)) = segs.split_last() else { return text(403, "Not this folder") };
-    let (node, dir) = {
+    let (node, dir, doubt) = {
         let index = d.index.read().unwrap();
-        (resolve(d, &index, segs), resolve(d, &index, parent))
+        let node = resolve(d, &index, segs);
+        let doubt = node.as_ref().is_some_and(|n| unsure(d, &index, segs, n));
+        (node, resolve(d, &index, parent), doubt)
     };
     let (Some(node), Some(Node::Dir(dir))) = (node, dir) else { return text(404, "Not found") };
+    if doubt {
+        return text(409, RELIST);
+    }
+    if stale(header(request, "If-Match"), &node) {
+        return text(412, "That file has changed since it was listed");
+    }
     let action = deletion(&node, &dir);
     if !matches!(action, Deletion::Local | Deletion::Refused) && !d.edits.load(Ordering::SeqCst) {
         return text(403, EDITS_OFF);
@@ -2477,18 +3041,27 @@ fn relocate(d: &Drive, request: &Request, segs: &[String], copy: bool) -> Answer
     let (Some((new_name, dest_parent)), Some((_, parent))) = (dest.split_last(), segs.split_last()) else {
         return refused();
     };
-    let (node, from, to, taken) = {
+    let (node, from, to, taken, doubt) = {
         let index = d.index.read().unwrap();
+        let node = resolve(d, &index, segs);
+        let doubt = node.as_ref().is_some_and(|n| unsure(d, &index, segs, n));
         (
-            resolve(d, &index, segs),
+            node,
             resolve(d, &index, parent),
             resolve(d, &index, dest_parent),
             resolve(d, &index, &dest).is_some(),
+            doubt,
         )
     };
     let (Some(node), Some(Node::Dir(from)), Some(Node::Dir(to))) = (node, from, to) else {
         return text(409, "No such folder");
     };
+    if doubt {
+        return text(409, RELIST);
+    }
+    if stale(header(request, "If-Match"), &node) {
+        return text(412, "That file has changed since it was listed");
+    }
     let edits = d.edits.load(Ordering::SeqCst);
     let action = match moving(&node, &from, &to, key_of(parent) == key_of(dest_parent)) {
         Moving::IntoAlbum { .. } if copy => Moving::IntoAlbum { from: None },
@@ -2667,7 +3240,7 @@ fn answer(d: &Arc<Drive>, request: &mut Request) -> Answer {
         "MKCOL" => mkcol(d, &segs),
         "COPY" => copy(d, request, &segs),
         "MOVE" => move_(d, request, &segs),
-        "DELETE" => delete(d, &segs),
+        "DELETE" => delete(d, request, &segs),
         "PROPPATCH" => text(403, "Properties cannot be changed here"),
         _ => text(405, "Not supported"),
     }
@@ -3361,5 +3934,327 @@ mod tests {
     #[test]
     fn xml_carries_names_safely() {
         assert_eq!(xml_escape("a<b>&\"c'"), "a&lt;b&gt;&amp;&quot;c&apos;");
+    }
+
+    /// A listing read from the sidecar, built the way `build` builds one.
+    fn listing(after: Option<&Index>, photos: &[(&str, &str)], albums: &[serde_json::Value]) -> Index {
+        let mut index = after.map(Index::next).unwrap_or_default();
+        for (uid, name) in photos {
+            index.push_photo(uid, name, 10, 0);
+        }
+        index.set_albums(albums);
+        index
+    }
+
+    fn uid_named(index: &Index, name: &str) -> Option<String> {
+        index.photo_names.get(&name.to_lowercase()).map(|&at| index.photos[at].uid.clone())
+    }
+
+    #[test]
+    fn a_name_never_comes_to_stand_for_another_photo() {
+        let three = [("A", "IMG_1.jpg"), ("B", "IMG_1.jpg"), ("C", "IMG_1.jpg")];
+        let mut index = listing(None, &three, &[]);
+        assert_eq!(uid_named(&index, "IMG_1.jpg").as_deref(), Some("A"));
+        assert_eq!(uid_named(&index, "IMG_1 (2).jpg").as_deref(), Some("B"));
+        assert_eq!(uid_named(&index, "IMG_1 (3).jpg").as_deref(), Some("C"));
+
+        // `IMG_1.jpg` is deleted, and the rebuild after it no longer has A. The next DELETE,
+        // of `IMG_1 (2).jpg`, must still reach B, never C.
+        index.trash_photo("A");
+        let index = listing(Some(&index), &[("B", "IMG_1.jpg"), ("C", "IMG_1.jpg")], &[]);
+        assert_eq!(uid_named(&index, "IMG_1 (2).jpg").as_deref(), Some("B"));
+        assert_eq!(uid_named(&index, "IMG_1 (3).jpg").as_deref(), Some("C"));
+        assert_eq!(uid_named(&index, "IMG_1.jpg"), None, "A's name stands for nothing now");
+
+        // A new photo of the same name, listed first, takes a name of its own.
+        let index = listing(Some(&index), &[("D", "IMG_1.jpg"), ("B", "IMG_1.jpg"), ("C", "IMG_1.jpg")], &[]);
+        assert_eq!(uid_named(&index, "IMG_1 (4).jpg").as_deref(), Some("D"));
+        assert_eq!(uid_named(&index, "IMG_1 (2).jpg").as_deref(), Some("B"));
+        assert_eq!(uid_named(&index, "IMG_1.jpg"), None);
+
+        // A back from the trash takes back its own name.
+        let index = listing(Some(&index), &[("A", "IMG_1.jpg"), ("C", "IMG_1.jpg")], &[]);
+        assert_eq!(uid_named(&index, "IMG_1.jpg").as_deref(), Some("A"));
+        assert_eq!(uid_named(&index, "IMG_1 (3).jpg").as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn names_survive_a_lock_and_a_rename_elsewhere() {
+        let first = listing(None, &[("A", "x.jpg"), ("B", "x.jpg")], &[]);
+        // A lock empties the listing; the one after it still knows every name.
+        let index = listing(Some(&first.next()), &[("B", "x.jpg")], &[]);
+        assert_eq!(uid_named(&index, "x (2).jpg").as_deref(), Some("B"));
+        // Renamed on another device: a new name, and the old one goes with no other photo.
+        let index = listing(Some(&index), &[("B", "y.jpg"), ("C", "x.jpg")], &[]);
+        assert_eq!(uid_named(&index, "y.jpg").as_deref(), Some("B"));
+        assert_eq!(uid_named(&index, "x (3).jpg").as_deref(), Some("C"));
+        assert_eq!(uid_named(&index, "x (2).jpg"), None);
+    }
+
+    #[test]
+    fn an_albums_names_and_its_photos_names_hold_across_listings() {
+        let albums = |members: &[&str]| {
+            vec![
+                serde_json::json!({ "uid": "a1", "name": "Trip", "uids": members }),
+                serde_json::json!({ "uid": "a2", "name": "Trip", "uids": [] }),
+            ]
+        };
+        let photos = [("A", "p.jpg"), ("B", "p.jpg"), ("C", "p.jpg")];
+        let mut index = listing(None, &photos, &albums(&["A", "B", "C"]));
+        let member = |index: &Index, album: usize, name: &str| {
+            index.albums[album].names.get(name).map(|&f| index.photos[index.albums[album].files[f].1].uid.clone())
+        };
+        assert_eq!(member(&index, 0, "p (2).jpg").as_deref(), Some("B"));
+        assert_eq!(index.albums[1].name, "Trip (2)");
+
+        // A leaves the album, then the first album goes: neither renumbers anything.
+        index.remove_from_album("a1", "A");
+        let index = listing(Some(&index), &photos, &albums(&["B", "C"]));
+        assert_eq!(member(&index, 0, "p (2).jpg").as_deref(), Some("B"));
+        assert_eq!(member(&index, 0, "p (3).jpg").as_deref(), Some("C"));
+        assert_eq!(member(&index, 0, "p.jpg"), None);
+        let index = listing(Some(&index), &photos, &[serde_json::json!({ "uid": "a2", "name": "Trip", "uids": [] })]);
+        assert_eq!(index.albums[0].name, "Trip (2)", "the album left keeps its name");
+        assert!(!index.album_names.contains_key("trip"));
+    }
+
+    #[test]
+    fn a_rename_through_the_drive_is_the_name_from_then_on() {
+        let mut index = listing(None, &[("A", "a.jpg"), ("B", "b.jpg")], &[]);
+        index.trash_photo("A");
+        // The file manager chose the name, so it is B's even though A once had it.
+        index.rename_photo("B", "a.jpg");
+        assert_eq!(uid_named(&index, "a.jpg").as_deref(), Some("B"));
+        let index = listing(Some(&index), &[("B", "a.jpg"), ("A", "a.jpg")], &[]);
+        assert_eq!(uid_named(&index, "a.jpg").as_deref(), Some("B"));
+        assert_eq!(uid_named(&index, "a (2).jpg").as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn the_trash_keeps_its_names_too() {
+        let extras = |uids: &[&str]| {
+            let items: Vec<_> =
+                uids.iter().map(|u| serde_json::json!({ "uid": u, "name": "t.jpg", "size": 1 })).collect();
+            serde_json::json!({ "trash": items })
+        };
+        let mut index = Index::default();
+        index.set_extras(&extras(&["A", "B"]));
+        assert_eq!(index.trash.get("t (2).jpg").map(|p| p.uid.as_str()), Some("B"));
+        let mut index = index.next();
+        index.set_extras(&extras(&["B"]));
+        assert_eq!(index.trash.get("t (2).jpg").map(|p| p.uid.as_str()), Some("B"));
+        assert!(index.trash.get("t.jpg").is_none());
+        // Restored and trashed again while the app runs: listed again, under its name.
+        index.restore_photo("B");
+        assert!(index.trash.get("t (2).jpg").is_none());
+        assert_eq!(uid_named(&index, "t.jpg").as_deref(), Some("B"));
+        index.trash_photo("B");
+        assert_eq!(index.trash.get("t (2).jpg").map(|p| p.uid.as_str()), Some("B"));
+    }
+
+    #[test]
+    fn a_request_for_a_file_that_changed_is_refused() {
+        let node = photo("u1");
+        let tag = etag_of("u1", 1);
+        assert!(!stale(None, &node), "no condition, no refusal");
+        assert!(!stale(Some(&tag), &node));
+        assert!(!stale(Some(&format!("W/{tag}, \"other\"")), &node));
+        assert!(!stale(Some("*"), &node));
+        assert!(stale(Some(&etag_of("u2", 1)), &node));
+        assert!(!stale(Some("\"x\""), &Node::Dir(Dir::Photos)), "a folder carries no tag");
+    }
+
+    /// The book of `index` as the next run reads it back for `account`.
+    fn restarted(index: &Index, account: &str) -> Index {
+        let text = {
+            let mut book = index.book.lock().unwrap();
+            book.account = Some(account.into());
+            book.to_stored().unwrap()
+        };
+        let loaded = load_names(Ok(Some(text)), account);
+        Index::with_book(Arc::new(Mutex::new(loaded)))
+    }
+
+    #[test]
+    fn names_carry_over_an_app_restart() {
+        let mut index = listing(None, &[("A", "IMG_1.jpg"), ("B", "IMG_1.jpg"), ("C", "IMG_1.jpg")], &[]);
+        index.rename_photo("C", "c.jpg");
+        index.trash_photo("A");
+        // The app restarts; A is in the trash and a new photo of the same name came first.
+        let index = restarted(&index, "me@example.com");
+        assert!(index.book.lock().unwrap().trusted);
+        let index = listing(Some(&index), &[("D", "IMG_1.jpg"), ("B", "IMG_1.jpg"), ("C", "c.jpg")], &[]);
+        assert_eq!(uid_named(&index, "IMG_1 (2).jpg").as_deref(), Some("B"));
+        assert_eq!(uid_named(&index, "c.jpg").as_deref(), Some("C"));
+        assert_eq!(uid_named(&index, "IMG_1.jpg"), None, "A's name is still A's");
+        assert_eq!(uid_named(&index, "IMG_1 (3).jpg"), None, "and so is C's first one");
+        assert_eq!(uid_named(&index, "IMG_1 (4).jpg").as_deref(), Some("D"));
+        // Another account never reads this account's names.
+        let text = index.book.lock().unwrap().to_stored().unwrap();
+        assert!(!load_names(Ok(Some(text)), "other@example.com").trusted);
+    }
+
+    #[test]
+    fn an_unreadable_book_starts_afresh_and_is_not_trusted() {
+        let me = "me@example.com";
+        for text in [
+            Ok(None),
+            Err("no keyring".to_string()),
+            Ok(Some("not json".to_string())),
+            Ok(Some(r#"{"account":"me@example.com","folders":{"photos":{"names":[["A","a.jpg","a.jpg",1],["B","a.jpg","A.JPG",1]],"former":[]}}}"#.to_string())),
+            Ok(Some(r#"{"account":"me@example.com","folders":{"photos":{"names":[],"former":[["x.jpg","gone"]]}}}"#.to_string())),
+        ] {
+            let book = load_names(text, me);
+            assert!(!book.trusted && book.folders.is_empty());
+            assert_eq!(book.account.as_deref(), Some(me));
+        }
+    }
+
+    #[test]
+    fn unlisted_names_go_only_when_old_or_beyond_the_cap() {
+        let mut book = NameBook { generation: 1, ..NameBook::default() };
+        for uid in ["A", "B", "C"] {
+            book.name(TIMELINE_NAMES, uid, "p.jpg", |_| false);
+        }
+        // A listing that holds only C.
+        book.generation = 2;
+        book.name(TIMELINE_NAMES, "C", "p.jpg", |_| false);
+        let day = today();
+        book.folders.get_mut(TIMELINE_NAMES).unwrap().by_uid.get_mut("A").unwrap().day = day - KEEP_UNLISTED_DAYS - 1;
+        book.prune(day, MAX_NAMES);
+        let names = &book.folders[TIMELINE_NAMES];
+        assert!(!names.by_uid.contains_key("A") && !names.owner.contains_key("p.jpg"), "unlisted for long: gone");
+        assert!(names.by_uid.contains_key("B"), "unlisted lately: kept");
+        // Beyond the cap the unlisted go first; a listed name never does.
+        book.prune(day, 1);
+        let names = &book.folders[TIMELINE_NAMES];
+        assert_eq!(names.by_uid.keys().collect::<Vec<_>>(), vec!["C"]);
+        book.prune(day, 0);
+        assert!(book.folders[TIMELINE_NAMES].by_uid.contains_key("C"));
+    }
+
+    #[test]
+    fn a_numbered_name_waits_for_a_fresh_listing_when_names_did_not_carry_over() {
+        assert!(numbered("IMG_1 (2).jpg") && numbered("Trip (3)") && numbered("a.tar (12).gz"));
+        assert!(!numbered("IMG_1.jpg") && !numbered("(2).jpg") && !numbered("x (a).jpg") && !numbered("x ().jpg"));
+        assert_eq!(second_of("IMG_1.jpg"), "IMG_1 (2).jpg");
+        assert_eq!(second_of("Trip"), "Trip (2)");
+
+        // Not carried over, folder not listed since: numbered names and the plain one beside
+        // them are refused, a plain name alone is not.
+        assert!(doubtful(false, false, "IMG_1 (2).jpg", || false));
+        assert!(doubtful(false, false, "IMG_1.jpg", || true));
+        assert!(!doubtful(false, false, "IMG_1.jpg", || false));
+        // Listed once since, or carried over: acted on.
+        assert!(!doubtful(false, true, "IMG_1 (2).jpg", || true));
+        assert!(!doubtful(true, false, "IMG_1 (2).jpg", || true));
+    }
+
+    #[test]
+    fn a_rename_onto_a_name_still_held_elsewhere_moves_that_photo_aside() {
+        let mut book = NameBook::default();
+        book.name(TIMELINE_NAMES, "A", "a.jpg", |_| false);
+        book.rename(TIMELINE_NAMES, "B", "a.jpg");
+        let names = &book.folders[TIMELINE_NAMES];
+        assert_eq!(names.owner["a.jpg"], "B");
+        assert_eq!(names.by_uid["A"].name, "a (2).jpg");
+        // And the book still reads back whole.
+        book.account = Some("me".into());
+        assert!(NameBook::from_stored(&book.to_stored().unwrap(), "me").is_some());
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pfp-drive-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_put_is_staged_only_once_it_has_all_arrived() {
+        let dir = scratch("stage");
+        let body = vec![7u8; 5000];
+
+        let (path, n) = stage_body(&dir, "a.jpg", &mut &body[..], Some(5000), None).unwrap();
+        assert_eq!((path.clone(), n), (dir.join("a.jpg"), 5000));
+        assert_eq!(std::fs::read(&path).unwrap(), body);
+        assert_eq!(std::fs::read_to_string(dir.join(WHOLE_NOTE)).unwrap(), "5000");
+        assert!(!dir.join(".a.jpg.part").exists());
+        assert_eq!(leftover(&dir), Leftover::Whole(path));
+
+        // The client said 6000 and sent 5000: never under its own name.
+        let short = scratch("short");
+        assert_eq!(stage_body(&short, "b.jpg", &mut &body[..], Some(6000), None), Err(Staging::Short));
+        assert!(!short.join("b.jpg").exists());
+        assert_eq!(leftover(&short), Leftover::CutShort);
+
+        let empty = scratch("empty");
+        assert_eq!(stage_body(&empty, "c.jpg", &mut &[][..], None, None), Err(Staging::Empty));
+        for d in [dir, short, empty] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn a_retry_uploads_only_a_whole_copy() {
+        // Cut short mid-write: only the part file.
+        let cut = scratch("cut");
+        std::fs::write(cut.join(".d.jpg.part"), b"half").unwrap();
+        assert_eq!(leftover(&cut), Leftover::CutShort);
+
+        // Not the length it arrived with: kept, never uploaded.
+        let damaged = scratch("damaged");
+        std::fs::write(damaged.join("d.jpg"), b"1234").unwrap();
+        std::fs::write(damaged.join(WHOLE_NOTE), "9").unwrap();
+        assert_eq!(leftover(&damaged), Leftover::Damaged(damaged.join("d.jpg")));
+
+        // Staged by an earlier version, with no note: it goes up as it did then.
+        let older = scratch("older");
+        std::fs::write(older.join("e.jpg"), b"1234").unwrap();
+        std::fs::write(older.join(ALBUM_NOTE), "album").unwrap();
+        assert_eq!(leftover(&older), Leftover::Whole(older.join("e.jpg")));
+        for d in [cut, damaged, older] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn the_original_goes_to_the_trash_before_a_lighter_copy_and_never_twice() {
+        let cache = scratch("keep");
+        let drop_root = cache.join(DROP_DIR);
+        let folder = drop_root.join("0123abcd");
+        std::fs::create_dir_all(&folder).unwrap();
+        let staged = folder.join("big.jpg");
+        std::fs::write(&staged, vec![9u8; 4096]).unwrap();
+        let bin = cache.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+
+        assert_eq!(staged_folder(&drop_root, &staged), Some(folder.clone()));
+        assert_eq!(staged_folder(&drop_root, &bin), None, "only a staged copy");
+        std::fs::write(folder.join(WHOLE_NOTE), "4096").unwrap();
+        assert_eq!(staged_folder(&drop_root, &folder.join(WHOLE_NOTE)), None);
+
+        let trashed = std::sync::atomic::AtomicUsize::new(0);
+        let into_bin = |p: &Path| {
+            trashed.fetch_add(1, Ordering::SeqCst);
+            std::fs::rename(p, bin.join(p.file_name().unwrap())).map_err(|e| e.to_string())
+        };
+        keep_original_in(&drop_root, &folder, &staged, into_bin).unwrap();
+        assert_eq!(std::fs::read(bin.join("big.jpg")).unwrap(), vec![9u8; 4096], "the bytes are in the trash");
+        assert_eq!(std::fs::read(&staged).unwrap().len(), 4096, "and the staged copy still uploads");
+        keep_original_in(&drop_root, &folder, &staged, into_bin).unwrap();
+        assert_eq!(trashed.load(Ordering::SeqCst), 1, "a retry puts no second one there");
+
+        // A trash that refuses leaves the staged copy whole and nothing set aside.
+        let other = drop_root.join("4567ef01");
+        std::fs::create_dir_all(&other).unwrap();
+        let kept = other.join("kept.jpg");
+        std::fs::write(&kept, b"photo").unwrap();
+        let refusing = |_: &Path| Err("no trash".to_string());
+        assert!(keep_original_in(&drop_root, &other, &kept, refusing).is_err());
+        assert_eq!(std::fs::read(&kept).unwrap(), b"photo");
+        assert!(!other.join(KEPT_NOTE).exists());
+        assert_eq!(std::fs::read_dir(cache.join(ORIGINALS_DIR)).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }

@@ -236,6 +236,20 @@
   background: linear-gradient(90deg, var(--accent-2), var(--accent));
   transition: width 0.3s ease;
 }
+/* A step that reports no count: moving, so that it does not read as stopped. */
+.up-barfill-moving {
+  width: 35%;
+  transition: none;
+  animation: up-barmove 1.4s ease-in-out infinite;
+}
+@keyframes up-barmove {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(290%);
+  }
+}
 
 /* The counts, each a switch that shows only its own files. */
 .up-chips {
@@ -547,7 +561,8 @@
   margin-top: 6px;
 }
 @media (prefers-reduced-motion: reduce) {
-  .up-syncicon {
+  .up-syncicon,
+  .up-barfill-moving {
     animation: none;
   }
 }

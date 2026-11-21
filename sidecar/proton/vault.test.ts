@@ -222,3 +222,39 @@ describe("local lock (Hidden and the app lock without Windows Hello)", () => {
     clearLocalLock("plain to see?");
   });
 });
+
+describe("vault meta written whole", () => {
+  // A plain write truncates the file before it writes the new one: a crash in between left a
+  // vault that would never open again. It is written aside and renamed over the old one.
+  it("replaces the meta file in one step and leaves nothing aside", async () => {
+    const { readdirSync } = await import("node:fs");
+    createDeviceVault();
+    const before = readFileSync(metaFile());
+    expect(convertToDeviceVault()).toBe(false);
+    createVault("another strong password");
+    expect(readFileSync(metaFile()).equals(before)).toBe(false);
+    expect(readdirSync(storeDir()).filter((n) => n.endsWith(".part"))).toEqual([]);
+    lockVault();
+    expect(unlockVault("another strong password")).toBe(true);
+    expect(convertToDeviceVault()).toBe(true);
+    lockVault();
+    expect(unlockDeviceVault()).toBe(true);
+    expect(readdirSync(storeDir()).filter((n) => n.endsWith(".part"))).toEqual([]);
+  });
+
+  it("keeps the old meta file when the new one cannot be written", async () => {
+    const { mkdirSync, rmSync } = await import("node:fs");
+    createVault("first password here");
+    const before = readFileSync(metaFile());
+    // A folder where the aside file goes makes the write fail before anything is renamed.
+    mkdirSync(`${metaFile()}.part`);
+    try {
+      expect(() => createVault("second password here")).toThrow();
+    } finally {
+      rmSync(`${metaFile()}.part`, { recursive: true, force: true });
+    }
+    expect(readFileSync(metaFile()).equals(before)).toBe(true);
+    lockVault();
+    expect(unlockVault("first password here")).toBe(true);
+  });
+});

@@ -92,6 +92,7 @@ export async function* withStallGuard<T>(
 ): AsyncGenerator<T> {
   const it = src[Symbol.asyncIterator]();
   let exhausted = false;
+  let stalledOut = false;
   try {
     for (;;) {
       const pull = it.next();
@@ -109,6 +110,9 @@ export async function* withStallGuard<T>(
       let step: IteratorResult<T>;
       try {
         step = await Promise.race([pull, stalled]);
+      } catch (e) {
+        if (e instanceof StallError) stalledOut = true;
+        throw e;
       } finally {
         // Cleared on every path, so a long walk cannot accumulate one live timer per
         // item and keep the event loop busy after it finishes.
@@ -126,7 +130,13 @@ export async function* withStallGuard<T>(
     // pointless. Anything else -- a stall, a throw, or a caller that stopped early --
     // is still mid-iteration and needs releasing. Best-effort: a generator that
     // objects to being closed must not mask why we are closing it.
-    if (!exhausted) {
+    if (!exhausted && stalledOut) {
+      // Its next() never answered, and a generator's return() waits behind that: awaited,
+      // the guard would hang on the very call it gave up on. Asked for, not waited on.
+      void Promise.resolve()
+        .then(() => it.return?.(undefined as any))
+        .catch(() => {});
+    } else if (!exhausted) {
       try {
         await it.return?.(undefined as any);
       } catch {

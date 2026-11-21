@@ -26,7 +26,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
-  albumOfRel,
   checkMyFolders,
   downloadMyFiles,
   listMyFolder,
@@ -155,7 +154,68 @@ describe("My files", () => {
       ["b", "Trip/Day 1/b.mp4", 20],
       ["c", "Trip (2)/c_1.png", 3],
     ]);
-    expect(items.map((i) => albumOfRel(i.rel))).toEqual(["Trip", "Trip", "Trip (2)"]);
+    expect(items.map((i) => i.album)).toEqual(["Trip", "Day 1", "Trip"]);
+  });
+
+  it("leaves out a hidden folder and a hidden file inside a chosen folder", async () => {
+    const client = fakeDrive([
+      {
+        uid: "top",
+        name: "Trip",
+        type: "folder",
+        children: [
+          { uid: "t1", name: "t.jpg", type: "file" },
+          { uid: "dot", name: ".thumbnails", type: "folder", children: [{ uid: "h1", name: "h.jpg", type: "file" }] },
+          { uid: "h2", name: ".hidden.jpg", type: "file" },
+        ],
+      },
+    ]);
+
+    const items = await planMyFiles(client, [{ uid: "top", name: "Trip" }], isMedia);
+
+    expect(items.map((i) => i.nodeUid)).toEqual(["t1"]);
+  });
+
+  it("puts each folder's photos into an album of that folder's own name, never joined to its parent's", async () => {
+    const client = fakeDrive([
+      {
+        uid: "top",
+        name: "Valokuvia & Videoita",
+        type: "folder",
+        children: [
+          { uid: "t1", name: "t.jpg", type: "file" },
+          {
+            uid: "rome",
+            name: "Rome: day 2",
+            type: "folder",
+            children: [
+              { uid: "r1", name: "r.jpg", type: "file" },
+              { uid: "old", name: "Photos from 2019", type: "folder", children: [{ uid: "o1", name: "o.jpg", type: "file" }] },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    const items = await planMyFiles(client, [{ uid: "top", name: "Valokuvia & Videoita" }], isMedia);
+
+    expect(items.map((i) => [i.nodeUid, i.rel, i.album])).toEqual([
+      ["t1", "Valokuvia & Videoita/t.jpg", "Valokuvia & Videoita"],
+      ["r1", "Valokuvia & Videoita/Rome_ day 2/r.jpg", "Rome: day 2"],
+      ["o1", "Valokuvia & Videoita/Rome_ day 2/Photos from 2019/o.jpg", null],
+    ]);
+  });
+
+  it("puts a file chosen alone into its folder's album, and one from the top of My files into My files", async () => {
+    const items = await planMyFiles(drive(), [], isMedia, undefined, [
+      { uid: "b", folder: "Day 1" },
+      { uid: "a", folder: "" },
+    ]);
+
+    expect(items.map((i) => [i.nodeUid, i.album])).toEqual([
+      ["b", "Day 1"],
+      ["a", "My files"],
+    ]);
   });
 
   it("gives two files whose names differ only in case a path each, so neither is downloaded over the other", async () => {
@@ -217,7 +277,7 @@ describe("My files", () => {
   it("gives up a download that brings nothing, and leaves no half file", async () => {
     const client = { ...drive(), getFileDownloader: async () => ({ downloadToStream: () => ({ completion: () => new Promise(() => {}) }) }) };
     const root = mkdtempSync(join(tmpdir(), "pfp-myfiles-"));
-    const items = [{ nodeUid: "a", rel: "Trip/a.jpg", size: 1, modifiedMs: null }];
+    const items = [{ nodeUid: "a", rel: "Trip/a.jpg", album: "Trip", size: 1, modifiedMs: null }];
     await expect(downloadMyFiles(client, items, root, () => {}, undefined, 50)).rejects.toThrow(/produced nothing/);
     expect(existsSync(join(root, "Trip", "a.jpg"))).toBe(false);
   });

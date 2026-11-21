@@ -178,7 +178,7 @@ pub fn register(app_exe: &Path) -> Result<(), String> {
 
     // An empty REG_NONE is what Explorer itself writes here; the name carries the
     // meaning, the data is not read.
-    let listed = RegValue { vtype: RegType::REG_NONE, bytes: Vec::new() };
+    let listed = RegValue { vtype: RegType::REG_NONE, bytes: Vec::new().into() };
     for ext in MEDIA_EXTENSIONS {
         let (key, _) = hkcu.create_subkey(open_with_key(ext)).map_err(|e| e.to_string())?;
         key.set_raw_value(prog_id(), &listed).map_err(|e| e.to_string())?;

@@ -20,37 +20,63 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useT } from "../lib/i18n";
 import {
-  AppsIcon,
-  CalendarIcon,
+  BackupIcon,
   CheckIcon,
+  CollageIcon,
+  CollectionsIcon,
+  CompressIcon,
   ComputerIcon,
-  ContentCopyIcon,
-  DevicesIcon,
-  DownloadIcon,
-  FaceIcon,
-  FilterIcon,
-  FingerprintIcon,
+  FilmstripIcon,
   FolderOpenIcon,
-  LockIcon,
-  OfflinePinIcon,
-  SearchIcon,
+  InfoIcon,
+  LabelIcon,
+  PlaceIcon,
+  ScheduleIcon,
   SignOutIcon,
-  SwapHorizIcon,
-  TuneIcon,
+  SlideshowIcon,
+  SortIcon,
+  TrashIcon,
   UploadArrowIcon,
+  VisibilityOffIcon,
 } from "./icons";
-import { isWindows } from "../lib/platform";
+import { isMac, isWindows } from "../lib/platform";
+import { whatsNewSections, type WhatsNewIcon } from "../lib/whatsNewCards";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/WhatsNew.css";
 
 /** Which "what's new" a reader has seen; a new one gets a new id. */
-export const WHATS_NEW_ID = "2026-11-faces";
+export const WHATS_NEW_ID = "2026-11-1.4.0";
+
+const ICONS: Record<WhatsNewIcon, ReactNode> = {
+  video: <FilmstripIcon size={20} />,
+  collage: <CollageIcon size={20} />,
+  slideshow: <SlideshowIcon size={20} />,
+  details: <InfoIcon size={20} />,
+  label: <LabelIcon size={20} />,
+  sort: <SortIcon size={20} />,
+  place: <PlaceIcon size={20} />,
+  compress: <CompressIcon size={20} />,
+  hide: <VisibilityOffIcon size={20} />,
+  themes: <CollectionsIcon size={20} />,
+  backup: <BackupIcon size={20} />,
+  import: <UploadArrowIcon size={20} />,
+  folder: <FolderOpenIcon size={20} />,
+  computer: <ComputerIcon size={20} />,
+  signOut: <SignOutIcon size={20} />,
+  trash: <TrashIcon size={20} />,
+  speed: <ScheduleIcon size={20} />,
+  check: <CheckIcon size={20} />,
+};
 
 /** What this version brought, shown once, the first time the new version opens. */
 export function WhatsNew({ onClose }: { onClose: () => void }) {
   const t = useT();
+  const done = useRef<HTMLButtonElement>(null);
+  // autoFocus would scroll a long list to its end, past the title and the first cards.
+  useEffect(() => done.current?.focus({ preventScroll: true }), []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -59,44 +85,13 @@ export function WhatsNew({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  type Item = { icon: ReactNode; title: string; body: string };
-  const item = (icon: ReactNode, key: string): Item => ({
-    icon,
-    title: t(`whatsNew.${key}Title`),
-    body: t(`whatsNew.${key}Body`),
-  });
-  // The Proton Photos folder and File Explorer are Windows only.
-  const added: Item[] = [
-    item(<FaceIcon size={20} />, "faces"),
-    item(<SearchIcon size={20} />, "search"),
-    item(<TuneIcon size={20} />, "ml"),
-    item(<DevicesIcon size={20} />, "phone"),
-    item(<SwapHorizIcon size={20} />, "faceSync"),
-    item(<ContentCopyIcon size={20} />, "copyText"),
-    item(<FilterIcon size={20} />, "duplicates"),
-    // Behind Windows Hello on Windows, behind a password on Linux.
-    { ...item(<LockIcon size={20} />, "hidden"), ...(isWindows ? {} : { body: t("whatsNew.hiddenBodyLinux") }) },
-    item(<CalendarIcon size={20} />, "dates"),
-    // A camera or phone over USB is picked on Windows only.
-    { ...item(<UploadArrowIcon size={20} />, "addPhotos"), ...(isWindows ? {} : { body: t("whatsNew.addPhotosBodyLinux") }) },
-    ...(isWindows ? [item(<OfflinePinIcon size={20} />, "keep")] : []),
-    item(<AppsIcon size={20} />, "sidebar"),
-    item(<SignOutIcon size={20} />, "signIn"),
-    item(<ComputerIcon size={20} />, "linux"),
-  ];
-  const improved: Item[] = [
-    ...(isWindows ? [item(<FolderOpenIcon size={20} />, "explorer")] : []),
-    item(<FingerprintIcon size={20} />, "accounts"),
-    item(<DownloadIcon size={20} />, "updates"),
-    item(<CheckIcon size={20} />, "smallFixes"),
-  ];
-  const sections: { heading: string; items: Item[] }[] = [
-    { heading: t("whatsNew.newHeading"), items: added },
-    { heading: t("whatsNew.improvedHeading"), items: improved },
-  ];
+  const sections = whatsNewSections(isWindows ? "windows" : isMac ? "mac" : "linux").map((section) => ({
+    heading: t(section.heading),
+    items: section.cards.map((card) => ({ icon: ICONS[card.icon], title: t(card.title), body: t(card.body) })),
+  }));
 
   return (
-    <div className="wn-backdrop" onClick={onClose}>
+    <div className="wn-backdrop" {...backdropClose(onClose, false)}>
       <div className="wn-card" role="dialog" aria-label={t("whatsNew.title")} onClick={(e) => e.stopPropagation()}>
         <h2 className="wn-title">{t("whatsNew.title")}</h2>
         {sections.map((section) => (
@@ -115,7 +110,7 @@ export function WhatsNew({ onClose }: { onClose: () => void }) {
             </ul>
           </section>
         ))}
-        <button className="wn-done" onClick={onClose} autoFocus>
+        <button className="wn-done" ref={done} onClick={onClose}>
           {t("whatsNew.done")}
         </button>
       </div>

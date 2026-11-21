@@ -1,0 +1,223 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The slideshow: the whole window, on black, with a bar that comes and goes. */
+.ss {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: #000;
+  overflow: hidden;
+  cursor: default;
+  user-select: none;
+}
+.ss.idle {
+  cursor: none;
+}
+.ss-slide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.ss-slide.in {
+  animation: ss-in 0.9s ease both;
+}
+.ss-slide.out {
+  animation: ss-out 0.9s ease both;
+  pointer-events: none;
+}
+@keyframes ss-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes ss-out {
+  to {
+    opacity: 0;
+  }
+}
+.ss-pic {
+  grid-area: 1 / 1;
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+}
+.ss-video {
+  background: #000;
+}
+
+.ss-ui {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+.ss.idle .ss-ui {
+  opacity: 0;
+}
+.ss.idle .ss-bar {
+  pointer-events: none;
+}
+.ss-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px 40px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.6), transparent);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+}
+.ss-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ss-keys {
+  flex: none;
+  color: rgba(255, 255, 255, 0.6);
+}
+.ss-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 32px);
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(28, 28, 30, 0.82);
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  pointer-events: auto;
+}
+.ss-btn {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+}
+.ss-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
+}
+.ss-btn:focus-visible,
+.ss-sec:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ss-count {
+  padding: 0 10px;
+  min-width: 70px;
+  text-align: center;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.75);
+  font-variant-numeric: tabular-nums;
+}
+.ss-seconds {
+  display: flex;
+  gap: 2px;
+  margin-right: 4px;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.ss-sec {
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ss-sec:hover {
+  color: #fff;
+}
+.ss-sec.on {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.ss-prog {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: 0;
+  background: var(--accent);
+}
+.ss-paused {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 84px;
+  height: 84px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+}
+.ss.paused .ss-paused {
+  opacity: 1;
+}
+
+/* A narrow window drops the key hint and the position, which the buttons already say. */
+@media (max-width: 640px) {
+  .ss-keys,
+  .ss-count {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ss-slide.in,
+  .ss-slide.out {
+    animation: none;
+  }
+  .ss-slide.out {
+    display: none;
+  }
+}

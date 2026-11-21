@@ -22,7 +22,9 @@
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { requestThumbnail } from "../hooks/useFolderMedia";
-import type { ImportState, ReviewCheck, ReviewItem } from "../hooks/useUploads";
+import { clearImportThumbnails, requestImportThumbnail } from "../lib/importThumbs";
+import { isWindows } from "../lib/platform";
+import type { ImportState, ReviewCheck, ReviewItem, ReviewReason } from "../hooks/useUploads";
 import { locale } from "../lib/format";
 import { VirtualSections } from "./VirtualSections";
 import { useT } from "../lib/i18n";
@@ -30,9 +32,13 @@ import { CheckIcon, CloseIcon, HeartIcon, MotionPhotoIcon, PlayArrowIcon } from 
 import "../styles/AlbumAddPhotos.css";
 import "../styles/ImportReview.css";
 
+/** The system draws a file's picture on Windows; elsewhere the sidecar draws it from the export. */
+const askThumbnail = isWindows ? requestThumbnail : requestImportThumbnail;
+
 type Props = {
   items: ReviewItem[];
   checks: ReviewCheck[];
+  reasons: (ReviewReason | null)[];
   progress: ImportState | undefined;
   onConfirm: (exclude: number[], albums: boolean) => void;
   onDiscard: () => void;
@@ -53,10 +59,12 @@ function dayOf(ms: number | undefined): string | null {
  * second puts it back, Shift+click does a run. A Live Photo is one tile, and uploads as
  * one. Nothing uploads until the import button.
  */
-export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: Props) {
+export function ImportReview({ items, checks, reasons, progress, onConfirm, onDiscard }: Props) {
   const t = useT();
   const [excluded, setExcluded] = useState<Set<number>>(new Set());
   const [albums, setAlbums] = useState(true);
+  // The pictures belong to this export: gone with the review.
+  useEffect(() => () => clearImportThumbnails(), []);
   const anchor = useRef<number | null>(null);
 
   const albumCount = useMemo(
@@ -161,6 +169,7 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
                     key={item.id}
                     item={item}
                     already={checks[item.id] === "already"}
+                    reason={reasons[item.id] ?? null}
                     kept={!excluded.has(item.id)}
                     onClick={(e) => toggle(item.id, e)}
                   />
@@ -170,6 +179,7 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
           />
         </div>
 
+        {progress?.byContent === false && !checking && <div className="ir-warn">{t("importReview.noContentCheck")}</div>}
         <div className="ap-foot ir-foot">
           {albumCount > 0 && (
             <label className="ir-option">
@@ -187,9 +197,12 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
           <button className="ap-cancel" onClick={onDiscard}>
             {t("common.cancel")}
           </button>
+          {/* Held until the check is done: confirmed early, the same bytes under two names in the
+              export would both go up. */}
           <button
             className="ap-add"
-            disabled={kept === 0}
+            disabled={kept === 0 || checking}
+            title={checking ? t("importReview.waitForCheck") : undefined}
             onClick={() => onConfirm([...excluded], albums)}
           >
             {t("importReview.confirm", { n: kept })}
@@ -204,11 +217,13 @@ export function ImportReview({ items, checks, progress, onConfirm, onDiscard }: 
 function ReviewCell({
   item,
   already,
+  reason,
   kept,
   onClick,
 }: {
   item: ReviewItem;
   already: boolean;
+  reason: ReviewReason | null;
   kept: boolean;
   onClick: (e: MouseEvent) => void;
 }) {
@@ -225,7 +240,7 @@ function ReviewCell({
     const seen = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
-          if (!stop) stop = requestThumbnail(item.path, setUrl);
+          if (!stop) stop = askThumbnail(item.path, setUrl);
         } else if (stop) {
           stop();
           stop = undefined;
@@ -247,6 +262,7 @@ function ReviewCell({
     item.live ? `${item.name} + ${item.live.name}` : item.name,
     ...(day ? [day] : []),
     ...(item.alsoIn?.length ? [`${t("viewer.albums")}: ${albumsOf}`] : []),
+    ...(reason ? [t(`importReview.why.${reason}`)] : []),
   ].join("\n");
   return (
     <div
@@ -255,7 +271,19 @@ function ReviewCell({
       onClick={onClick}
       title={name}
     >
-      {url ? <img src={url} alt="" draggable={false} /> : <div className="g-cell-ph" />}
+      {/* Shown once it has loaded, as every grid tile's picture is (see `.g-cell img`). */}
+      {url ? (
+        <img
+          src={url}
+          alt=""
+          draggable={false}
+          onLoad={(e) => {
+            e.currentTarget.dataset.ok = "1";
+          }}
+        />
+      ) : (
+        <div className="g-cell-ph" />
+      )}
 
       <span className="g-seldot">{kept ? <CheckIcon size={11} /> : null}</span>
 

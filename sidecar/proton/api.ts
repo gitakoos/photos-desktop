@@ -23,9 +23,11 @@
 // Raw Proton API client for the sidecar: auth + core endpoints, plus the
 // session-aware HTTP client the Drive SDK consumes.
 
+import { updateServerTimeWithUpdateTimestamp } from "@protontech/crypto/serverTime";
 import { Agent } from "undici";
 import { isTransient } from "./transient.ts";
 import { diag } from "./diag.ts";
+import { tokenTag } from "./sessionLock.ts";
 
 export const BASE_URL = "https://drive-api.proton.me";
 // Mirror the Android app's proven appVersion exactly. The underscore form passes
@@ -46,6 +48,51 @@ export function userAgentFor(platform: NodeJS.Platform): string {
 export const USER_AGENT = userAgentFor(process.platform);
 
 const API_ORIGIN = new URL(BASE_URL).origin;
+
+/**
+ * The server's own time from a response: `x-pm-date` is the authoritative one, the standard
+ * `Date` header the documented fallback, also when `x-pm-date` is there but unreadable. Null
+ * when neither is readable.
+ */
+export function serverDateOf(headers: Headers): Date | null {
+  return serverClockOf(headers)?.when ?? null;
+}
+
+function serverClockOf(headers: Headers): { when: Date; source: string } | null {
+  for (const source of ["x-pm-date", "date"]) {
+    const raw = headers.get(source);
+    if (!raw) continue;
+    const when = new Date(raw);
+    if (!Number.isNaN(when.getTime())) return { when, source };
+  }
+  return null;
+}
+
+let loggedServerClock = false;
+
+/**
+ * Feeds the crypto clock with the server's own time, the same hook the SDK's official CLI
+ * installs. Node keys and manifest signatures are dated by `serverTime()`, which falls back to
+ * the device clock as long as it is never fed, and the API rejects keys and signatures dated by
+ * a clock it considers wrong (e.g. ahead of its own), surfacing as "Invalid manifest signature."
+ * at commit. Fed from this module's own calls as well as the SDK's client, so the clock is set
+ * from the first answer at sign-in or start.
+ */
+function noteServerTime(url: string, res: Response, requestStartedAt: Date): void {
+  if (!isApiUrl(url)) return;
+  const clock = serverClockOf(res.headers);
+  if (!clock) return;
+  updateServerTimeWithUpdateTimestamp(clock.when, requestStartedAt);
+  if (!loggedServerClock) {
+    loggedServerClock = true;
+    const midpoint = requestStartedAt.getTime() + (Date.now() - requestStartedAt.getTime()) / 2;
+    // Only the header's name and a number: nothing about the account or its files.
+    diag.log("session", "crypto_clock", {
+      source: clock.source,
+      estimatedOffsetMs: Math.round(midpoint - clock.when.getTime()),
+    });
+  }
+}
 
 /**
  * Whether a request goes to the Proton API itself, the only place the session's tokens
@@ -92,6 +139,7 @@ async function apiFetch(
 ): Promise<Record<string, unknown>> {
   const headers = baseHeaders(opts.session);
   if (opts.body) headers["Content-Type"] = "application/json";
+  const requestStartedAt = new Date();
   const res = await fetch(BASE_URL + path, {
     method: opts.method ?? "GET",
     headers,
@@ -100,6 +148,7 @@ async function apiFetch(
   }).catch((e: Error) => {
     throw e.name === "TimeoutError" ? new Error("Proton did not answer in time") : e;
   });
+  noteServerTime(BASE_URL + path, res, requestStartedAt);
   const text = await res.text();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let json: any = {};
@@ -259,6 +308,12 @@ export function makeSdkHttpClient(
    * leaves only the spent one on disk, so the next start has to sign in again.
    */
   mayRefresh: () => boolean = () => true,
+  /**
+   * Runs a refresh so that no other process spends the same refresh token meanwhile. It may
+   * answer without running it, having put tokens another process already renewed into
+   * `session` (session.ts holds the saved session's lock around it).
+   */
+  exclusive: (refresh: () => Promise<void>) => Promise<void> = (refresh) => refresh(),
 ) {
   function inject(url: string, headers: Headers): Headers {
     headers.set("x-pm-appversion", APP_VERSION);
@@ -275,7 +330,7 @@ export function makeSdkHttpClient(
   let refreshing: Promise<void> | null = null;
   function refresh(): Promise<void> {
     if (!refreshing) {
-      refreshing = (async () => {
+      refreshing = exclusive(async () => {
         if (!session.refreshToken) throw new Error("no refresh token");
         if (!mayRefresh()) {
           diag.log("session", "refresh_held", { reason: "closed" });
@@ -283,16 +338,16 @@ export function makeSdkHttpClient(
         }
         // Noted before the call too: a stop between Proton spending the old token and the answer
         // arriving leaves only this line, which tells such a loss apart from any other.
-        diag.log("session", "refresh_start");
+        diag.log("session", "refresh_start", { pid: process.pid, token: tokenTag(session.refreshToken) });
         const fresh = await refreshSession(session.uid, session.refreshToken);
-        diag.log("session", "token_refreshed");
+        diag.log("session", "token_refreshed", { pid: process.pid, token: tokenTag(fresh.refreshToken) });
         // Mutate the shared session object in place so later requests (and the
         // persisted blob) see the new tokens.
         session.uid = fresh.uid;
         session.accessToken = fresh.accessToken;
         session.refreshToken = fresh.refreshToken;
         onRefreshed?.();
-      })().finally(() => {
+      }).finally(() => {
         refreshing = null;
       });
     }
@@ -300,7 +355,13 @@ export function makeSdkHttpClient(
   }
 
   async function withAuthRetry(url: string, run: () => Promise<Response>): Promise<Response> {
-    const res = await run();
+    const runAndUpdateServerTime = async () => {
+      const requestStartedAt = new Date();
+      const response = await run();
+      noteServerTime(url, response, requestStartedAt);
+      return response;
+    };
+    const res = await runAndUpdateServerTime();
     if (res.status === 401 && isApiUrl(url)) {
       try {
         await refresh();
@@ -310,7 +371,7 @@ export function makeSdkHttpClient(
         if (!isTransient(e)) onLost?.();
         return res; // refresh failed: surface the original 401
       }
-      return run(); // retry once with the fresh access token
+      return runAndUpdateServerTime(); // retry once with the fresh access token
     }
     return res;
   }

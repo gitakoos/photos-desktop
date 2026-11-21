@@ -38,6 +38,7 @@
 // turns it into characters. The photo never leaves the computer.
 
 import { readFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 
 import { cleanTextBlocks, looksReadable, type TextBlock } from "./ocrCleanup.ts";
 import { detectQuads, detectionLimitSide, detectorInputSize, type DetectedQuad } from "./ocrGeometry.ts";
@@ -56,6 +57,7 @@ import {
   type DecodedText,
   type Rgb,
 } from "./ocrRead.ts";
+import { OrtSession, tensor } from "./ortSession.ts";
 import { pinnedModel, type PinnedModelSpec, type PinnedModelStatus } from "./pinnedModel.ts";
 
 const BASE = "https://github.com/gitakoos/ocr-models/releases/download/v1/";
@@ -110,7 +112,7 @@ const MAX_FRAME_SIDE = 4096;
 /** How long the loaded models are kept after the last read. */
 const IDLE_MS = 2 * 60 * 1000;
 
-type Sessions = { det: any; cls: any; rec: any; dictionary: string[] };
+type Sessions = { det: OrtSession; cls: OrtSession; rec: OrtSession; dictionary: string[] };
 let sessions: Sessions | null = null;
 let idle: ReturnType<typeof setTimeout> | null = null;
 /** One read at a time; a newer one makes the one running stop at its next group. */
@@ -126,14 +128,26 @@ function closeSessions(): void {
 }
 
 /**
- * On the processor, with every thread since the user is waiting: the three networks are small,
- * and the reader's input width changes with every run, which the graphics card path handles badly.
+ * Threads a read runs on. The three networks are small, so a few threads take nearly all of
+ * the gain; the runtime's default of one per core leaves the window and the sidecar's own
+ * work starved while a read runs.
+ */
+const OCR_THREADS = Math.max(2, Math.min(4, availableParallelism() - 1));
+
+/**
+ * On the processor: the reader's input width changes with every run, which the graphics card
+ * path handles badly.
  */
 async function openSessions(): Promise<Sessions> {
   if (sessions) return sessions;
-  const ort = await import("onnxruntime-node");
   const open = (path: string) =>
-    ort.InferenceSession.create(path, { executionProviders: ["cpu"], graphOptimizationLevel: "basic", logSeverityLevel: 3 });
+    OrtSession.open(path, {
+      executionProviders: ["cpu"],
+      graphOptimizationLevel: "basic",
+      intraOpNumThreads: OCR_THREADS,
+      interOpNumThreads: 1,
+      logSeverityLevel: 3,
+    });
   const [det, cls, rec] = await Promise.all([open(models.det.path()), open(models.cls.path()), open(models.rec.path())]);
   const dictionary = buildCharacterDictionary(readFileSync(models.dict.path(), "utf8").split(/\r?\n/).filter((l, i, all) => l.length || i < all.length - 1));
   sessions = { det, cls, rec, dictionary };
@@ -212,8 +226,7 @@ async function detect(session: any, frame: Rgb): Promise<DetectedQuad[]> {
     values[i + plane] = (scaled[i * 3 + 1] / 255 - MEAN[1]) / DEVIATION[1];
     values[i + 2 * plane] = (scaled[i * 3] / 255 - MEAN[2]) / DEVIATION[2];
   }
-  const ort = await import("onnxruntime-node");
-  const out = await session.run({ [session.inputNames[0]]: new ort.Tensor("float32", values, [1, 3, h, w]) });
+  const out = await session.run({ [session.inputNames[0]]: tensor("float32", values, [1, 3, h, w]) });
   const map = (out[session.outputNames[0]].data as Float32Array).subarray(0, plane);
   return detectQuads({ width: w, height: h, values: map }, frame.width, frame.height);
 }
@@ -254,12 +267,11 @@ async function readBlocks(s: Sessions, frame: Rgb, found: DetectedQuad[], check:
   return blocks;
 }
 
-async function classify(session: any, crops: Rgb[]): Promise<boolean[]> {
-  const ort = await import("onnxruntime-node");
+async function classify(session: OrtSession, crops: Rgb[]): Promise<boolean[]> {
   const values = new Float32Array(crops.length * 3 * READ_HEIGHT * CLASSIFIER_WIDTH);
   crops.forEach((crop, slot) => writeCropInto(crop, false, values, slot, CLASSIFIER_WIDTH));
   const out = await session.run({
-    [session.inputNames[0]]: new ort.Tensor("float32", values, [crops.length, 3, READ_HEIGHT, CLASSIFIER_WIDTH]),
+    [session.inputNames[0]]: tensor("float32", values, [crops.length, 3, READ_HEIGHT, CLASSIFIER_WIDTH]),
   });
   const scores = out[session.outputNames[0]].data as Float32Array;
   return crops.map((_, i) => (i * 2 + 1 < scores.length ? classifierTurnsCrop(scores[i * 2], scores[i * 2 + 1]) : false));
@@ -267,7 +279,6 @@ async function classify(session: any, crops: Rgb[]): Promise<boolean[]> {
 
 /** The crops read in runs of like shapes; the answers come back in the crops' own order. */
 async function read(s: Sessions, crops: Rgb[], upsideDown: boolean[]): Promise<DecodedText[]> {
-  const ort = await import("onnxruntime-node");
   const ratio = (c: Rgb) => c.width / Math.max(c.height, 1);
   const order = crops.map((_, i) => i).sort((a, b) => ratio(crops[a]) - ratio(crops[b]));
   const ratios = order.map((i) => ratio(crops[i]));
@@ -278,11 +289,11 @@ async function read(s: Sessions, crops: Rgb[], upsideDown: boolean[]): Promise<D
     const batchWidth = readBatchWidth(ratios[start + size - 1]);
     const values = new Float32Array(size * 3 * READ_HEIGHT * batchWidth);
     const widths = slots.map((i, slot) => writeCropInto(crops[i], upsideDown[i], values, slot, batchWidth));
-    const out = await s.rec.run({ [s.rec.inputNames[0]]: new ort.Tensor("float32", values, [size, 3, READ_HEIGHT, batchWidth]) });
-    const tensor = out[s.rec.outputNames[0]];
-    const [, columns, alphabet] = tensor.dims as number[];
+    const out = await s.rec.run({ [s.rec.inputNames[0]]: tensor("float32", values, [size, 3, READ_HEIGHT, batchWidth]) });
+    const read = out[s.rec.outputNames[0]];
+    const [, columns, alphabet] = read.dims as number[];
     slots.forEach((i, slot) => {
-      answers[i] = decodeSlot(tensor.data as Float32Array, slot, columns, alphabet, widths[slot], batchWidth, s.dictionary);
+      answers[i] = decodeSlot(read.data as Float32Array, slot, columns, alphabet, widths[slot], batchWidth, s.dictionary);
     });
     start += size;
   }

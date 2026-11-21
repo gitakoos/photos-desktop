@@ -24,24 +24,30 @@
 // the whole library carries the names over to the groups that hold most of each person's faces;
 // new faces between regroups join the closest person or form new groups of their own.
 
+import { diag } from "./diag.ts";
 import { isConfidentFace } from "./faceAlign.ts";
-import { curationKey, foldPersonName } from "./personName.ts";
+import { curationKey, foldPersonName, isHiddenToken, isReservedName, newHiddenToken, shownName } from "./personName.ts";
 import {
   FACE_CLUSTER_MERGE_THRESHOLD,
+  FACE_CLUSTER_STRICT_DELTA,
   FACE_CLUSTER_THRESHOLD,
   FACE_SUGGEST_THRESHOLD,
   MERGE_MAX_CLUSTERS,
-  assignIncremental,
-  attractToNamedClusters,
+  assignIncrementalAsync,
+  attractToNamedClustersAsync,
   clusterFaces,
   MIN_FACES_TO_SHOW_PERSON,
   dot,
   isNameableCluster,
   meanDirection,
   resolveClusterNames,
+  runPausable,
+  runPausableSliced,
   splitOutUnclaimedNames,
-  suggestPersonMatches,
+  suggestPersonMatchesSteps,
+  timeSlicer,
   type FaceSample,
+  type Pausable,
 } from "./faceCluster.ts";
 import {
   SAME_FACE_IOU,
@@ -67,8 +73,6 @@ export class Stopped extends Error {
     this.name = "Stopped";
   }
 }
-
-const yieldNow = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function sampleOf(face: FaceRecord, people: PeopleState): FaceSample {
   return {
@@ -101,14 +105,16 @@ export async function regroupAll(store: FaceStore, isActive: () => boolean = () 
   const names = new Map<string, string>();
   for (const person of p.people) if (person.name) names.set(person.id, person.name);
 
+  const slice = timeSlicer();
   const check = async () => {
     if (!isActive()) throw new Stopped();
-    await yieldNow();
+    const turn = slice();
+    if (turn) await turn;
   };
   const base = await clusterFaces(samples, undefined, undefined, check);
   const voted = resolveClusterNames(oldPerson, confirmed, base, names);
   const split = splitOutUnclaimedNames(confirmed, base, voted);
-  const final = attractToNamedClusters(
+  const final = await attractToNamedClustersAsync(
     samples.map((s) => s.embedding),
     samples.map((s) => s.score),
     split.assignment,
@@ -187,18 +193,15 @@ export function groupMergeOwed(store: FaceStore): boolean {
 export async function mergeSplitGroups(store: FaceStore, isActive: () => boolean = () => true): Promise<number> {
   const p = store.people;
   const edits = store.edits;
-  const byPerson = facesByPerson(store);
+  const slice = timeSlicer();
+  const byPerson = await runPausableSliced(facesByPersonSteps(store), slice);
   const groups = p.people.filter((x) => !x.isOther && (byPerson.get(x.id)?.length ?? 0) > 0);
   const n = groups.length;
   if (n < 2) return 0;
-  const centroids = groups.map((x) => meanDirection(byPerson.get(x.id)!.map((f) => f.embedding)));
+  const centroids = await runPausableSliced(centroidSteps(groups, byPerson), slice);
   const counts = groups.map((x) => byPerson.get(x.id)!.length);
   const names = groups.map((x) => x.name);
-  const blocked = groups.map((x) => {
-    const marks = new Set<string>();
-    for (const f of byPerson.get(x.id)!) for (const name of p.blocked[f.id] ?? []) marks.add(name);
-    return marks;
-  });
+  const blocked = await runPausableSliced(blockedSteps(groups, byPerson, p), slice);
   const alive = new Array<boolean>(n).fill(true);
   const version = new Array<number>(n).fill(0);
   const root = Array.from({ length: n }, (_, i) => i);
@@ -235,10 +238,11 @@ export async function mergeSplitGroups(store: FaceStore, isActive: () => boolean
   };
   const check = async () => {
     if (!isActive()) throw new Stopped();
-    await yieldNow();
+    const turn = slice();
+    if (turn) await turn;
   };
   for (let a = 0; a < n; a++) {
-    if ((a & 0x3f) === 0) await check();
+    await check();
     for (let b = a + 1; b < n; b++) {
       const s = dot(centroids[a], centroids[b]);
       if (s >= FACE_CLUSTER_MERGE_THRESHOLD) push({ a, b, s, va: 0, vb: 0 });
@@ -266,7 +270,7 @@ export async function mergeSplitGroups(store: FaceStore, isActive: () => boolean
     root[dropped] = survivor;
     version[survivor]++;
     folded++;
-    if ((folded & 0x3f) === 0) await check();
+    await check();
     for (let k = 0; k < n; k++) {
       if (!alive[k] || k === survivor) continue;
       const s = dot(centroids[survivor], centroids[k]);
@@ -282,8 +286,13 @@ export async function mergeSplitGroups(store: FaceStore, isActive: () => boolean
     while (!alive[s]) s = root[s];
     into.set(groups[i].id, groups[s].id);
   }
-  for (const [faceId, personId] of Object.entries(p.assign)) {
-    const target = into.get(personId);
+  // The faces of the folded groups are found a part at a time; when the people changed meanwhile,
+  // every face is looked at again as the groups are folded.
+  const marks = store.peopleMarks;
+  const moving = await runPausableSliced(movingSteps(p, into), slice);
+  if (!isActive() || store.edits !== edits) throw new Stopped();
+  for (const faceId of store.peopleMarks === marks ? moving : Object.keys(p.assign)) {
+    const target = into.get(p.assign[faceId]);
     if (target) p.assign[faceId] = target;
   }
   p.people = p.people.filter((x) => !into.has(x.id));
@@ -292,26 +301,74 @@ export async function mergeSplitGroups(store: FaceStore, isActive: () => boolean
 }
 
 /**
+ * Above this many faces the whole-library regroup is left out: it grows with the faces times the
+ * groups, and the people the scan formed as it went stand as they are.
+ */
+export const FULL_REGROUP_MAX_FACES = 60_000;
+
+/**
+ * The grouping at the end of a scan pass, once per set of faces never grouped as a whole: every face
+ * regrouped from the start, its groups folded on their directions when there are more than its own
+ * merge takes; past FULL_REGROUP_MAX_FACES only the fold, the closing step of the phone's batched
+ * grouping. `starting` is called before it begins. Answers what ran, or null when nothing was owed.
+ */
+export async function groupAfterPass(
+  store: FaceStore,
+  isActive: () => boolean,
+  starting: () => void = () => {},
+): Promise<"regrouped" | "folded" | null> {
+  if (store.people.grouped) return null;
+  const faceCount = store.allFaces().length;
+  if (faceCount === 0) return null;
+  starting();
+  if (faceCount <= FULL_REGROUP_MAX_FACES) {
+    await diag.time("faces", "regroup_all", () => regroupAll(store, isActive));
+    if (groupMergeOwed(store)) await mergeSplitGroups(store, isActive);
+    return "regrouped";
+  }
+  await mergeSplitGroups(store, isActive);
+  store.people.grouped = true;
+  store.markPeople();
+  return "folded";
+}
+
+/**
+ * What follows faces taken in from another device: the new ones placed, the likely groups merged
+ * when the automatic merge is on, and the leftovers looked at again against everyone named.
+ */
+export async function settleTakenIn(store: FaceStore, autoMerging: boolean): Promise<void> {
+  await placeNew(store);
+  if (autoMerging) await autoMergeAsync(store);
+  await reconsiderLeftovers(store);
+}
+
+/**
  * Looks at the leftover faces again against everyone named: as a person gathers faces, one that
  * matched nobody before may now clear the bar for them. Only the usual bar takes a face in (a
- * stricter one for a weak face), never a person it was marked as not being. Returns how many moved.
+ * stricter one for a weak face), never a person it was marked as not being. Returns how many moved;
+ * none when the people changed while it looked, which leaves them for the next call.
  */
-export function reconsiderLeftovers(store: FaceStore): number {
+export async function reconsiderLeftovers(store: FaceStore): Promise<number> {
   const p = store.people;
+  const edits = store.edits;
   const other = p.people.find((x) => x.isOther);
   if (!other) return 0;
-  const byPerson = facesByPerson(store);
+  const before = groupingOf(p);
+  const byPerson = await runPausableSliced(facesByPersonSteps(store));
+  if (changedMeanwhile(store, p, edits, before)) return 0;
   const leftovers = byPerson.get(other.id) ?? [];
   const named = p.people.filter((x) => x.name && (byPerson.get(x.id)?.length ?? 0) > 0);
   if (leftovers.length === 0 || named.length === 0) return 0;
-  const centroids = named.map((x) => meanDirection(byPerson.get(x.id)!.map((f) => f.embedding)));
-  const matched = assignIncremental(
+  const centroids = await runPausableSliced(centroidSteps(named, byPerson));
+  if (changedMeanwhile(store, p, edits, before)) return 0;
+  const matched = await assignIncrementalAsync(
     leftovers.map((f) => sampleOf(f, p)),
     centroids,
   );
+  if (changedMeanwhile(store, p, edits, before)) return 0;
   let moved = 0;
   for (let i = 0; i < leftovers.length; i++) {
-    if (matched[i] < 0) continue;
+    if (matched[i] < 0 || p.assign[leftovers[i].id] !== other.id) continue;
     const target = named[matched[i]];
     if (p.blocked[leftovers[i].id]?.includes(target.name!)) continue;
     p.assign[leftovers[i].id] = target.id;
@@ -321,16 +378,114 @@ export function reconsiderLeftovers(store: FaceStore): number {
   return moved;
 }
 
+/** What a grouping step that gave the rest of the process its turn compares against afterwards. */
+function groupingOf(p: PeopleState): { people: Person[]; assign: Record<string, string> } {
+  return { people: p.people, assign: p.assign };
+}
+
+/**
+ * Whether the people changed while a step gave the rest of the process its turn: the user changed
+ * something, the store was emptied or let go, or a regroup or fold put new people in place. Its
+ * result is then thrown away, as it was worked out from what is no longer there.
+ */
+function changedMeanwhile(
+  store: FaceStore,
+  p: PeopleState,
+  edits: number,
+  before: { people: Person[]; assign: Record<string, string> },
+): boolean {
+  return store.people !== p || store.edits !== edits || p.people !== before.people || p.assign !== before.assign;
+}
+
 /** Each person's faces, by person id. */
 function facesByPerson(store: FaceStore): Map<string, FaceRecord[]> {
+  return runPausable(facesByPersonSteps(store));
+}
+
+/** How many faces a long read of every face takes between two asks for a turn. */
+const FACES_PER_STEP = 2048;
+
+export function* facesByPersonSteps(store: FaceStore): Pausable<Map<string, FaceRecord[]>> {
   const p = store.people;
   const out = new Map<string, FaceRecord[]>();
-  for (const face of store.allFaces()) {
+  const faces = store.allFaces();
+  for (let i = 0; i < faces.length; i++) {
+    if (i % FACES_PER_STEP === FACES_PER_STEP - 1) yield;
+    const face = faces[i];
     const id = p.assign[face.id];
     if (!id) continue;
     let list = out.get(id);
     if (!list) out.set(id, (list = []));
     list.push(face);
+  }
+  return out;
+}
+
+/** The mean direction of each of `people`'s faces, asking for a turn between people. */
+function* centroidSteps(people: Person[], byPerson: Map<string, FaceRecord[]>): Pausable<Float32Array[]> {
+  const out: Float32Array[] = [];
+  for (const person of people) {
+    yield;
+    out.push(meanDirection(byPerson.get(person.id)!.map((f) => f.embedding)));
+  }
+  return out;
+}
+
+/** The names each group's faces were said not to be, asking for a turn as it goes. */
+function* blockedSteps(groups: Person[], byPerson: Map<string, FaceRecord[]>, p: PeopleState): Pausable<Set<string>[]> {
+  const out: Set<string>[] = [];
+  let n = 0;
+  for (const x of groups) {
+    const marks = new Set<string>();
+    for (const f of byPerson.get(x.id)!) {
+      if (++n % FACES_PER_STEP === 0) yield;
+      for (const name of p.blocked[f.id] ?? []) marks.add(name);
+    }
+    out.push(marks);
+  }
+  return out;
+}
+
+/** The faces placed with a group that `into` folds into another, asking for a turn as it goes. */
+function* movingSteps(p: PeopleState, into: Map<string, string>): Pausable<string[]> {
+  const ids = Object.keys(p.assign);
+  const out: string[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    if (i % FACES_PER_STEP === FACES_PER_STEP - 1) yield;
+    if (into.has(p.assign[ids[i]])) out.push(ids[i]);
+  }
+  return out;
+}
+
+/** The faces no grouping has placed yet, leaving out the rejected ones, asking for a turn as it goes. */
+function* freshSteps(store: FaceStore, p: PeopleState): Pausable<FaceRecord[]> {
+  const rejected = new Set(p.rejected);
+  const faces = store.allFaces();
+  const out: FaceRecord[] = [];
+  for (let i = 0; i < faces.length; i++) {
+    if (i % FACES_PER_STEP === FACES_PER_STEP - 1) yield;
+    const f = faces[i];
+    if (!rejected.has(f.id) && !p.assign[f.id]) out.push(f);
+  }
+  return out;
+}
+
+/** What the grouping reads of each face, asking for a turn as it goes. */
+function* sampleSteps(faces: FaceRecord[], p: PeopleState): Pausable<FaceSample[]> {
+  const out: FaceSample[] = [];
+  for (let i = 0; i < faces.length; i++) {
+    if (i % FACES_PER_STEP === FACES_PER_STEP - 1) yield;
+    out.push(sampleOf(faces[i], p));
+  }
+  return out;
+}
+
+/** 1 for each face its photo still holds, asking for a turn as it goes. */
+function* onPhotoSteps(store: FaceStore, faces: FaceRecord[]): Pausable<Uint8Array> {
+  const out = new Uint8Array(faces.length);
+  for (let i = 0; i < faces.length; i++) {
+    if (i % FACES_PER_STEP === FACES_PER_STEP - 1) yield;
+    if (store.facesOf(faces[i].uid).includes(faces[i])) out[i] = 1;
   }
   return out;
 }
@@ -348,26 +503,63 @@ export function otherPerson(p: PeopleState): Person {
 /**
  * Places the faces no grouping has seen: each joins the closest person when close enough (never
  * one it was said not to be), the clear ones left over group among themselves into new people,
- * and the rest go to the leftovers. Left for the next call when the user changes something
- * while it runs.
+ * and the rest go to the leftovers. Left for the next call when the user changes something, or
+ * a regroup puts new people in place, while it runs. One placement at a time per store.
  */
-export async function placeNew(store: FaceStore): Promise<void> {
+export function placeNew(store: FaceStore): Promise<void> {
+  const before = placing.get(store) ?? Promise.resolve();
+  const run = before.then(() => placeNewNow(store));
+  const settled = run.catch(() => {});
+  placing.set(store, settled);
+  void settled.then(() => {
+    if (placing.get(store) === settled) placing.delete(store);
+  });
+  return run;
+}
+
+/** The placement running or waiting per store: the next one starts once it is through. */
+const placing = new WeakMap<FaceStore, Promise<void>>();
+
+async function placeNewNow(store: FaceStore): Promise<void> {
   const p = store.people;
   const edits = store.edits;
-  const rejected = new Set(p.rejected);
-  const fresh = store.allFaces().filter((f) => !rejected.has(f.id) && !p.assign[f.id]);
+  const before = groupingOf(p);
+  // One budget for the whole placement, so what runs between its long loops counts against it too.
+  const slice = timeSlicer();
+  const fresh = await runPausableSliced(freshSteps(store, p), slice);
   if (fresh.length === 0) return;
-  const byPerson = facesByPerson(store);
+  const byPerson = await runPausableSliced(facesByPersonSteps(store), slice);
   const targets = p.people.filter((x) => !x.isOther && (byPerson.get(x.id)?.length ?? 0) > 0);
-  const centroids = targets.map((x) => meanDirection(byPerson.get(x.id)!.map((f) => f.embedding)));
-  const samples = fresh.map((f) => sampleOf(f, p));
-  const matched = assignIncremental(samples, centroids);
+  const centroids = await runPausableSliced(centroidSteps(targets, byPerson), slice);
+  if (changedMeanwhile(store, p, edits, before)) return;
+  const samples = await runPausableSliced(sampleSteps(fresh, p), slice);
+  const matched = await assignIncrementalAsync(samples, centroids, FACE_CLUSTER_THRESHOLD, FACE_CLUSTER_STRICT_DELTA, slice);
+  if (changedMeanwhile(store, p, edits, before)) return;
   const clearFirst: number[] = [];
   for (let i = 0; i < fresh.length; i++) if (matched[i] < 0 && samples[i].confident) clearFirst.push(i);
-  const grouping = clearFirst.length ? await clusterFaces(clearFirst.map((i) => samples[i])) : new Int32Array(0);
-  if (store.edits !== edits) return;
+  const grouping = clearFirst.length
+    ? await clusterFaces(
+        clearFirst.map((i) => samples[i]),
+        FACE_CLUSTER_THRESHOLD,
+        FACE_CLUSTER_MERGE_THRESHOLD,
+        () => {},
+        slice,
+      )
+    : new Int32Array(0);
+  // Whether each face is still on its photo, looked up a part at a time; when the faces changed
+  // meanwhile, each is looked up again as it is placed.
+  const facesAt = store.facesMarks;
+  const onPhoto = await runPausableSliced(onPhotoSteps(store, fresh), slice);
+  if (changedMeanwhile(store, p, edits, before)) return;
+  const stillOnPhoto =
+    store.facesMarks === facesAt
+      ? (i: number) => onPhoto[i] === 1
+      : (i: number) => store.facesOf(fresh[i].uid).includes(fresh[i]);
+  // A face placed, or a photo scanned again or dropped, while the rest of the process had its turn is not placed here.
+  const held = (i: number) => !p.assign[fresh[i].id] && stillOnPhoto(i);
   const unplaced: number[] = [];
   for (let i = 0; i < fresh.length; i++) {
+    if (!held(i)) continue;
     const target = matched[i] >= 0 ? targets[matched[i]] : null;
     if (target && !(target.name && p.blocked[fresh[i].id]?.includes(target.name))) {
       p.assign[fresh[i].id] = target.id;
@@ -497,24 +689,30 @@ export type Suggestion = { unnamed: string; named: string; similarity: number };
  * out every pair already answered with "Different person".
  */
 export function listSuggestions(store: FaceStore): Suggestion[] {
+  return runPausable(suggestionSteps(store));
+}
+
+function* suggestionSteps(store: FaceStore, faces?: Map<string, FaceRecord[]>): Pausable<Suggestion[]> {
   const p = store.people;
-  const byPerson = facesByPerson(store);
+  const byPerson = faces ?? (yield* facesByPersonSteps(store));
   const named: [string, Float32Array][] = [];
   const unnamed: [string, Float32Array][] = [];
   const nameOf = new Map<string, string>();
   for (const person of p.people) {
-    if (person.isOther) continue;
+    if (person.isOther || isHiddenName(p, person.name)) continue;
     const faces = byPerson.get(person.id) ?? [];
     if (faces.length === 0) continue;
+    yield;
     const direction = meanDirection(faces.map((f) => f.embedding));
-    if (person.name) {
+    if (shownName(person.name)) {
       named.push([person.id, direction]);
-      nameOf.set(person.id, person.name);
+      nameOf.set(person.id, person.name!);
     } else if (isNameableCluster(null, false, new Set(faces.map((f) => f.uid)).size)) {
       unnamed.push([person.id, direction]);
     }
   }
-  return suggestPersonMatches(named, unnamed).filter((s) => {
+  const matches = yield* suggestPersonMatchesSteps(named, unnamed);
+  return matches.filter((s) => {
     const name = nameOf.get(s.named)!;
     return !(byPerson.get(s.unnamed) ?? []).some((f) => p.blocked[f.id]?.includes(name));
   });
@@ -546,37 +744,75 @@ export function dismissSuggestion(store: FaceStore, unnamedId: string, namedId: 
  * a merge nobody looked at. Returns how many groups went into someone.
  */
 export function autoMerge(store: FaceStore): number {
+  return runPausable(autoMergeSteps(store));
+}
+
+/**
+ * `autoMerge`, giving the rest of the process its turn while it works out each round's suggestions.
+ * A round that finds the people changed meanwhile is not carried out, and the merging stops there.
+ */
+export function autoMergeAsync(store: FaceStore): Promise<number> {
+  return runPausableSliced(autoMergeSteps(store));
+}
+
+function* autoMergeSteps(store: FaceStore): Pausable<number> {
   let merged = 0;
   for (let round = 0; round < 10; round++) {
-    const suggestions = listSuggestions(store).filter((s) => s.similarity > FACE_CLUSTER_THRESHOLD);
+    const held = store.people;
+    const marks = store.peopleMarks;
+    const edits = store.edits;
+    const suggestions = (yield* suggestionSteps(store)).filter((s) => s.similarity > FACE_CLUSTER_THRESHOLD);
+    if (store.people !== held || store.peopleMarks !== marks || store.edits !== edits) break;
     if (suggestions.length === 0) break;
     const taken = new Set<string>();
+    const p = store.people;
+    const pairs: [Person, Person][] = [];
     for (const s of suggestions) {
       if (taken.has(s.unnamed)) continue;
       taken.add(s.unnamed);
-      const p = store.people;
-      mergeInPlace(p, personOf(p, s.unnamed), personOf(p, s.named), false);
-      store.markPeople();
-      store.edits++;
-      merged++;
+      pairs.push([personOf(p, s.unnamed), personOf(p, s.named)]);
     }
+    mergeAllInPlace(p, pairs);
+    store.markPeople();
+    store.edits += pairs.length;
+    merged += pairs.length;
   }
   return merged;
+}
+
+/**
+ * Puts each unnamed group of `pairs` into its named person, as `mergeInPlace` one after another
+ * would, unconfirmed, reading every face's person once for all of them.
+ */
+function mergeAllInPlace(p: PeopleState, pairs: [Person, Person][]): void {
+  const into = new Map(pairs.map(([from, to]) => [from.id, to.id]));
+  for (const [faceId, personId] of Object.entries(p.assign)) {
+    const to = into.get(personId);
+    if (to) p.assign[faceId] = to;
+  }
+  for (const [from, to] of pairs) {
+    if (!from.name) continue;
+    delete p.covers[from.name];
+    const attached = p.manual[from.name];
+    delete p.manual[from.name];
+    if (attached?.length && to.name) p.manual[to.name] = [...new Set([...(p.manual[to.name] ?? []), ...attached])];
+  }
+  p.people = p.people.filter((x) => !into.has(x.id));
 }
 
 /** A face in no group worth naming: one of the leftovers, or alone in its group. */
 export type LooseFace = { faceId: string; uid: string; box: [number, number, number, number] };
 
 /** At most this many loose faces are listed at once. */
-const MAX_LOOSE = 600;
+export const MAX_LOOSE = 600;
 
 /**
  * The faces in no group worth naming, clearest first: the leftovers, and the groups seen in
  * one photo only. These are the faces the People page cannot offer as someone to name.
  */
-export function listLoose(store: FaceStore): { faces: LooseFace[]; total: number } {
+export function listLoose(store: FaceStore, faces?: Map<string, FaceRecord[]>): { faces: LooseFace[]; total: number } {
   const p = store.people;
-  const byPerson = facesByPerson(store);
+  const byPerson = faces ?? facesByPerson(store);
   const loose: FaceRecord[] = [];
   for (const person of p.people) {
     if (person.name) continue;
@@ -598,6 +834,7 @@ export function nameFaces(store: FaceStore, faceIds: string[], rawName: string, 
   const p = store.people;
   const name = rawName.trim().slice(0, 100);
   if (!name) throw new Error("A name is needed");
+  if (isReservedName(name)) throw new Error("This name cannot be used");
   const fold = foldPersonName(name);
   let person = p.people.find((x) => x.name && foldPersonName(x.name) === fold);
   if (!person) {
@@ -647,31 +884,43 @@ export function facesOnPhoto(store: FaceStore, uid: string): PhotoFace[] {
     .map((f) => {
       const personId = p.assign[f.id] ?? null;
       const person = personId ? p.people.find((x) => x.id === personId) : undefined;
+      // A hidden person is not offered on a photo either: the face reads as one nobody has grouped.
+      const hidden = isHiddenName(p, person?.name ?? null);
       return {
         faceId: f.id,
         box: f.box,
-        personId: person && !person.isOther ? person.id : null,
-        name: person?.name ?? null,
+        personId: person && !person.isOther && !hidden ? person.id : null,
+        name: hidden ? null : shownName(person?.name ?? null),
       };
     });
 }
+
+/** The people as the window lists them. */
+export type PeopleLists = {
+  named: PersonView[];
+  unnamed: PersonView[];
+  /** The people hidden from the lists above, shown only in the Hidden section. */
+  hidden: PersonView[];
+  leftover: number;
+  suggestions: Suggestion[];
+  loose: { faces: LooseFace[]; total: number };
+};
 
 /**
  * The people worth showing: everyone named, and the unnamed groups seen in enough photos. A named
  * person's photos are those of their faces and those attached to them by hand on another device, as
  * far as `uidOfLink` (else the photos scanned here) finds them in the library.
  */
-export function listPeople(store: FaceStore, uidOfLink?: (link: string) => string | undefined): {
-  named: PersonView[];
-  unnamed: PersonView[];
-  leftover: number;
-  suggestions: Suggestion[];
-  loose: { faces: LooseFace[]; total: number };
-} {
+export function listPeople(store: FaceStore, uidOfLink?: (link: string) => string | undefined): PeopleLists {
+  return runPausable(listPeopleSteps(store, uidOfLink));
+}
+
+function* listPeopleSteps(store: FaceStore, uidOfLink?: (link: string) => string | undefined): Pausable<PeopleLists> {
   const p = store.people;
-  const byPerson = facesByPerson(store);
+  const byPerson = yield* facesByPersonSteps(store);
   const named: PersonView[] = [];
   const unnamed: PersonView[] = [];
+  const hidden: PersonView[] = [];
   let leftover = 0;
   let scannedByLink: Map<string, string> | null = null;
   const resolve = (link: string) => {
@@ -681,6 +930,7 @@ export function listPeople(store: FaceStore, uidOfLink?: (link: string) => strin
     return scannedByLink.get(link);
   };
   for (const person of p.people) {
+    yield;
     const faces = byPerson.get(person.id) ?? [];
     const uids = [...new Set(faces.map((f) => f.uid))];
     if (person.name && !person.isOther) {
@@ -702,19 +952,24 @@ export function listPeople(store: FaceStore, uidOfLink?: (link: string) => strin
     const coverFace =
       (picked ? faces.find((f) => f.uid === picked) : undefined) ??
       faces.reduce((best, f) => (f.score > best.score ? f : best), faces[0]);
+    const label = shownName(person.name);
     const view: PersonView = {
       id: person.id,
-      name: person.name,
+      name: label,
       isOther: false,
       uids,
       cover: coverFace ? { uid: coverFace.uid, box: coverFace.box } : null,
     };
-    if (person.name) named.push(view);
-    else if (isNameableCluster(person.name, false, uids.length)) unnamed.push(view);
+    if (isHiddenName(p, person.name)) hidden.push(view);
+    else if (label) named.push(view);
+    else if (isNameableCluster(null, false, uids.length)) unnamed.push(view);
   }
   named.sort((a, b) => b.uids.length - a.uids.length || a.name!.localeCompare(b.name!));
-  unnamed.sort((a, b) => b.uids.length - a.uids.length || (a.id < b.id ? -1 : 1));
-  return { named, unnamed, leftover, suggestions: listSuggestions(store), loose: listLoose(store) };
+  const bySize = (a: PersonView, b: PersonView) => b.uids.length - a.uids.length || (a.id < b.id ? -1 : 1);
+  unnamed.sort(bySize);
+  hidden.sort(bySize);
+  const suggestions = yield* suggestionSteps(store, byPerson);
+  return { named, unnamed, hidden, leftover, suggestions, loose: listLoose(store, byPerson) };
 }
 
 function personOf(p: PeopleState, id: string): Person {
@@ -742,6 +997,7 @@ function noteRenamed(p: PeopleState, from: string, to: string, at: number): void
   delete p.namedAt[foldPersonName(from)];
   p.namedAt[foldPersonName(to)] = at;
   moveCuration(p, from, to);
+  moveHidden(p, from, to);
 }
 
 /** The removals kept, and carried in a face copy; older ones have long reached every device. */
@@ -867,6 +1123,7 @@ export function renamePerson(store: FaceStore, id: string, rawName: string, at =
   const person = personOf(p, id);
   if (person.isOther) throw new Error("The leftovers cannot be named");
   const name = rawName.trim().slice(0, 100) || null;
+  if (name && isReservedName(name)) throw new Error("This name cannot be used");
   if (name) {
     const fold = foldPersonName(name);
     const same = p.people.find((x) => x.id !== id && x.name && foldPersonName(x.name) === fold);
@@ -878,21 +1135,86 @@ export function renamePerson(store: FaceStore, id: string, rawName: string, at =
   if (person.name && name) noteRenamed(p, person.name, name, at);
   else if (name) {
     p.namedAt[foldPersonName(name)] = at;
-    // Naming a group says who its faces are: each is confirmed, so a regroup keeps them together.
-    const rejected = new Set(p.rejected);
-    for (const [faceId, owner] of Object.entries(p.assign)) {
-      if (owner !== id || rejected.has(faceId) || p.confirmed[faceId] !== undefined) continue;
-      if (p.blocked[faceId]?.some((n) => foldPersonName(n) === foldPersonName(name))) continue;
-      p.confirmed[faceId] = name;
-    }
+    confirmGroup(p, id, name);
   } else if (person.name) {
     keepNameChange(p, { from: person.name, to: "", at });
     delete p.namedAt[foldPersonName(person.name)];
+    if (!isHiddenToken(person.name)) dropHidden(p, person.name);
   }
   renameInPlace(p, person, name);
   store.markPeople();
   store.edits++;
   return id;
+}
+
+/** Naming a group says who its faces are: each is confirmed, so a regroup keeps them together. */
+function confirmGroup(p: PeopleState, id: string, name: string): void {
+  const rejected = new Set(p.rejected);
+  for (const [faceId, owner] of Object.entries(p.assign)) {
+    if (owner !== id || rejected.has(faceId) || p.confirmed[faceId] !== undefined) continue;
+    if (p.blocked[faceId]?.some((n) => foldPersonName(n) === foldPersonName(name))) continue;
+    p.confirmed[faceId] = name;
+  }
+}
+
+/** Whether the person called `name` is hidden from People. */
+export function isHiddenName(p: PeopleState, name: string | null): boolean {
+  return !!name && p.hidden[foldPersonName(name)]?.hidden === true;
+}
+
+/** Moves the hidden row of `from` to `to`, keeping the later one where `to` has a row already. */
+export function moveHidden(p: PeopleState, from: string, to: string): void {
+  const fromKey = foldPersonName(from);
+  const toKey = foldPersonName(to);
+  const row = p.hidden[fromKey];
+  if (!row || fromKey === toKey) return;
+  delete p.hidden[fromKey];
+  if ((p.hidden[toKey]?.at ?? -1) < row.at) p.hidden[toKey] = { ...row, name: to };
+}
+
+/** Forgets the hidden row of a name that was taken off or renamed away. */
+export function dropHidden(p: PeopleState, name: string): void {
+  delete p.hidden[foldPersonName(name)];
+}
+
+/** Takes the reserved label off a group, which is an unnamed group again, as a rename to no name does. */
+export function takeTokenOff(p: PeopleState, person: Person, at: number): void {
+  if (!person.name || !isHiddenToken(person.name)) return;
+  keepNameChange(p, { from: person.name, to: "", at });
+  delete p.namedAt[foldPersonName(person.name)];
+  renameInPlace(p, person, null);
+}
+
+/**
+ * Hides a person from People and every suggestion, keeping all their faces and photos. An unnamed
+ * group is labelled with a reserved name first, so it stays together on every device, and is shown
+ * as unnamed all the same.
+ */
+export function hidePerson(store: FaceStore, id: string, at = Date.now()): void {
+  const p = store.people;
+  const person = personOf(p, id);
+  if (person.isOther) throw new Error("The leftovers cannot be hidden");
+  if (!person.name) {
+    const token = newHiddenToken();
+    p.namedAt[foldPersonName(token)] = at;
+    confirmGroup(p, id, token);
+    renameInPlace(p, person, token);
+  }
+  p.hidden[foldPersonName(person.name!)] = { name: person.name!, hidden: true, at };
+  store.markPeople();
+  store.edits++;
+}
+
+/** Shows a hidden person again, in People and in the suggestions; a reserved label comes off the group. */
+export function showPerson(store: FaceStore, id: string, at = Date.now()): void {
+  const p = store.people;
+  const person = personOf(p, id);
+  if (!person.name) return;
+  const name = person.name;
+  takeTokenOff(p, person, at);
+  p.hidden[foldPersonName(name)] = { name, hidden: false, at };
+  store.markPeople();
+  store.edits++;
 }
 
 /** Gives `person` the name, with the cover and the faces confirmed under the old one. */

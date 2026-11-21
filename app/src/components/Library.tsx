@@ -22,10 +22,11 @@
 
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
-import { CheckIcon, ChevronRightIcon } from "./icons";
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon } from "./icons";
 import { FaceNamer } from "./FaceNamer";
 import type { LooseFace } from "../lib/localFaces";
-import { cachedPreview, loadPreview } from "../lib/previewStore";
+import { useThumbServerBase } from "../lib/thumbStore";
+import { faceCoverUrl } from "../lib/faceCoverUrl";
 import { useT } from "../lib/i18n";
 import "../styles/Library.css";
 
@@ -65,7 +66,7 @@ export type LibraryEntry = {
 export type LibraryKind = "people" | "labels";
 
 /** A page under the Albums tab: the people, the labels, or the map. */
-export type LibraryPageKind = LibraryKind | "map" | "collection" | "duplicates" | "fixdates" | "hidden";
+export type LibraryPageKind = LibraryKind | "map" | "calendar" | "collection" | "duplicates" | "fixdates" | "hidden";
 
 /** `badge` puts a dot on the tile: something there waits for an answer. */
 export type Tile = { key: string; label: string; icon: ReactNode; onClick: () => void; badge?: boolean };
@@ -90,26 +91,48 @@ export function LibraryTiles({ tiles }: { tiles: Tile[] }) {
 /** The square around a face, as a multiple of the face's longer side (the Android app's). */
 const FACE_ZOOM_OUT = 1.4;
 
-/**
- * The cover cut to the face: the picture is scaled and moved so a square FACE_ZOOM_OUT times
- * the face fills its square frame, kept inside the picture. Until the picture's own shape is
- * known it is shown whole.
- */
+/** A person's cover cut to their face: a square FACE_ZOOM_OUT times the face. */
 export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
-  const [aspect, setAspect] = useState<number | null>(null);
-  // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it:
-  // the larger preview takes its place once it is in.
-  const [preview, setPreview] = useState<string | null>(() => cachedPreview(uid) ?? null);
-  useEffect(() => {
-    let live = true;
-    void loadPreview(uid).then((url) => {
-      if (live && url) setPreview(url);
-    });
-    return () => {
-      live = false;
-    };
-  }, [uid]);
-  const src = preview ?? thumb;
+  // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it.
+  // The thumbnail server cuts the face out of the HD preview and serves it card-sized, so
+  // the window decodes a small square rather than a 1920 px preview per person, and a
+  // cover off screen is never asked for (the image loads lazily).
+  const base = useThumbServerBase();
+  const cut = base && box ? faceCoverUrl(base, uid, box) : null;
+  const [cutFailed, setCutFailed] = useState<string | null>(null);
+  const [cutShown, setCutShown] = useState<string | null>(null);
+  if (!cut || cutFailed === cut) return <ThumbFaceCover thumb={thumb} box={box} />;
+  // The grid thumbnail, already in, is cut to the face at once and stays until the sharp
+  // cut has loaded over it, so a card is never blank while its cut is made.
+  const ready = cutShown === cut;
+  return (
+    <>
+      {!ready && <ThumbFaceCover thumb={thumb} box={box} />}
+      <img
+        src={cut}
+        alt=""
+        draggable={false}
+        loading="lazy"
+        style={ready ? undefined : { opacity: 0 }}
+        onLoad={() => setCutShown(cut)}
+        onError={() => setCutFailed(cut)}
+      />
+    </>
+  );
+}
+
+/**
+ * The grid thumbnail cut to the face in the window: the picture is scaled and moved so a
+ * square FACE_ZOOM_OUT times the face fills its square frame, kept inside the picture.
+ * For when the thumbnail server cannot cut it. Until the picture's own shape is known it
+ * is hidden, as the whole picture would show some other part of it.
+ */
+function ThumbFaceCover({ thumb, box }: { thumb: string; box: FaceBox | null }) {
+  // The shape of the picture it was measured on: a reused card given another picture waits
+  // for that one's.
+  const [measured, setMeasured] = useState<{ thumb: string; aspect: number } | null>(null);
+  const aspect = measured?.thumb === thumb ? measured.aspect : null;
+  const src = thumb;
   let style: CSSProperties | undefined;
   if (box && aspect) {
     const [l, top, r, b] = box;
@@ -123,16 +146,22 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
     const left = Math.min(0, Math.max(100 - width, 50 - cx * width));
     const topPct = Math.min(0, Math.max(100 - height, 50 - cy * height));
     style = { position: "absolute", width: `${width}%`, height: `${height}%`, left: `${left}%`, top: `${topPct}%`, objectFit: "fill" };
+  } else if (box) {
+    // Hidden until its shape is known, so the circle shows nothing rather than the wrong spot.
+    style = { opacity: 0 };
   }
   return (
+    // Lazy, as the cut over it is: a page of people mounts every card, and an eager picture
+    // here would fetch and decode every person's grid thumbnail, on screen or not.
     <img
       src={src}
       alt=""
       draggable={false}
+      loading="lazy"
       style={style}
       onLoad={(e) => {
         const img = e.currentTarget;
-        if (img.naturalWidth && img.naturalHeight) setAspect(img.naturalWidth / img.naturalHeight);
+        if (img.naturalWidth && img.naturalHeight) setMeasured({ thumb, aspect: img.naturalWidth / img.naturalHeight });
       }}
     />
   );
@@ -190,7 +219,7 @@ function EntryCard({
             <FaceCover uid={entry.cover} thumb={cover} box={entry.box} />
           </span>
         ) : (
-          <img className="lib-cardimg" src={cover} alt="" draggable={false} />
+          <img className="lib-cardimg" src={cover} alt="" draggable={false} loading="lazy" />
         )
       ) : null}
       <span className="lib-cardtext">
@@ -406,7 +435,12 @@ export function LocalPeoplePage({
   names,
   onNameFaces,
   onRejectFaces,
+  hidden,
+  onShow,
 }: {
+  /** The people hidden from People, listed in a collapsed section at the end. */
+  hidden: LibraryEntry[];
+  onShow: (entry: LibraryEntry) => Promise<void>;
   /** The faces in no group worth naming, and how many there are in all. */
   loose: { faces: LooseFace[]; total: number };
   /** Everyone already named, offered while a name is typed. */
@@ -439,7 +473,7 @@ export function LocalPeoplePage({
       </div>
     );
   }
-  if (named.length === 0 && unnamed.length === 0 && loose.total === 0) {
+  if (named.length === 0 && unnamed.length === 0 && loose.total === 0 && hidden.length === 0) {
     return (
       <div className="g-empty">
         <p className="g-empty-title">{t("faces.noPeople")}</p>
@@ -481,9 +515,74 @@ export function LocalPeoplePage({
       {loose.total > 0 && (
         <LooseFaces loose={loose} names={names} onName={onNameFaces} onReject={onRejectFaces} />
       )}
+      {hidden.length > 0 && <HiddenPeople people={hidden} onShow={onShow} />}
     </>
   );
 }
+
+/**
+ * The people hidden from People, under a heading that opens and closes them: each with their
+ * face, the number of photos, and Show to bring them back.
+ */
+function HiddenPeople({
+  people,
+  onShow,
+}: {
+  people: LibraryEntry[];
+  onShow: (entry: LibraryEntry) => Promise<void>;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const covers = useCovers(open ? people : []);
+  const show = async (entry: LibraryEntry) => {
+    if (busy) return;
+    setBusy(entry.personId ?? entry.name);
+    try {
+      await onShow(entry);
+    } catch {
+      /* the person stays listed for another try */
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <section className="lib-section">
+      <button className="lib-hiddenhead" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <span>{t("faces.hiddenTitle")}</span>
+        <span className="lib-hiddencount">{people.length}</span>
+        <ChevronDownIcon size={20} />
+      </button>
+      {open && (
+        <div className="lib-suggest">
+          {people.map((entry) => (
+            <div className="lib-suggestcard" key={entry.personId ?? entry.name}>
+              <span className="lib-suggestfaces">
+                <FaceDot entry={entry} thumb={entry.cover ? covers[entry.cover] : null} />
+              </span>
+              <div className="lib-suggesttext">
+                <span className="lib-suggestname">{entry.name}</span>
+                <span className="lib-suggestcount">
+                  {t(entry.uids.length === 1 ? "common.photoCount.one" : "common.photoCount.other", {
+                    count: entry.uids.length,
+                  })}
+                </span>
+              </div>
+              <div className="lib-suggestactions">
+                <button className="lib-suggestbtn primary" disabled={busy !== null} onClick={() => void show(entry)}>
+                  {t("faces.show")}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Faces in no group shown at once, and added each time more are asked for. */
+const LOOSE_PAGE = 120;
 
 /**
  * The faces in no group worth naming, each on its own: picked a few at a time and named, put
@@ -502,15 +601,20 @@ function LooseFaces({
 }) {
   const t = useT();
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const thumbs = useThumbnails(useMemo(() => loose.faces.map((f) => f.uid), [loose]));
-  // Only faces still listed stay picked.
+  // A page at a time: the whole list drawn at once made scrolling People costly, for faces
+  // seldom looked at down there.
+  const [shown, setShown] = useState(LOOSE_PAGE);
+  const faces = useMemo(() => loose.faces.slice(0, shown), [loose, shown]);
+  const thumbs = useThumbnails(useMemo(() => faces.map((f) => f.uid), [faces]));
+  // Only faces still shown stay picked: one pushed below the page by new faces is not named
+  // unseen with the rest.
   useEffect(() => {
     setPicked((p) => {
-      const ids = new Set(loose.faces.map((f) => f.faceId));
+      const ids = new Set(faces.map((f) => f.faceId));
       const kept = [...p].filter((id) => ids.has(id));
       return kept.length === p.size ? p : new Set(kept);
     });
-  }, [loose]);
+  }, [faces]);
   const toggle = (id: string) =>
     setPicked((p) => {
       const next = new Set(p);
@@ -522,8 +626,8 @@ function LooseFaces({
     <section className="lib-section">
       <h2 className="lib-subhead">{t("faces.looseTitle")}</h2>
       <p className="lib-note scan">
-        {loose.total > loose.faces.length
-          ? t("faces.looseMore", { shown: loose.faces.length, total: loose.total })
+        {loose.total > faces.length
+          ? t("faces.looseMore", { shown: faces.length, total: loose.total })
           : t("faces.looseHint")}
       </p>
       {picked.size > 0 && (
@@ -544,7 +648,7 @@ function LooseFaces({
         </div>
       )}
       <div className="lib-loosegrid">
-        {loose.faces.map((f) => (
+        {faces.map((f) => (
           <button
             key={f.faceId}
             className={`lib-findcell${picked.has(f.faceId) ? " selected" : ""}`}
@@ -562,6 +666,11 @@ function LooseFaces({
           </button>
         ))}
       </div>
+      {loose.faces.length > shown && (
+        <button className="g-chip lib-seemore" onClick={() => setShown((n) => n + LOOSE_PAGE)}>
+          {t("faces.looseShowMore", { count: Math.min(LOOSE_PAGE, loose.faces.length - shown) })}
+        </button>
+      )}
     </section>
   );
 }

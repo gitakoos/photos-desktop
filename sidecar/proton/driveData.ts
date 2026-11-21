@@ -34,17 +34,24 @@ import { createHash } from "node:crypto";
 
 import { CryptoProxy } from "./crypto.ts";
 import { activeRevisionOf, nodeName } from "./nodes.ts";
+import { isHiddenToken } from "./personName.ts";
+import { openDownloader } from "./downloadSlots.ts";
+import type { BackupKind } from "./sharedBackup.ts";
 
 export const APP_FOLDER = "Photos for Proton";
 export const ML_FOLDER = "ML data";
 export const LABELS_FOLDER = "Labels";
 export const HIDDEN_FOLDER = "Hidden";
+export const SETTINGS_FOLDER = "Settings";
+export const ALBUM_ORDER_FOLDER = "Album order";
 
 const DEVICE_ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const FACES_NAME = new RegExp(`^faces-(${DEVICE_ID})\\.pfpml$`);
 const SEARCH_NAME = new RegExp(`^search-(${DEVICE_ID})\\.pfpml$`);
 const LABELS_NAME = new RegExp(`^labels-(${DEVICE_ID})\\.pfplb$`);
 const HIDDEN_NAME = new RegExp(`^hidden-(${DEVICE_ID})\\.pfphd$`);
+const SETTINGS_NAME = new RegExp(`^settings-(${DEVICE_ID})\\.pfpst$`);
+const ALBUM_ORDER_NAME = new RegExp(`^album-order-(${DEVICE_ID})\\.pfpao$`);
 
 /** The install that wrote a face snapshot file, or null for any other name. */
 export function facesFileDevice(name: string): string | null {
@@ -64,6 +71,16 @@ export function labelsFileDevice(name: string): string | null {
 /** The install that wrote a hidden-list file, or null for any other name. */
 export function hiddenFileDevice(name: string): string | null {
   return HIDDEN_NAME.exec(name)?.[1] ?? null;
+}
+
+/** The install that wrote a settings file, or null for any other name. */
+export function settingsFileDevice(name: string): string | null {
+  return SETTINGS_NAME.exec(name)?.[1] ?? null;
+}
+
+/** The install that wrote an album-order file, or null for any other name. */
+export function albumOrderFileDevice(name: string): string | null {
+  return ALBUM_ORDER_NAME.exec(name)?.[1] ?? null;
 }
 
 // ---- The envelope ----
@@ -287,8 +304,8 @@ export async function openEnvelope(file: Buffer, decryptionKeys: any[], verifica
 // ---- The face snapshot ----
 
 const SNAPSHOT_MAGIC = Buffer.from("PPMLSNAP", "ascii");
-/** The version a face copy is written as, and the newest read; a search copy keeps 4, whose layout 5 and 6 left as it was. */
-const FACES_VERSION = 6;
+/** The version a face copy is written as, and the newest read; a search copy keeps 4, whose layout 5 to 7 left as it was. */
+const FACES_VERSION = 7;
 const SEARCH_VERSION = 4;
 const OLDEST_READ_VERSION = 4;
 const KIND_FACES = 1;
@@ -296,6 +313,7 @@ const KIND_SEARCH = 2;
 const SEARCH_TOMBSTONE = 0x01;
 const NO_REFERENCE = 0xffffffff;
 const FACE_REJECTED = 0x01;
+const HIDDEN_FLAG = 0x01;
 const MAX_EMBEDDING_DIM = 4096;
 const TAG = {
   KEY: 0x01,
@@ -308,6 +326,7 @@ const TAG = {
   SEARCH: 0x08,
   NAME_CHANGE: 0x09,
   REMOVAL: 0x0a,
+  HIDDEN_PERSON: 0x0b,
   END: 0xff,
 };
 
@@ -375,7 +394,12 @@ export type FaceCopy = {
    * link id: what another device can take as done instead of scanning again.
    */
   scanned: string[];
+  /** Who was hidden or shown again there, by the name as spelled. */
+  hiddenPeople: HiddenPerson[];
 };
+
+/** A person hidden (or shown again) by hand at `at` (epoch ms). */
+export type HiddenPerson = { name: string; hidden: boolean; at: number };
 
 /** A rename or merge of a person made by hand at `at` (epoch ms); an empty `to` is the name taken off. */
 export type NameChange = { from: string; to: string; at: number };
@@ -446,7 +470,7 @@ class LittleEndian {
  * The people a face snapshot names. A person's photos are the faces grouped under them
  * (by the clustering, or confirmed by hand), less the faces removed from People and those
  * marked as not them, plus the photos attached to them by hand. Throws on anything that is
- * not a well-formed face snapshot of version 4 to 6.
+ * not a well-formed face snapshot of version 4 to 7.
  */
 export function readFacesSnapshot(plain: Buffer): FacesSnapshot {
   return readFaceCopy(plain).snapshot;
@@ -476,6 +500,7 @@ export function readFaceCopy(plain: Buffer): { snapshot: FacesSnapshot; copy: Fa
   const changeCount = version >= 5 ? r.u32() : 0;
   const removalCount = version >= 5 ? r.u32() : 0;
   const [faceCount, manualCount, notPersonCount, coverCount, markerCount] = [r.u32(), r.u32(), r.u32(), r.u32(), r.u32()];
+  const hiddenCount = version >= 7 ? r.u32() : 0;
 
   const expect = (tag: number) => {
     const got = r.u8();
@@ -597,6 +622,16 @@ export function readFaceCopy(plain: Buffer): { snapshot: FacesSnapshot; copy: Fa
     scanned.push(keyAt(r.u32()));
     r.u8();
   }
+  const hiddenPeople: HiddenPerson[] = [];
+  for (let i = 0; i < hiddenCount; i++) {
+    expect(TAG.HIDDEN_PERSON);
+    const name = nameAt(r.u32());
+    const flags = r.u8();
+    if (flags & ~HIDDEN_FLAG) throw new Error(`a hidden-person flag ${flags}`);
+    const at = r.i64();
+    if (at < 0) throw new Error("a negative hide time");
+    hiddenPeople.push({ name, hidden: (flags & HIDDEN_FLAG) !== 0, at });
+  }
   expect(TAG.END);
   if (!r.done) throw new Error("data after the end marker");
 
@@ -619,12 +654,18 @@ export function readFaceCopy(plain: Buffer): { snapshot: FacesSnapshot; copy: Fa
     }
   }
   for (const m of manual) personOf(m.name).keys.add(m.key);
+  const hiddenNow = new Set<string>();
+  for (const h of [...hiddenPeople].sort((a, b) => a.at - b.at)) {
+    if (h.hidden) hiddenNow.add(foldName(h.name));
+    else hiddenNow.delete(foldName(h.name));
+  }
   return {
     snapshot: {
       deviceLabel,
       createdAt,
+      // A hidden person, or a group hidden under a reserved label, is no one to list.
       people: [...byName.values()]
-        .filter((p) => p.keys.size > 0)
+        .filter((p) => p.keys.size > 0 && !isHiddenToken(p.name) && !hiddenNow.has(foldName(p.name)))
         .map(({ name, keys, cover, box }) => ({ name, keys, cover, box })),
     },
     copy: {
@@ -645,6 +686,7 @@ export function readFaceCopy(plain: Buffer): { snapshot: FacesSnapshot; copy: Fa
       namedAt,
       nameChanges,
       scanned,
+      hiddenPeople,
     },
   };
 }
@@ -689,6 +731,8 @@ export type FaceCopyToWrite = {
   nameChanges?: NameChange[];
   /** Every photo looked at, and whether "Find more photos" has read it too. */
   markers: { key: string; swept: boolean }[];
+  /** Each person hidden or shown again by hand, with when. */
+  hiddenPeople?: HiddenPerson[];
 };
 
 /** The blur field holds a measured value. */
@@ -740,7 +784,7 @@ class LittleEndianWriter {
   }
 }
 
-/** A version-6 face snapshot, in the layout the Android app reads and `readFaceCopy` reads back. */
+/** A version-7 face snapshot, in the layout the Android app reads and `readFaceCopy` reads back. */
 export function writeFaceCopy(copy: FaceCopyToWrite): Buffer {
   const keys: string[] = [];
   const keyAt = new Map<string, number>();
@@ -785,6 +829,8 @@ export function writeFaceCopy(copy: FaceCopyToWrite): Buffer {
     name(c.name);
   }
   for (const m of copy.markers) key(m.key);
+  const hiddenPeople = copy.hiddenPeople ?? [];
+  for (const h of hiddenPeople) name(h.name);
 
   const w = new LittleEndianWriter();
   w.u32(FACES_VERSION);
@@ -799,7 +845,8 @@ export function writeFaceCopy(copy: FaceCopyToWrite): Buffer {
   w.i64(Math.max(0, copy.facesWipedAt ?? 0));
   const removals = copy.removals ?? [];
   const counts = [keys.length, names.length, changes.length, removals.length, copy.faces.length, manual.length];
-  for (const count of [...counts, copy.notPerson.length, copy.covers.length, copy.markers.length]) w.u32(count);
+  const tail = [copy.notPerson.length, copy.covers.length, copy.markers.length, hiddenPeople.length];
+  for (const count of [...counts, ...tail]) w.u32(count);
   for (const k of keys) {
     w.u8(TAG.KEY);
     w.str(k);
@@ -863,6 +910,12 @@ export function writeFaceCopy(copy: FaceCopyToWrite): Buffer {
     w.u32(keyAt.get(m.key)!);
     w.u8(m.swept ? MARKER_SWEPT : 0);
   }
+  for (const h of hiddenPeople) {
+    w.u8(TAG.HIDDEN_PERSON);
+    w.u32(nameAt.get(h.name)!);
+    w.u8(h.hidden ? HIDDEN_FLAG : 0);
+    w.i64(Math.max(0, h.at));
+  }
   w.u8(TAG.END);
   return Buffer.concat([SNAPSHOT_MAGIC, w.done()]);
 }
@@ -883,6 +936,18 @@ export function searchFileName(deviceId: string): string {
 export function hiddenFileName(deviceId: string): string {
   if (!new RegExp(`^${DEVICE_ID}$`).test(deviceId)) throw new Error("not a device id");
   return `hidden-${deviceId}.pfphd`;
+}
+
+/** The name an install's settings are stored under. */
+export function settingsFileName(deviceId: string): string {
+  if (!new RegExp(`^${DEVICE_ID}$`).test(deviceId)) throw new Error("not a device id");
+  return `settings-${deviceId}.pfpst`;
+}
+
+/** The name an install's album photo orders are stored under. */
+export function albumOrderFileName(deviceId: string): string {
+  if (!new RegExp(`^${DEVICE_ID}$`).test(deviceId)) throw new Error("not a device id");
+  return `album-order-${deviceId}.pfpao`;
 }
 
 export function labelsFileName(deviceId: string): string {
@@ -965,7 +1030,7 @@ export type SearchSnapshot = {
 
 /**
  * A device's search index: per photo, the image embedding at half precision. Keys that name a
- * photo on one phone only are left out. Throws on anything that is not a well-formed version 4 to 6
+ * photo on one phone only are left out. Throws on anything that is not a well-formed version 4 to 7
  * search snapshot.
  */
 export function readSearchSnapshot(plain: Buffer): SearchSnapshot {
@@ -1186,6 +1251,167 @@ export function writeHiddenCopy(copy: HiddenCopy): Buffer {
   return Buffer.from(JSON.stringify(json), "utf8");
 }
 
+export const SETTINGS_SNAPSHOT_VERSION = 1;
+
+/** A settings value as the file carries it: a switch, a number, a word, a list of words, or null for "back to the default". */
+export type SettingsValue = boolean | number | string | string[] | null;
+
+/** One setting by its sync id, with the value and when it was chosen (ms; 0 only fills a gap). */
+export type SettingsScalar = { key: string; value: SettingsValue; changedAt: number };
+
+/** One member of a set-shaped setting: present or removed, with when. */
+export type SettingsElement = { key: string; element: string; present: boolean; changedAt: number };
+
+/**
+ * One device's settings, as JSON v1 sealed like the hidden list:
+ * `{ v, d, p, n, c, s: [{ k, t, x }], l: [{ k, e, h, t }] }`. `p` is the platform that wrote it
+ * ("android" or "desktop"), `s` the settings with a single value, `l` the members of the
+ * set-shaped ones. Put together, the later change to each setting or member wins.
+ */
+export type SettingsCopy = {
+  deviceId: string;
+  platform: string;
+  deviceLabel: string;
+  createdAt: number;
+  scalars: SettingsScalar[];
+  elements: SettingsElement[];
+};
+
+const isSettingsValue = (x: unknown): x is SettingsValue =>
+  x === null ||
+  typeof x === "boolean" ||
+  (typeof x === "number" && Number.isFinite(x)) ||
+  typeof x === "string" ||
+  (Array.isArray(x) && x.every((e) => typeof e === "string"));
+
+/** A settings file read whole. Throws on anything that is not a version 1 one. */
+export function readSettingsCopy(plain: Buffer): SettingsCopy {
+  const json = JSON.parse(plain.toString("utf8"));
+  if (json?.v !== SETTINGS_SNAPSHOT_VERSION) throw new Error("not a settings snapshot");
+  const scalars: SettingsScalar[] = (Array.isArray(json.s) ? json.s : [])
+    .filter((e: any) => typeof e?.k === "string" && e.k && e.x !== undefined && isSettingsValue(e.x))
+    .map((e: any) => ({ key: e.k, value: e.x, changedAt: finite(e.t, 0) }));
+  const elements: SettingsElement[] = (Array.isArray(json.l) ? json.l : [])
+    .filter((e: any) => typeof e?.k === "string" && e.k && typeof e.e === "string" && e.e && typeof e.h === "boolean")
+    .map((e: any) => ({ key: e.k, element: e.e, present: e.h, changedAt: finite(e.t, 0) }));
+  return {
+    deviceId: String(json.d ?? ""),
+    platform: String(json.p ?? ""),
+    deviceLabel: String(json.n ?? ""),
+    createdAt: finite(json.c, 0),
+    scalars,
+    elements,
+  };
+}
+
+export function writeSettingsCopy(copy: SettingsCopy): Buffer {
+  const json = {
+    v: SETTINGS_SNAPSHOT_VERSION,
+    d: copy.deviceId,
+    p: copy.platform,
+    n: copy.deviceLabel,
+    c: copy.createdAt,
+    s: copy.scalars.map((e) => ({ k: e.key, t: e.changedAt, x: e.value })),
+    l: copy.elements.map((e) => ({ k: e.key, e: e.element, h: e.present, t: e.changedAt })),
+  };
+  return Buffer.from(JSON.stringify(json), "utf8");
+}
+
+export const ALBUM_ORDER_SNAPSHOT_VERSION = 1;
+
+/** How an album lists its photos: by capture time either way, or in the order arranged by hand. */
+export type AlbumPhotoMode = "newest" | "oldest" | "custom";
+export const ALBUM_PHOTO_MODES: readonly AlbumPhotoMode[] = ["newest", "oldest", "custom"];
+
+/**
+ * One album of an album-order copy, by its Drive link id: its mode with when it was picked, and
+ * its hand-made order (photo link ids, as shown) with when it was saved. Either half may be absent.
+ */
+export type AlbumOrderEntry = { key: string; mode?: AlbumPhotoMode; modeAt?: number; order?: string[]; orderAt?: number };
+
+/**
+ * One device's album photo orders, as JSON v1 sealed like the hidden list:
+ * `{ v, d, p, n, c, a: [{ k, m, mt, o, ot }] }`, a field without a value left out, `a` by `k`.
+ */
+export type AlbumOrderCopy = {
+  deviceId: string;
+  platform: string;
+  deviceLabel: string;
+  createdAt: number;
+  albums: AlbumOrderEntry[];
+};
+
+const blank = (x: string) => x.trim() === "";
+const wholeMs = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x);
+
+/**
+ * An album-order file read whole; null for one written by a newer version, which is passed over.
+ * Throws on anything that is not one. A half with an unknown mode or no time is dropped, so are
+ * blank and repeated photo ids, and an entry left with neither half.
+ */
+export function readAlbumOrderCopy(plain: Buffer): AlbumOrderCopy | null {
+  const json = JSON.parse(plain.toString("utf8"));
+  if (json === null || typeof json !== "object") throw new Error("not an album-order snapshot");
+  // A copy without a version reads as the first one, as the phone reads it.
+  const v = json.v ?? ALBUM_ORDER_SNAPSHOT_VERSION;
+  if (!wholeMs(v)) throw new Error("not an album-order snapshot");
+  if (v > ALBUM_ORDER_SNAPSHOT_VERSION) return null;
+  if (v !== ALBUM_ORDER_SNAPSHOT_VERSION || typeof json.d !== "string" || typeof json.n !== "string" || !wholeMs(json.c)) {
+    throw new Error("not an album-order snapshot");
+  }
+  if (json.a !== undefined && !Array.isArray(json.a)) throw new Error("not an album-order snapshot");
+  const albums: AlbumOrderEntry[] = [];
+  for (const e of (json.a ?? []) as any[]) {
+    if (typeof e?.k !== "string" || blank(e.k)) continue;
+    const modeOk = ALBUM_PHOTO_MODES.includes(e.m) && wholeMs(e.mt);
+    const order = Array.isArray(e.o)
+      ? [...new Set((e.o as unknown[]).filter((x): x is string => typeof x === "string" && !blank(x)))]
+      : null;
+    const orderOk = order !== null && wholeMs(e.ot);
+    if (!modeOk && !orderOk) continue;
+    const entry: AlbumOrderEntry = { key: e.k };
+    if (modeOk) {
+      entry.mode = e.m;
+      entry.modeAt = Math.max(0, e.mt);
+    }
+    if (orderOk) {
+      entry.order = order!;
+      entry.orderAt = Math.max(0, e.ot);
+    }
+    albums.push(entry);
+  }
+  return {
+    deviceId: json.d,
+    platform: typeof json.p === "string" ? json.p : "",
+    deviceLabel: json.n,
+    createdAt: json.c,
+    albums,
+  };
+}
+
+export function writeAlbumOrderCopy(copy: AlbumOrderCopy): Buffer {
+  const json = {
+    v: ALBUM_ORDER_SNAPSHOT_VERSION,
+    d: copy.deviceId,
+    p: copy.platform,
+    n: copy.deviceLabel,
+    c: copy.createdAt,
+    a: copy.albums.map((e) => {
+      const out: Record<string, unknown> = { k: e.key };
+      if (e.mode !== undefined && e.modeAt !== undefined) {
+        out.m = e.mode;
+        out.mt = e.modeAt;
+      }
+      if (e.order !== undefined && e.orderAt !== undefined) {
+        out.o = e.order;
+        out.ot = e.orderAt;
+      }
+      return out;
+    }),
+  };
+  return Buffer.from(JSON.stringify(json), "utf8");
+}
+
 /** The labels of a label snapshot, each with the photos that carry it. Throws on anything else. */
 export function readLabelsSnapshot(plain: Buffer): LabelsSnapshot {
   const copy = readLabelCopy(plain);
@@ -1261,6 +1487,8 @@ export type DriveKinds = {
   faceData?: boolean;
   /** Read the other devices' hidden lists. */
   hidden?: boolean;
+  /** Read the other devices' settings. */
+  settings?: boolean;
   /** This computer's own install, whose face copy is never read back as another device's. */
   ownDeviceId?: string;
   /**
@@ -1268,6 +1496,15 @@ export type DriveKinds = {
    * they hold what an earlier install on this PC saved. `ownRead` answers whether all of them were.
    */
   readBack?: boolean;
+  /**
+   * With `settings`, read this install's own settings file too, as `readBack` does for the other
+   * kinds. Separate, because the settings are read only while the shared backup is on.
+   */
+  settingsReadBack?: boolean;
+  /** Read the other devices' album photo orders, which travel only while the shared backup is on. */
+  albumOrder?: boolean;
+  /** With `albumOrder`, read this install's own album-order copy too, as `settingsReadBack` does. */
+  albumOrderReadBack?: boolean;
   /** Files moved to the trash from here, which a listing may still show for a while. */
   trashed?: ReadonlySet<string>;
 };
@@ -1341,7 +1578,7 @@ async function openCopy(client: any, keys: any[], cache: CopyCache | null, file:
 const COPY_MAX_BYTES = 512 * 1024 * 1024;
 
 async function download(client: any, uid: string): Promise<Buffer> {
-  const downloader = await client.getFileDownloader(uid);
+  const { downloader } = await openDownloader(client, uid);
   const chunks: Uint8Array[] = [];
   let size = 0;
   const sink = new WritableStream<Uint8Array>({
@@ -1366,10 +1603,25 @@ export type DriveData = DriveCollections & {
   labelCopies: LabelCopy[];
   /** Every other device's hidden list, when asked for. */
   hiddenCopies: HiddenCopy[];
+  /** Every other device's settings, when asked for. */
+  settingsCopies: SettingsCopy[];
+  /** Settings files that were there but would not open or read; a round saves none while there are any. */
+  settingsUnreadable: number;
+  /** Every other device's album photo orders, when asked for. */
+  albumOrderCopies: AlbumOrderCopy[];
+  /** Album-order files that were there but would not open or read; a round saves none while there are any. */
+  albumOrderUnreadable: number;
   /** With `readBack`, whether every file of this install's was read; true without it. */
   ownRead: boolean;
+  /**
+   * The kinds whose file of this install's is on Drive but would not open or read this time. A
+   * round writes none of them over a file that may hold more than this computer has.
+   */
+  ownUnreadable: BackupKind[];
   /** The name each device's copies read here carry, by device id. */
   deviceNames: [string, string][];
+  /** Each other device's copy this read opened, by uid, with the revision it was listed at. */
+  revisions: [string, string][];
 };
 
 /**
@@ -1396,8 +1648,14 @@ export async function loadDriveData(
     faceCopies: [],
     labelCopies: [],
     hiddenCopies: [],
+    settingsCopies: [],
+    settingsUnreadable: 0,
+    albumOrderCopies: [],
+    albumOrderUnreadable: 0,
     ownRead: true,
+    ownUnreadable: [],
     deviceNames: [],
+    revisions: [],
   };
   const root = await client.getMyFilesRootFolder();
   const app = await childNamed(client, root.uid, APP_FOLDER);
@@ -1417,14 +1675,23 @@ export async function loadDriveData(
   const ownMissed = (device: string | null) => {
     if (kinds.readBack && device && device === own) result.ownRead = false;
   };
-  const unreadable = (device: string) => {
+  const ownUnreadable = (kind: BackupKind) => {
+    if (!result.ownUnreadable.includes(kind)) result.ownUnreadable.push(kind);
+  };
+  const unreadable = (device: string, kind: BackupKind) => {
     result.unreadable++;
     ownMissed(device);
+    if (device === own) ownUnreadable(kind);
   };
-  const open = async (file: DriveFile, device: string): Promise<Buffer | null> => {
+  // The other devices' copies opened, so a later look at the listings can tell a newer one.
+  const opened = (file: DriveFile, device: string) => {
     seen.add(file.uid);
+    if (device !== own) result.revisions.push([file.uid, file.revision]);
+  };
+  const open = async (file: DriveFile, device: string, kind: BackupKind): Promise<Buffer | null> => {
+    opened(file, device);
     const plain = await openCopy(client, keys, cache, file);
-    if (!plain) unreadable(device);
+    if (!plain) unreadable(device, kind);
     return plain;
   };
 
@@ -1437,7 +1704,7 @@ export async function loadDriveData(
     if (faceDevice && !kinds.faceData) ownMissed(faceDevice);
     if (searchDevice && !kinds.search) ownMissed(searchDevice);
     if (wantFaces && readable(faceDevice)) {
-      const plain = await open(file, faceDevice);
+      const plain = await open(file, faceDevice, "faces");
       if (!plain) continue;
       try {
         const { snapshot: snap, copy } = readFaceCopy(plain);
@@ -1446,10 +1713,10 @@ export async function loadDriveData(
         result.sources.push({ kind: "faces", device: snap.deviceLabel, savedAt: snap.createdAt });
         names.set(faceDevice, snap.deviceLabel);
       } catch {
-        unreadable(faceDevice);
+        unreadable(faceDevice, "faces");
       }
     } else if (kinds.search && readable(searchDevice)) {
-      const plain = await open(file, searchDevice);
+      const plain = await open(file, searchDevice, "search");
       if (!plain) continue;
       try {
         const snap = readSearchSnapshot(plain);
@@ -1461,7 +1728,7 @@ export async function loadDriveData(
         result.search.push(snap);
         result.sources.push({ kind: "search", device: snap.deviceLabel, savedAt: snap.createdAt });
       } catch {
-        unreadable(searchDevice);
+        unreadable(searchDevice, "search");
       }
     }
   }
@@ -1472,7 +1739,7 @@ export async function loadDriveData(
     const device = labelsFileDevice(file.name);
     if (!kinds.labels) ownMissed(device);
     if (!kinds.labels || !readable(device)) continue;
-    const plain = await open(file, device);
+    const plain = await open(file, device, "labels");
     if (!plain) continue;
     try {
       const copy = readLabelCopy(plain);
@@ -1485,7 +1752,7 @@ export async function loadDriveData(
       result.sources.push({ kind: "labels", device: snap.deviceLabel, savedAt: snap.createdAt });
       names.set(device, snap.deviceLabel);
     } catch {
-      unreadable(device);
+      unreadable(device, "labels");
     }
   }
 
@@ -1494,15 +1761,65 @@ export async function loadDriveData(
     const device = hiddenFileDevice(file.name);
     if (!kinds.hidden) ownMissed(device);
     if (!kinds.hidden || !readable(device)) continue;
-    const plain = await open(file, device);
+    const plain = await open(file, device, "hidden");
     if (!plain) continue;
     try {
       const copy = readHiddenCopy(plain);
       result.hiddenCopies.push(copy);
       if (copy.deviceLabel) names.set(device, copy.deviceLabel);
     } catch {
-      unreadable(device);
+      unreadable(device, "hidden");
     }
+  }
+
+  const settingsFolder = kinds.settings ? await childNamed(client, app.uid, SETTINGS_FOLDER) : null;
+  for (const file of settingsFolder ? await filesIn(client, settingsFolder.uid, kinds.trashed) : []) {
+    const device = settingsFileDevice(file.name);
+    if (!device || (device === own && !kinds.settingsReadBack)) continue;
+    // This install's own file is judged by `settingsReadBack` alone, not by `ownRead`.
+    opened(file, device);
+    const plain = await openCopy(client, keys, cache, file);
+    if (!plain) {
+      result.settingsUnreadable++;
+      if (device !== own) result.unreadable++;
+      else ownUnreadable("settings");
+      continue;
+    }
+    try {
+      const copy = readSettingsCopy(plain);
+      result.settingsCopies.push(copy);
+      if (copy.deviceLabel) names.set(device, copy.deviceLabel);
+    } catch {
+      result.settingsUnreadable++;
+      if (device !== own) result.unreadable++;
+      else ownUnreadable("settings");
+    }
+  }
+  const orderFolder = kinds.albumOrder ? await childNamed(client, app.uid, ALBUM_ORDER_FOLDER) : null;
+  for (const file of orderFolder ? await filesIn(client, orderFolder.uid, kinds.trashed) : []) {
+    const device = albumOrderFileDevice(file.name);
+    if (!device || (device === own && !kinds.albumOrderReadBack)) continue;
+    opened(file, device);
+    const plain = await openCopy(client, keys, cache, file);
+    let copy: AlbumOrderCopy | null = null;
+    let read = false;
+    if (plain) {
+      try {
+        copy = readAlbumOrderCopy(plain);
+        read = true;
+      } catch {
+        /* counted below */
+      }
+    }
+    if (!read) {
+      result.albumOrderUnreadable++;
+      if (device !== own) result.unreadable++;
+      else ownUnreadable("albumOrder");
+      continue;
+    }
+    if (!copy) continue;
+    result.albumOrderCopies.push(copy);
+    if (copy.deviceLabel) names.set(device, copy.deviceLabel);
   }
   result.deviceNames = [...names];
 
@@ -1511,6 +1828,60 @@ export async function loadDriveData(
   result.people = mergeCollections(people);
   result.labels = mergeCollections(labels);
   return result;
+}
+
+/** Another device's copy as its folder's listing shows it, before anything is downloaded. */
+export type ListedCopy = { uid: string; revision: string };
+
+/**
+ * The other devices' copies of the kinds a read with `kinds` opens, from the folder listings
+ * alone: one of the app's folder and one of each kind's folder, nothing downloaded. `appUid` is
+ * the app's folder found by an earlier call, which spares a listing of My files; the one used
+ * comes back, null when the folder is not there.
+ */
+export async function listOtherCopies(
+  client: any,
+  kinds: DriveKinds,
+  appUid: string | null,
+): Promise<{ appUid: string | null; copies: ListedCopy[] }> {
+  let folders: any[] | null = null;
+  if (appUid) {
+    try {
+      folders = [];
+      for await (const node of client.iterateFolderChildren(appUid)) folders.push(node);
+    } catch {
+      // Gone or moved: found again from My files.
+      folders = null;
+    }
+  }
+  if (!folders) {
+    const root = await client.getMyFilesRootFolder();
+    const app = await childNamed(client, root.uid, APP_FOLDER);
+    if (!app) return { appUid: null, copies: [] };
+    appUid = app.uid;
+    folders = [];
+    for await (const node of client.iterateFolderChildren(app.uid)) folders.push(node);
+  }
+  const own = kinds.ownDeviceId;
+  const wantFaces = kinds.faces || !!kinds.faceData;
+  const reads: [string, (name: string) => string | null][] = [];
+  if (wantFaces || kinds.search) {
+    reads.push([ML_FOLDER, (name) => (wantFaces ? facesFileDevice(name) : null) ?? (kinds.search ? searchFileDevice(name) : null)]);
+  }
+  if (kinds.labels) reads.push([LABELS_FOLDER, labelsFileDevice]);
+  if (kinds.hidden) reads.push([HIDDEN_FOLDER, hiddenFileDevice]);
+  if (kinds.settings) reads.push([SETTINGS_FOLDER, settingsFileDevice]);
+  if (kinds.albumOrder) reads.push([ALBUM_ORDER_FOLDER, albumOrderFileDevice]);
+  const copies: ListedCopy[] = [];
+  for (const [name, deviceOf] of reads) {
+    const folder = folders.find((n) => n?.type === "folder" && !n.trashTime && nodeName(n) === name);
+    if (!folder) continue;
+    for (const file of await filesIn(client, folder.uid, kinds.trashed)) {
+      const device = deviceOf(file.name);
+      if (device && device !== own) copies.push({ uid: file.uid, revision: file.revision });
+    }
+  }
+  return { appUid, copies };
 }
 
 // ---- The backups on Drive, device by device ----
@@ -1524,21 +1895,21 @@ export type DriveBackup = {
   name: string | null;
   /** When the newest of its files was saved, epoch ms. */
   savedAt: number;
-  /** Its files, faces, search index, labels and hidden list. */
+  /** Its files, faces, search index, labels, hidden list, settings and album orders. */
   files: string[];
 };
 
 /** The device a Drive data file belongs to, and whether its copy is a small one that carries the name. */
 function deviceOfFile(name: string): { device: string; small: boolean } | null {
-  const small = labelsFileDevice(name) ?? hiddenFileDevice(name);
+  const small = labelsFileDevice(name) ?? hiddenFileDevice(name) ?? settingsFileDevice(name) ?? albumOrderFileDevice(name);
   if (small) return { device: small, small: true };
   const big = facesFileDevice(name) ?? searchFileDevice(name);
   return big ? { device: big, small: false } : null;
 }
 
 /**
- * Every device with files in the app's three Drive data folders, newest first. A device whose name
- * is not in `names` gets it from its labels or hidden copy, the small ones that carry it; the names
+ * Every device with files in the app's Drive data folders, newest first. A device whose name
+ * is not in `names` gets it from its labels, hidden, settings or album-order copy, the small ones that carry it; the names
  * read come back for the caller to keep.
  */
 export async function listDriveBackups(
@@ -1553,7 +1924,7 @@ export async function listDriveBackups(
   const app = await childNamed(client, root.uid, APP_FOLDER);
   if (!app) return { backups: [], names: [] };
   const byDevice = new Map<string, { backup: DriveBackup; small: DriveFile[] }>();
-  for (const folder of [ML_FOLDER, LABELS_FOLDER, HIDDEN_FOLDER]) {
+  for (const folder of [ML_FOLDER, LABELS_FOLDER, HIDDEN_FOLDER, SETTINGS_FOLDER, ALBUM_ORDER_FOLDER]) {
     const node = await childNamed(client, app.uid, folder);
     for (const file of node ? await filesIn(client, node.uid, trashed) : []) {
       const of = deviceOfFile(file.name);
@@ -1580,7 +1951,14 @@ export async function listDriveBackups(
       const plain = await openCopy(client, keys, cache, file);
       if (!plain) continue;
       try {
-        const label = (labelsFileDevice(file.name) ? readLabelCopy(plain) : readHiddenCopy(plain)).deviceLabel.trim();
+        const copy = labelsFileDevice(file.name)
+          ? readLabelCopy(plain)
+          : hiddenFileDevice(file.name)
+            ? readHiddenCopy(plain)
+            : albumOrderFileDevice(file.name)
+              ? readAlbumOrderCopy(plain)
+              : readSettingsCopy(plain);
+        const label = copy?.deviceLabel.trim();
         if (!label) continue;
         backup.name = label;
         read.push([backup.device, label]);

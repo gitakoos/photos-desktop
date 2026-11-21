@@ -21,7 +21,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { newCaptureTime, type DateEditInfo, type DateEditInput } from "./dateEdit";
+import { errorText, newCaptureTime, type DateEditInfo, type DateEditInput } from "./dateEdit";
 
 const taken = new Date(2024, 4, 10, 14, 25, 30).getTime();
 const photo = (over: Partial<DateEditInfo> = {}): DateEditInfo => ({
@@ -29,6 +29,7 @@ const photo = (over: Partial<DateEditInfo> = {}): DateEditInfo => ({
   name: "IMG_20210604_103000.jpg",
   captureMs: taken,
   nameMs: new Date(2021, 5, 4, 10, 30, 0).getTime(),
+  place: null,
   blocked: null,
   ...over,
 });
@@ -64,5 +65,13 @@ describe("the date a photo gets in the date editor", () => {
     expect(newCaptureTime(photo(), "shift", input())).toEqual({ kind: "same" });
     expect(newCaptureTime(photo({ blocked: "live" }), "set", input())).toEqual({ kind: "live" });
     expect(newCaptureTime(photo(), "set", input({ date: "" }))).toEqual({ kind: "invalid" });
+  });
+});
+
+describe("errorText", () => {
+  it("words a photo still being changed in the window's language, and shows other reasons as given", () => {
+    const t = (key: string) => `[${key}]`;
+    expect(errorText({ uid: "a", error: "This photo is still being changed.", code: "busy" }, t)).toBe("[dateEdit.busy]");
+    expect(errorText({ uid: "a", error: "The original could not be moved to the trash" }, t)).toBe("The original could not be moved to the trash");
   });
 });

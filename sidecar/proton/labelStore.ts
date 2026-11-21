@@ -29,7 +29,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type { LabelCopy } from "./driveData.ts";
-import { LABELS_DIR, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
+import { LABELS_DIR, readSealedOrSetAside, storeDir, writeSealedAtomic } from "./store.ts";
 
 /** At most this many labels a photo, each at most this many characters, as on the phone. */
 export const MAX_LABELS = 5;
@@ -293,7 +293,7 @@ export class LabelStore {
 
   get(): LabelState {
     if (!this.state) {
-      const raw = readSealedOrDiscard(this.path());
+      const raw = readSealedOrSetAside(this.path());
       let parsed = emptyLabels();
       if (raw) {
         try {

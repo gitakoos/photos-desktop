@@ -23,6 +23,7 @@
 //! What a delete in the file manager did, said in a notification. Shared by the Linux
 //! Files drive and the Windows File Explorer folder: both delete into the Proton trash
 //! where the file manager says "permanently", so the app says what really happened.
+#![cfg_attr(target_os = "macos", allow(dead_code))]
 
 #[cfg(windows)]
 use std::collections::HashMap;

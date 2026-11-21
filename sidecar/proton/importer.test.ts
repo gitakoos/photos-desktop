@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, afterAll, beforeEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { crc32 } from "node:zlib";
@@ -29,7 +29,7 @@ import { crc32 } from "node:zlib";
 import sharp from "sharp";
 import { PhotoTag } from "@protontech/drive-sdk";
 
-import { isStagedImport, planExport, unpackZip } from "./importer.ts";
+import { importStagingDir, isStagedImport, openFresh, planExport, sweepStaleStaging, unpackZip } from "./importer.ts";
 import {
   clearFinishedUploads,
   confirmImport,
@@ -64,11 +64,20 @@ function sidecar(seconds: number, extra: object = {}): string {
   return JSON.stringify({ photoTakenTime: { timestamp: String(seconds) }, ...extra });
 }
 
+/** A zip's DOS time and date fields for the local time `when`. */
+function dosStamp(when: Date): { time: number; date: number } {
+  return {
+    time: (when.getHours() << 11) | (when.getMinutes() << 5) | (when.getSeconds() >> 1),
+    date: ((when.getFullYear() - 1980) << 9) | ((when.getMonth() + 1) << 5) | when.getDate(),
+  };
+}
+
 /**
  * A zip of `files`, stored rather than compressed: enough for the reader, and small
- * enough to build here without a zip library.
+ * enough to build here without a zip library. Every entry carries `when`, or no time.
  */
-function zipOf(files: Record<string, string | Buffer>): Buffer {
+function zipOf(files: Record<string, string | Buffer>, when?: Date): Buffer {
+  const stamp = when ? dosStamp(when) : { time: 0, date: 0 };
   const locals: Buffer[] = [];
   const centrals: Buffer[] = [];
   let offset = 0;
@@ -80,6 +89,8 @@ function zipOf(files: Record<string, string | Buffer>): Buffer {
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(0x0800, 6); // UTF-8 names
+    local.writeUInt16LE(stamp.time, 10);
+    local.writeUInt16LE(stamp.date, 12);
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(data.length, 18);
     local.writeUInt32LE(data.length, 22);
@@ -90,6 +101,8 @@ function zipOf(files: Record<string, string | Buffer>): Buffer {
     central.writeUInt16LE(20, 4);
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(stamp.time, 12);
+    central.writeUInt16LE(stamp.date, 14);
     central.writeUInt32LE(crc, 16);
     central.writeUInt32LE(data.length, 20);
     central.writeUInt32LE(data.length, 24);
@@ -280,12 +293,123 @@ describe("unpacking a zip", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("refuses an entry that climbs out of the folder", async () => {
-    const zip = join(work, "evil.zip");
-    writeFileSync(zip, zipOf({ "../escaped.jpg": "x" }));
+  it("reports progress while one large entry is still being written", async () => {
+    const zip = join(work, "big.zip");
+    const size = 13 * 1024 * 1024;
+    writeFileSync(zip, zipOf({ "Trip/long.mp4": Buffer.alloc(size, 7) }));
 
-    await expect(unpackZip(zip, isMedia)).rejects.toThrow();
+    const progress: number[] = [];
+    const root = await unpackZip(zip, isMedia, (done) => progress.push(done));
+
+    const during = progress.filter((done) => done > 0 && done < size);
+    expect(during.length).toBeGreaterThanOrEqual(2);
+    expect(progress).toEqual([...progress].sort((a, b) => a - b));
+    expect(progress[progress.length - 1]).toBe(size);
+    rmSync(root, { recursive: true, force: true });
+  }, 30_000);
+
+  it("clears only unpacked exports older than a day", async () => {
+    const zip = join(work, "keep.zip");
+    writeFileSync(zip, zipOf({ "Trip/a.jpg": "x" }));
+    const fresh = await unpackZip(zip, isMedia);
+    const old = await unpackZip(zip, isMedia);
+    const later = Date.now() + 25 * 3600_000;
+    utimesSync(fresh, new Date(later), new Date(later));
+
+    await sweepStaleStaging(later);
+
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(old)).toBe(false);
+    rmSync(fresh, { recursive: true, force: true });
+  });
+
+  it("stages in the folder the host names, and only one named for imports", () => {
+    const before = process.env.PFP_IMPORT_DIR;
+    try {
+      process.env.PFP_IMPORT_DIR = join(work, "cache", "pfp-import");
+      expect(importStagingDir()).toBe(join(work, "cache", "pfp-import"));
+      process.env.PFP_IMPORT_DIR = join(work, "cache");
+      expect(importStagingDir()).toBe(join(tmpdir(), "pfp-import"));
+    } finally {
+      if (before === undefined) delete process.env.PFP_IMPORT_DIR;
+      else process.env.PFP_IMPORT_DIR = before;
+    }
+  });
+
+  it("keeps both of two entries whose names differ only in case", async () => {
+    const zip = join(work, "case.zip");
+    writeFileSync(zip, zipOf({ "Trip/IMG_1.jpg": "upper", "Trip/img_1.jpg": "lower" }));
+
+    const root = await unpackZip(zip, isMedia);
+
+    // A disk that ignores case keeps the second as `img_1 (2).jpg`; one that minds case keeps both names.
+    const names = readdirSync(join(root, "Trip"));
+    expect(names).toHaveLength(2);
+    const bodies = names.map((n) => readFileSync(join(root, "Trip", n), "utf8")).sort();
+    expect(bodies).toEqual(["lower", "upper"]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("opens a taken name as the next free one, and never writes over it", async () => {
+    const dir = join(work, "fresh");
+    mkdirSync(dir, { recursive: true });
+    const taken = join(dir, "beach.jpg");
+    writeFileSync(taken, "first");
+
+    const second = await openFresh(taken);
+    await second.handle.writeFile("second");
+    await second.handle.close();
+    const third = await openFresh(taken);
+    await third.handle.close();
+
+    expect(second.path).toBe(join(dir, "beach (2).jpg"));
+    expect(third.path).toBe(join(dir, "beach (3).jpg"));
+    expect(readFileSync(taken, "utf8")).toBe("first");
+    expect(readFileSync(second.path, "utf8")).toBe("second");
+  });
+
+  it("skips an entry that climbs out of the folder and unpacks the rest", async () => {
+    const zip = join(work, "evil.zip");
+    writeFileSync(zip, zipOf({ "../escaped.jpg": "x", "kept.jpg": "y" }));
+
+    const root = await unpackZip(zip, isMedia);
+
     expect(existsSync(join(tmpdir(), "escaped.jpg"))).toBe(false);
+    expect(existsSync(join(importStagingDir(), "escaped.jpg"))).toBe(false);
+    expect(readdirSync(root)).toEqual(["kept.jpg"]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("unpacks a zip that holds a `/` entry of its own, as a Dropbox download does", async () => {
+    const zip = join(work, "dropbox.zip");
+    writeFileSync(zip, zipOf({ "/": "", "beach.jpg": "root photo", "Trip/sea.jpg": "album photo" }));
+
+    const root = await unpackZip(zip, isMedia);
+
+    expect(readFileSync(join(root, "beach.jpg"), "utf8")).toBe("root photo");
+    expect(readFileSync(join(root, "Trip", "sea.jpg"), "utf8")).toBe("album photo");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("gives each unpacked file the time its zip entry records", async () => {
+    const zip = join(work, "dated.zip");
+    writeFileSync(zip, zipOf({ "a.jpg": "x" }, new Date(2019, 6, 14, 9, 30, 20)));
+
+    const root = await unpackZip(zip, isMedia);
+
+    expect(statSync(join(root, "a.jpg")).mtime.getTime()).toBe(new Date(2019, 6, 14, 9, 30, 20).getTime());
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("leaves the unpack time on a file whose zip entry records no time", async () => {
+    const zip = join(work, "undated.zip");
+    writeFileSync(zip, zipOf({ "a.jpg": "x" }));
+    const before = Date.now() - 5_000;
+
+    const root = await unpackZip(zip, isMedia);
+
+    expect(statSync(join(root, "a.jpg")).mtime.getTime()).toBeGreaterThan(before);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 
@@ -403,7 +527,7 @@ describe("importing an export", () => {
     expect(done.total).toBe(2);
   });
 
-  it("never uploads a photo the library has, when Import is pressed before the check ends", async () => {
+  it("refuses an Import pressed before the check ends, and then uploads only what is new", async () => {
     const root = tree("confirm-early", {
       "A/old.jpg": await jpeg(11),
       "A/new.jpg": await jpeg(12),
@@ -422,7 +546,9 @@ describe("importing an export", () => {
     prepareImport(photos);
     await settle((s) => s.importing?.phase === "review");
     expect(getUploadStatus().importing?.checked).toBe(0);
+    expect(() => confirmImport(photos)).toThrow();
     slow = false;
+    await settle((s) => (s.importing?.checked ?? 0) === 2);
     confirmImport(photos);
     const done = await settle(finished);
 
@@ -517,6 +643,35 @@ describe("importing an export", () => {
     expect(getImportReview()).toBeNull();
     expect(getUploadStatus().importing).toBeUndefined();
     expect(uploads).toHaveLength(0);
+  });
+
+  it("imports a plain zip of photos with no sidecars: root photos on the timeline, a folder as an album", async () => {
+    const zip = join(work, "plain.zip");
+    const shot = await sharp(await jpeg(150))
+      .withExif({ IFD2: { DateTimeOriginal: "2021:03:04 05:06:07" } })
+      .jpeg()
+      .toBuffer();
+    writeFileSync(zip, zipOf({ "/": "", "IMG_beach.jpg": await jpeg(30), "Trip/IMG_sea.jpg": shot }, new Date(2018, 1, 2, 3, 4, 6)));
+    const { photos, uploads, added } = recorder();
+
+    const { roots, review } = await toReview([zip], photos);
+
+    const byName = Object.fromEntries(review.items.map((i) => [i.name, i]));
+    expect(byName["IMG_beach.jpg"]).toMatchObject({ album: null, takenMs: new Date(2018, 1, 2, 3, 4, 6).getTime() });
+    expect(byName["IMG_sea.jpg"]).toMatchObject({ album: "Trip", takenMs: new Date(2021, 2, 4, 5, 6, 7).getTime() });
+
+    confirmImport(photos);
+    const done = await settle(finished);
+
+    expect(done.done).toBe(2);
+    const sent = Object.fromEntries(uploads.map((u) => [u.name, u.meta.captureTime.getTime()]));
+    expect(sent).toEqual({
+      "IMG_beach.jpg": new Date(2018, 1, 2, 3, 4, 6).getTime(),
+      "IMG_sea.jpg": new Date(2021, 2, 4, 5, 6, 7).getTime(),
+    });
+    expect(added).toHaveLength(1);
+    expect(added[0].album).toBe("album-Trip");
+    await settle(() => !existsSync(roots[0]));
   });
 
   it("reports an export with nothing in it", async () => {

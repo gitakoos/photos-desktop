@@ -22,7 +22,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { dateFromName, dateProblem } from "./fixDates";
+import { dateProblem } from "./fixDates";
 
 const NOW = new Date(2026, 10, 6, 12, 0, 0).getTime();
 const at = (y: number, mo: number, d: number, h = 12, mi = 0, s = 0) => new Date(y, mo - 1, d, h, mi, s).getTime();
@@ -58,9 +58,17 @@ describe("the photos the Fix dates page lists", () => {
     expect(dateProblem(at(2019, 7, 1), null, NOW)).toBeNull();
   });
 
-  it("reads a name the way the date editor does", () => {
-    expect(dateFromName("Screenshot_2023-05-12-14-15-02.png", NOW)).toBe(at(2023, 5, 12, 14, 15, 2));
-    expect(dateFromName("IMG_20230431_101010.jpg", NOW)).toBeNull();
-    expect(dateFromName("IMG_20990101_120000.jpg", NOW)).toBeNull();
+  it("reads a name the way the date editor does, and leaves a save time alone", () => {
+    expect(dateProblem(at(2025, 1, 20), "Screenshot 2023-05-12 at 2.15.02 PM.png", NOW)).toEqual({
+      kind: "name",
+      nameMs: at(2023, 5, 12, 14, 15, 2),
+    });
+    expect(dateProblem(at(2019, 7, 1), "FB_IMG_1575633157591.jpg", NOW)).toBeNull();
+    expect(dateProblem(at(2019, 7, 1), "IMG_20230431_101010.jpg", NOW)).toBeNull();
+  });
+
+  it("keeps its own line for a date still to come", () => {
+    expect(dateProblem(NOW + 25 * 3600_000, "DSC_0042.JPG", NOW)).toEqual({ kind: "future" });
+    expect(dateProblem(NOW + 23 * 3600_000, "DSC_0042.JPG", NOW)).toBeNull();
   });
 });

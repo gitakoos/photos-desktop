@@ -42,6 +42,7 @@ import sharp from "sharp";
 
 import { activeRevisionOf, toMillis } from "./nodes.ts";
 import { mediaAttributes, thumbnailPair } from "./upload.ts";
+import { openDownloader } from "./downloadSlots.ts";
 
 /** The longest edge the editor works at, matching the local-file editor's working cap. */
 const EDIT_MAX_EDGE = 4096;
@@ -64,6 +65,8 @@ export type CloudEditorSource = {
 /** The metadata the frontend hands back at save time, taken from the source above. */
 export type CloudEditMeta = {
   name: string;
+  /** A copy that is not an edit of one photo (a collage) names itself `<fileStem>_<stamp>.jpg`. */
+  fileStem?: string;
   captureTime: number | null;
   camera: string | null;
   latitude: number | null;
@@ -107,16 +110,26 @@ export function cameraOf(extra: any): string | null {
 export function editedName(sourceName: string, when: Date): string {
   const dot = sourceName.lastIndexOf(".");
   const stem = (dot > 0 ? sourceName.slice(0, dot) : sourceName).trim() || "photo";
+  return `${stem}_edit_${nameStamp(when)}.jpg`;
+}
+
+function nameStamp(when: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
-  const stamp =
+  return (
     `${when.getFullYear()}${pad(when.getMonth() + 1)}${pad(when.getDate())}` +
-    `_${pad(when.getHours())}${pad(when.getMinutes())}${pad(when.getSeconds())}`;
-  return `${stem}_edit_${stamp}.jpg`;
+    `_${pad(when.getHours())}${pad(when.getMinutes())}${pad(when.getSeconds())}`
+  );
+}
+
+/** The saved copy's name: `fileStem_<stamp>.jpg` when the window names a stem, else `editedName`. */
+export function savedEditName(meta: Pick<CloudEditMeta, "name" | "fileStem">, when: Date): string {
+  const stem = typeof meta.fileStem === "string" ? meta.fileStem.replace(/[\x5c/:*?"<>|\x00-\x1f]/g, "").trim().slice(0, 100) : "";
+  return stem ? `${stem}_${nameStamp(when)}.jpg` : editedName(meta.name || "photo", when);
 }
 
 /** Download one node's decrypted original into a Buffer. */
 export async function downloadToBuffer(photos: any, uid: string): Promise<Buffer> {
-  const downloader = await photos.getFileDownloader(uid);
+  const { downloader } = await openDownloader(photos, uid);
   const chunks: Uint8Array[] = [];
   const stream = new WritableStream<Uint8Array>({
     write(chunk) {
@@ -180,6 +193,40 @@ async function editThumbnails(jpeg: Buffer): Promise<any[]> {
   }
 }
 
+type AlbumAdd = (albumUid: string, uids: string[]) => Promise<{ uid: string; ok: boolean; error?: string }[]>;
+
+/**
+ * Puts a saved copy into the album its source was opened from, as the Android editor does,
+ * and marks it `albumFailed` when it did not get in. Outside an album it is returned as it is.
+ */
+export async function joinSourceAlbum<T extends { uid: string }>(
+  add: AlbumAdd,
+  saved: T,
+  albumUid: string | null | undefined,
+): Promise<T & { albumFailed?: true }> {
+  if (!albumUid) return saved;
+  return (await addCopyToAlbum(add, albumUid, saved.uid)) ? saved : { ...saved, albumFailed: true };
+}
+
+/**
+ * Adds one saved copy to an album; false when it did not get in. The copy is already
+ * uploaded by then, so a refused or failed add is reported and never fails the save.
+ */
+export async function addCopyToAlbum(add: AlbumAdd, albumUid: string, uid: string): Promise<boolean> {
+  try {
+    const results = await add(albumUid, [uid]);
+    const added = results.length > 0 && results.every((r) => r.ok);
+    if (!added) {
+      const why = results.find((r) => !r.ok)?.error ?? "no answer";
+      process.stderr.write(`[editor] album add refused: ${why}\n`);
+    }
+    return added;
+  } catch (e) {
+    process.stderr.write(`[editor] album add failed: ${String(e)}\n`);
+    return false;
+  }
+}
+
 /**
  * Save an edited cloud photo as a NEW node on the timeline, carrying the source's date,
  * place and camera. The original is never touched. Returns the new node's uid.
@@ -198,7 +245,7 @@ export async function saveCloudEdit(
 
   const sha1 = createHash("sha1").update(jpeg).digest("hex");
   const captureTime = meta.captureTime ? new Date(meta.captureTime) : new Date();
-  const name = editedName(meta.name || "photo", new Date());
+  const name = savedEditName(meta, new Date());
   const dims = await sharp(jpeg).metadata().catch(() => null);
   const thumbnails = await editThumbnails(jpeg);
 

@@ -35,11 +35,18 @@ $sidecar   = "$repo\sidecar"
 $setup     = "$repo\setup"
 $setupTauri= "$setup\src-tauri"
 $binexe    = "$appTauri\binaries\sidecar-x86_64-pc-windows-msvc.exe"
+$ffmpeg    = "$appTauri\binaries\ffmpeg-windows"
 $stage     = "$setupTauri\target\payload-stage"
 $payloadZip= "$setupTauri\payload\payload.zip"
 
 function Step($m){ Write-Host "`n==== $m ====" }
 function Check($w){ if ($LASTEXITCODE -ne 0){ Write-Host "FAILED: $w (exit $LASTEXITCODE)"; exit 1 } }
+
+# The app's own ffmpeg, which compresses videos, is built from pinned sources by
+# ffmpeg/build.sh (on Linux or WSL), not here: its output has to be in place first.
+foreach ($f in "ffmpeg.exe", "ffprobe.exe", "FFMPEG-LICENSE.txt") {
+  if (-not (Test-Path "$ffmpeg\$f")) { Write-Host "FAILED: $ffmpeg\$f is missing. Run: bash ffmpeg/build.sh windows"; exit 1 }
+}
 
 # 1. Build the main app (embedded prod frontend). MUST be `tauri build`, never
 #    plain cargo (which ships the dev-URL blank page).
@@ -53,7 +60,7 @@ $appBuilt = $LASTEXITCODE
 Remove-Item Env:\VITE_PFP_OFFICIAL
 if ($appBuilt -ne 0) { Write-Host "FAILED: main app build (exit $appBuilt)"; exit 1 }
 
-# 2. Assemble the payload: the app + sidecar.exe + sidecar/ + the licence texts.
+# 2. Assemble the payload: the app + sidecar.exe + sidecar/ + ffmpeg/ + the licence texts.
 # The staged name is the one every install ends up carrying, so it has to match the
 # APP_EXE the installer and the app agree on (app/src-tauri/src/file_assoc.rs).
 Step "2/4 assemble payload"
@@ -62,6 +69,8 @@ New-Item -ItemType Directory -Force -Path "$stage\resources\sidecar" | Out-Null
 Copy-Item "$appTauri\target\release\photosforproton.exe" "$stage\photosforproton.exe" -Force
 Copy-Item $binexe "$stage\resources\sidecar.exe" -Force
 Copy-Item "$sidecar\build\*" "$stage\resources\sidecar\" -Recurse -Force
+New-Item -ItemType Directory -Force -Path "$stage\resources\ffmpeg" | Out-Null
+Copy-Item "$ffmpeg\ffmpeg.exe", "$ffmpeg\ffprobe.exe", "$ffmpeg\FFMPEG-LICENSE.txt" "$stage\resources\ffmpeg\" -Force
 
 # Every source file promises the user received a copy of the GPL, and the MIT and
 # LGPL components shipped in the payload require their notices to travel with the

@@ -1,8 +1,8 @@
-Photos for Proton for Windows
+Photos for Proton desktop
 Third-party notices
 ==============================================================================
 
-Photos for Proton for Windows is free software licensed under the GNU General
+Photos for Proton desktop is free software licensed under the GNU General
 Public License version 3. That licence is the file LICENSE beside this one, and
 the complete corresponding source is published at
 https://github.com/gitakoos/photos-desktop.
@@ -29,6 +29,10 @@ Nothing here is written from memory or inferred from a package name.
                  mapped back to its package, and the licence is read from that
                  package's own package.json. Packages shipped unbundled beside
                  the sidecar are read directly from sidecar/build/node_modules.
+
+  UI packages    `npm ls --omit=dev --all` in app/, which lists the window's
+                 production dependencies and everything they depend on. The
+                 licence is read from each package's own package.json.
 
   Rust crates    `cargo metadata --filter-platform x86_64-pc-windows-msvc`, for
                  both app/src-tauri and setup/src-tauri, walking normal
@@ -70,18 +74,17 @@ from the tag matching the version shipped:
 These packages are compiled into resources\sidecar\server.mjs. The list is
 every package esbuild reported as an input to that bundle.
 
-12 packages:
+13 packages:
 
-  @noble/hashes 2.2.0                         MIT
+  @noble/hashes 1.8.0                         MIT
+  @noble/hashes 2.4.0                         MIT
   @openpgp/web-stream-tools 0.3.1             MIT
-  @protontech/crypto 2.0.1                    ISC
-  @protontech/drive-sdk 0.22.2                MIT
+  @protontech/crypto 2.2.0                    GPL-3.0
+  @protontech/drive-sdk 0.23.0                MIT
+  @protontech/openpgp 6.3.1                   LGPL-3.0+
   bcryptjs 3.0.3                              BSD-3-Clause
-  core-js 3.49.0                              MIT
+  core-js 3.51.0                              MIT
   exifr 7.1.3                                 MIT
-  jsmimeparser 3.0.2                          MIT
-  leaflet 1.9.4                               BSD-2-Clause
-  openpgp 6.3.1-0                             LGPL-3.0+
   pend 1.2.0                                  MIT
   ttag 1.8.12                                 MIT
   undici 7.30.1                               MIT
@@ -89,7 +92,35 @@ every package esbuild reported as an input to that bundle.
 
 ------------------------------------------------------------------------------
 
-@noble/hashes 2.2.0
+@noble/hashes 1.8.0
+  Licence: MIT
+  Project: https://paulmillr.com/noble/
+
+    The MIT License (MIT)
+
+    Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the “Software”), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+
+------------------------------------------------------------------------------
+
+@noble/hashes 2.4.0
   Licence: MIT
   Project: https://paulmillr.com/noble/
 
@@ -145,15 +176,15 @@ every package esbuild reported as an input to that bundle.
 
 ------------------------------------------------------------------------------
 
-@protontech/crypto 2.0.1
-  Licence: ISC
+@protontech/crypto 2.2.0
+  Licence: GPL-3.0
 
     This package ships no licence file. The licence recorded above is the
     one declared in its own package.json.
 
 ------------------------------------------------------------------------------
 
-@protontech/drive-sdk 0.22.2
+@protontech/drive-sdk 0.23.0
   Licence: MIT
 
     This package ships no licence file. The licence recorded above is the
@@ -187,156 +218,7 @@ every package esbuild reported as an input to that bundle.
     THE SOFTWARE.
 
 ------------------------------------------------------------------------------
-
-bcryptjs 3.0.3
-  Licence: BSD-3-Clause
-  Project: https://github.com/dcodeIO/bcrypt.js
-
-    bcrypt.js
-    ---------
-    Copyright (c) 2012 Nevins Bartolomeo <nevins.bartolomeo@gmail.com>
-    Copyright (c) 2012 Shane Girish <shaneGirish@gmail.com>
-    Copyright (c) 2025 Daniel Wirtz <dcode@dcode.io>
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions
-    are met:
-    1. Redistributions of source code must retain the above copyright
-       notice, this list of conditions and the following disclaimer.
-    2. Redistributions in binary form must reproduce the above copyright
-       notice, this list of conditions and the following disclaimer in the
-       documentation and/or other materials provided with the distribution.
-    3. The name of the author may not be used to endorse or promote products
-       derived from this software without specific prior written permission.
-
-    THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
-    IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
-    OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
-    IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
-    INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
-    NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
-    THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-------------------------------------------------------------------------------
-
-core-js 3.49.0
-  Licence: MIT
-  Project: https://core-js.io
-
-    Copyright (c) 2013–2025 Denis Pushkarev (zloirock.ru)
-    Copyright (c) 2025–2026 CoreJS Company (core-js.io)
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in
-    all copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-    THE SOFTWARE.
-
-------------------------------------------------------------------------------
-
-exifr 7.1.3
-  Licence: MIT
-  Project: https://mutiny.cz/exifr/
-
-    MIT License
-
-    Copyright (c) 2020 Mike Kovařík, Mutiny.cz
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-    SOFTWARE.
-
-------------------------------------------------------------------------------
-
-jsmimeparser 3.0.2
-  Licence: MIT
-  Project: https://github.com/ProtonMail/jsmimeparser
-
-    Copyright (c) 2013 Joshua Cranmer
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in
-    all copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-    THE SOFTWARE.
-
-------------------------------------------------------------------------------
-
-leaflet 1.9.4
-  Licence: BSD-2-Clause
-  Project: https://leafletjs.com
-
-    BSD 2-Clause License
-
-    Copyright (c) 2010-2023, Volodymyr Agafonkin
-    Copyright (c) 2010-2011, CloudMade
-    All rights reserved.
-
-    Redistribution and use in source and binary forms, with or without
-    modification, are permitted provided that the following conditions are met:
-
-    1. Redistributions of source code must retain the above copyright notice, this
-       list of conditions and the following disclaimer.
-
-    2. Redistributions in binary form must reproduce the above copyright notice,
-       this list of conditions and the following disclaimer in the documentation
-       and/or other materials provided with the distribution.
-
-    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-    DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-    OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-------------------------------------------------------------------------------
-
-openpgp 6.3.1-0
+@protontech/openpgp 6.3.1
   Licence: LGPL-3.0+
   Project: https://openpgpjs.org/
 
@@ -507,6 +389,96 @@ openpgp 6.3.1-0
     Library.
 
 ------------------------------------------------------------------------------
+
+bcryptjs 3.0.3
+  Licence: BSD-3-Clause
+  Project: https://github.com/dcodeIO/bcrypt.js
+
+    bcrypt.js
+    ---------
+    Copyright (c) 2012 Nevins Bartolomeo <nevins.bartolomeo@gmail.com>
+    Copyright (c) 2012 Shane Girish <shaneGirish@gmail.com>
+    Copyright (c) 2025 Daniel Wirtz <dcode@dcode.io>
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+    1. Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+    3. The name of the author may not be used to endorse or promote products
+       derived from this software without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+    IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+    OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+    IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+    INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+    NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+    THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+------------------------------------------------------------------------------
+
+core-js 3.51.0
+  Licence: MIT
+  Project: https://core-js.io
+
+    Copyright (c) 2013–2025 Denis Pushkarev (zloirock.ru)
+    Copyright (c) 2025–2026 CoreJS Company (core-js.io)
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+
+------------------------------------------------------------------------------
+
+exifr 7.1.3
+  Licence: MIT
+  Project: https://mutiny.cz/exifr/
+
+    MIT License
+
+    Copyright (c) 2020 Mike Kovařík, Mutiny.cz
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+------------------------------------------------------------------------------
+
 
 pend 1.2.0
   Licence: MIT
@@ -1734,7 +1706,7 @@ cities15000 (GeoNames)
 4. Rust crates linked into app.exe and setup.exe
 ==============================================================================
 
-300 crates, grouped by the licence each one declares. A crate marked [app] is
+293 crates, grouped by the licence each one declares. A crate marked [app] is
 linked into app.exe, [setup] into setup.exe, and [both] into each. Where a crate
 offers a choice of licences, the choice is recorded exactly as the crate states
 it. Copyright holders are the authors each crate declares.
@@ -1742,50 +1714,56 @@ it. Copyright holders are the authors each crate declares.
 The licence texts for this section are reproduced in section 6.
 
 ------------------------------------------------------------------------------
-MIT OR Apache-2.0  (153 crates)
+MIT OR Apache-2.0  (141 crates)
 ------------------------------------------------------------------------------
 
-  aead 0.5.2  [app]
+  aead 0.6.1  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/traits
-  aes 0.8.4  [app]
+  aes 0.9.4  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/block-ciphers
-  anyhow 1.0.103  [both]
+  anyhow 1.0.104  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/anyhow
-  base64 0.22.1  [both]
+  base64 0.23.1  [both]
       Marshall Pierce <marshall@mpierce.org>
       https://github.com/marshallpierce/rust-base64
-  bitflags 2.13.0  [both]
+  bitflags 2.13.2  [both]
       The Rust Project Developers
       https://github.com/bitflags/bitflags
   block-buffer 0.10.4  [both]
       RustCrypto Developers
       https://github.com/RustCrypto/utils
-  block-padding 0.3.3  [app]
+  block-buffer 0.12.1  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/utils
-  bumpalo 3.20.3  [setup]
+  bumpalo 3.20.4  [setup]
       Nick Fitzgerald <fitzgen@gmail.com>
       https://github.com/fitzgen/bumpalo
-  camino 1.2.4  [both]
+  camino 1.2.6  [both]
       Without Boats <saoirse@without.boats>, Ashley Williams <ashley666ashley@gmail.com>, Steve Klabnik <steve@steveklabnik.com>, Rain <rain@sunshowers.io>
       https://github.com/camino-rs/camino
   cargo-platform 0.1.9  [both]
       https://github.com/rust-lang/cargo
-  cfg-if 1.0.4  [both]
+  cfg-if 1.0.5  [both]
       Alex Crichton <alex@alexcrichton.com>
       https://github.com/rust-lang/cfg-if
   chrono 0.4.45  [both]
       https://github.com/chronotope/chrono
-  cipher 0.4.4  [app]
+  cipher 0.5.2  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/traits
-  cookie 0.18.1  [both]
+  cookie 0.18.2  [both]
       Sergio Benitez <sb@sergio.bz>, Alex Crichton <alex@alexcrichton.com>
       https://github.com/SergioBenitez/cookie-rs
+  cpubits 0.1.1  [app]
+      RustCrypto Developers
+      https://github.com/RustCrypto/utils
   cpufeatures 0.2.17  [both]
+      RustCrypto Developers
+      https://github.com/RustCrypto/utils
+  cpufeatures 0.3.1  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/utils
   crc 3.4.0  [app]
@@ -1794,36 +1772,35 @@ MIT OR Apache-2.0  (153 crates)
   crc-catalog 2.5.0  [app]
       Akhil Velagapudi <akhilvelagapudi@gmail.com>
       https://github.com/akhilles/crc-catalog.git
-  crc32fast 1.5.0  [both]
+  crc32fast 1.5.5  [both]
       Sam Rijs <srijs@airpost.net>, Alex Crichton <alex@alexcrichton.com>
       https://github.com/srijs/rust-crc32fast
-  crossbeam-channel 0.5.15  [app]
+  crossbeam-channel 0.5.17  [both]
       https://github.com/crossbeam-rs/crossbeam
-  crossbeam-channel 0.5.16  [setup]
-      https://github.com/crossbeam-rs/crossbeam
-  crossbeam-utils 0.8.21  [app]
-      https://github.com/crossbeam-rs/crossbeam
-  crossbeam-utils 0.8.22  [setup]
+  crossbeam-utils 0.8.23  [both]
       https://github.com/crossbeam-rs/crossbeam
   crypto-common 0.1.7  [both]
       RustCrypto Developers
       https://github.com/RustCrypto/traits
-  ctr 0.9.2  [app]
+  crypto-common 0.2.2  [app]
+      RustCrypto Developers
+      https://github.com/RustCrypto/traits
+  ctr 0.10.1  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/block-modes
-  deranged 0.5.8  [both]
+  deranged 0.5.9  [both]
       Jacob Pratt <jacob@jhpratt.dev>
       https://github.com/jhpratt/deranged
   digest 0.10.7  [both]
       RustCrypto Developers
       https://github.com/RustCrypto/traits
-  dirs 6.0.0  [both]
+  dirs 7.0.0  [both]
       Simon Ochsenreither <simon@ochsenreither.de>
-      https://github.com/soc/dirs-rs
+      https://codeberg.org/dirs/dirs-rs
   dirs-sys 0.5.0  [both]
       Simon Ochsenreither <simon@ochsenreither.de>
       https://github.com/dirs-dev/dirs-sys-rs
-  displaydoc 0.2.6  [both]
+  displaydoc 0.2.7  [both]
       Jane Lusby <jlusby@yaah.dev>
       https://github.com/yaahc/displaydoc
   dtoa 1.0.11  [both]
@@ -1832,28 +1809,25 @@ MIT OR Apache-2.0  (153 crates)
   dyn-clone 1.0.20  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/dyn-clone
-  erased-serde 0.4.10  [both]
+  erased-serde 0.4.11  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/erased-serde
   fdeflate 0.3.7  [both]
       The image-rs Developers
       https://github.com/image-rs/fdeflate
-  flate2 1.1.9  [both]
+  flate2 1.1.11  [both]
       Alex Crichton <alex@alexcrichton.com>, Josh Triplett <josh@joshtriplett.org>
       https://github.com/rust-lang/flate2-rs
   form_urlencoded 1.2.2  [both]
       The rust-url developers
       https://github.com/servo/rust-url
-  getrandom 0.2.17  [app]
-      The Rand Project Developers
-      https://github.com/rust-random/getrandom
   getrandom 0.3.4  [both]
       The Rand Project Developers
       https://github.com/rust-random/getrandom
   getrandom 0.4.3  [both]
       The Rand Project Developers
       https://github.com/rust-random/getrandom
-  glob 0.3.3  [both]
+  glob 0.3.4  [both]
       The Rust Project Developers
       https://github.com/rust-lang/glob
   hashbrown 0.12.3  [both]
@@ -1866,45 +1840,45 @@ MIT OR Apache-2.0  (153 crates)
   hex 0.4.3  [both]
       KokaKiwi <kokakiwi@kokakiwi.net>
       https://github.com/KokaKiwi/rust-hex
-  html5ever 0.38.0  [both]
+  html5ever 0.39.0  [both]
       The html5ever Project Developers
       https://github.com/servo/html5ever
-  http 1.4.2  [both]
+  http 1.5.0  [both]
       Alex Crichton <alex@alexcrichton.com>, Carl Lerche <me@carllerche.com>, Sean McArthur <sean@seanmonstar.com>
       https://github.com/hyperium/http
+  hybrid-array 0.4.15  [app]
+      RustCrypto Developers
+      https://github.com/RustCrypto/hybrid-array
   idna 1.1.0  [both]
       The rust-url developers
       https://github.com/servo/rust-url/
   image 0.25.10  [app]
       The image-rs Developers
       https://github.com/image-rs/image
-  inout 0.1.4  [app]
+  inout 0.2.6  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/utils
-  itoa 1.0.18  [both]
+  itoa 1.0.19  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/itoa
-  jsonptr 0.6.3  [both]
-      chance dinkins, André Sá de Mello <codasm@pm.me>
+  jsonptr 0.7.1  [both]
+      chance dinkins, André Sá de Mello <codasm@pm.me>, Oliver Wangler <oliver@wngr.de>
       https://github.com/chanced/jsonptr
-  keyboard-types 0.7.0  [both]
+  keyboard-types 0.8.3  [both]
       Pyfisch <pyfisch@posteo.org>
-      https://github.com/pyfisch/keyboard-types
-  libc 0.2.186  [setup]
-      The Rust Project Developers
-      https://github.com/rust-lang/libc
-  libc 0.2.189  [app]
+      https://github.com/rust-windowing/keyboard-types
+  libc 0.2.191  [both]
       https://github.com/rust-lang/libc
   lock_api 0.4.14  [both]
       Amanieu d'Antras <amanieu@gmail.com>
       https://github.com/Amanieu/parking_lot
-  log 0.4.33  [both]
+  log 0.4.35  [both]
       The Rust Project Developers
       https://github.com/rust-lang/log
-  markup5ever 0.38.0  [both]
+  markup5ever 0.39.0  [both]
       The html5ever Project Developers
       https://github.com/servo/html5ever
-  mime 0.3.17  [both]
+  mime 0.3.18  [both]
       Sean McArthur <sean@seanmonstar.com>
       https://github.com/hyperium/mime
   num-conv 0.2.2  [both]
@@ -1916,9 +1890,6 @@ MIT OR Apache-2.0  (153 crates)
   once_cell 1.21.4  [both]
       Aleksey Kladov <aleksey.kladov@gmail.com>
       https://github.com/matklad/once_cell
-  opaque-debug 0.3.1  [app]
-      RustCrypto Developers
-      https://github.com/RustCrypto/utils
   parking_lot 0.12.5  [both]
       Amanieu d'Antras <amanieu@gmail.com>
       https://github.com/Amanieu/parking_lot
@@ -1931,40 +1902,34 @@ MIT OR Apache-2.0  (153 crates)
   percent-encoding 2.3.2  [both]
       The rust-url developers
       https://github.com/servo/rust-url/
-  png 0.17.16  [both]
+  png 0.18.1  [both]
       The image-rs Developers
       https://github.com/image-rs/image-png
-  png 0.18.1  [app]
-      The image-rs Developers
-      https://github.com/image-rs/image-png
-  powerfmt 0.2.0  [both]
+  powerfmt 0.2.1  [both]
       Jacob Pratt <jacob@jhpratt.dev>
       https://github.com/jhpratt/powerfmt
-  proc-macro2 1.0.106  [both]
+  proc-macro2 1.0.107  [both]
       David Tolnay <dtolnay@gmail.com>, Alex Crichton <alex@alexcrichton.com>
       https://github.com/dtolnay/proc-macro2
-  quote 1.0.46  [both]
+  quote 1.0.47  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/quote
-  rand_core 0.6.4  [app]
+  rand 0.10.3  [setup]
       The Rand Project Developers, The Rust Project Developers
       https://github.com/rust-random/rand
-  ref-cast 1.0.25  [both]
+  rand_core 0.10.1  [both]
+      The Rand Project Developers
+      https://github.com/rust-random/rand_core
+  ref-cast 1.0.27  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/ref-cast
-  ref-cast-impl 1.0.25  [both]
+  ref-cast-impl 1.0.27  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/ref-cast
-  regex 1.12.4  [app]
+  regex 1.13.1  [both]
       The Rust Project Developers, Andrew Gallant <jamslam@gmail.com>
       https://github.com/rust-lang/regex
-  regex 1.13.0  [setup]
-      The Rust Project Developers, Andrew Gallant <jamslam@gmail.com>
-      https://github.com/rust-lang/regex
-  regex-automata 0.4.14  [app]
-      The Rust Project Developers, Andrew Gallant <jamslam@gmail.com>
-      https://github.com/rust-lang/regex
-  regex-automata 0.4.15  [setup]
+  regex-automata 0.4.18  [both]
       The Rust Project Developers, Andrew Gallant <jamslam@gmail.com>
       https://github.com/rust-lang/regex
   regex-syntax 0.8.11  [both]
@@ -1976,35 +1941,34 @@ MIT OR Apache-2.0  (153 crates)
   semver 1.0.28  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/semver
-  serde 1.0.228  [both]
+  serde 1.0.229  [both]
       Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
       https://github.com/serde-rs/serde
-  serde_core 1.0.228  [both]
+  serde-untagged 0.1.9  [both]
+      David Tolnay <dtolnay@gmail.com>
+      https://github.com/dtolnay/serde-untagged
+  serde_core 1.0.229  [both]
       Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
       https://github.com/serde-rs/serde
-  serde_derive 1.0.228  [both]
+  serde_derive 1.0.229  [both]
       Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
       https://github.com/serde-rs/serde
   serde_derive_internals 0.29.1  [both]
       Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
       https://github.com/serde-rs/serde
-  serde_json 1.0.150  [both]
-      Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
+  serde_json 1.0.154  [both]
       https://github.com/serde-rs/json
-  serde_repr 0.1.20  [both]
+  serde_repr 0.1.21  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/serde-repr
-  serde_spanned 1.1.1  [both]
+  serde_spanned 1.1.3  [both]
       https://github.com/toml-rs/toml
-  serde_with 3.21.0  [both]
+  serde_with 3.24.0  [both]
       Jonas Bushart, Marcin Kaźmierczak
       https://github.com/jonasbb/serde_with/
-  serde_with_macros 3.21.0  [both]
+  serde_with_macros 3.24.0  [both]
       Jonas Bushart
       https://github.com/jonasbb/serde_with/
-  serde-untagged 0.1.9  [both]
-      David Tolnay <dtolnay@gmail.com>
-      https://github.com/dtolnay/serde-untagged
   serialize-to-javascript 0.1.2  [both]
       Chip Reed <chip@chip.sh>
       https://github.com/chippers/serialize-to-javascript
@@ -2017,10 +1981,13 @@ MIT OR Apache-2.0  (153 crates)
   sha2 0.10.9  [both]
       RustCrypto Developers
       https://github.com/RustCrypto/hashes
-  smallvec 1.15.2  [both]
+  siphasher 1.0.4  [both]
+      Frank Denis <github@pureftpd.org>
+      https://github.com/jedisct1/rust-siphash
+  smallvec 1.16.5  [both]
       The Servo Project Developers
       https://github.com/servo/rust-smallvec
-  socket2 0.6.4  [both]
+  socket2 0.6.5  [both]
       Alex Crichton <alex@alexcrichton.com>, Thomas de Zeeuw <thomasdezeeuw@gmail.com>
       https://github.com/rust-lang/socket2
   softbuffer 0.4.8  [both]
@@ -2031,47 +1998,41 @@ MIT OR Apache-2.0  (153 crates)
   string_cache 0.9.0  [both]
       The Servo Project Developers
       https://github.com/servo/string-cache
-  syn 2.0.118  [both]
+  syn 2.0.119  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/syn
-  tendril 0.5.0  [app]
+  syn 3.0.10  [both]
+      David Tolnay <dtolnay@gmail.com>
+      https://github.com/dtolnay/syn
+  tendril 0.5.1  [both]
       Keegan McAllister <mcallister.keegan@gmail.com>, Simon Sapin <simon.sapin@exyr.org>, Chris Morgan <me@chrismorgan.info>
       https://github.com/servo/html5ever
-  tendril 0.5.1  [setup]
-      Keegan McAllister <mcallister.keegan@gmail.com>, Simon Sapin <simon.sapin@exyr.org>, Chris Morgan <me@chrismorgan.info>
-      https://github.com/servo/html5ever
-  thiserror 1.0.69  [both]
+  thiserror 2.0.21  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/thiserror
-  thiserror 2.0.18  [both]
+  thiserror-impl 2.0.21  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/thiserror
-  thiserror-impl 1.0.69  [both]
-      David Tolnay <dtolnay@gmail.com>
-      https://github.com/dtolnay/thiserror
-  thiserror-impl 2.0.18  [both]
-      David Tolnay <dtolnay@gmail.com>
-      https://github.com/dtolnay/thiserror
-  time 0.3.53  [both]
+  time 0.3.55  [both]
       Jacob Pratt <open-source@jhpratt.dev>, Time contributors
       https://github.com/time-rs/time
   time-core 0.1.9  [both]
       Jacob Pratt <open-source@jhpratt.dev>, Time contributors
       https://github.com/time-rs/time
-  time-macros 0.2.31  [both]
+  time-macros 0.2.32  [both]
       Jacob Pratt <open-source@jhpratt.dev>, Time contributors
       https://github.com/time-rs/time
-  toml 1.1.2+spec-1.1.0  [both]
+  toml 1.2.1+spec-1.1.0  [both]
       https://github.com/toml-rs/toml
-  toml_datetime 1.1.1+spec-1.1.0  [both]
+  toml_datetime 1.1.3+spec-1.1.0  [both]
       https://github.com/toml-rs/toml
-  toml_parser 1.1.2+spec-1.1.0  [both]
+  toml_parser 1.1.5+spec-1.1.0  [both]
       https://github.com/toml-rs/toml
-  toml_writer 1.1.1+spec-1.1.0  [both]
+  toml_writer 1.2.0+spec-1.1.0  [both]
       https://github.com/toml-rs/toml
-  tray-icon 0.24.1  [both]
+  tray-icon 0.25.1  [both]
       https://github.com/tauri-apps/tray-icon
-  typed-path 0.12.3  [setup]
+  typed-path 0.13.0  [setup]
       Chip Senkbeil <chip@senkbeil.org>
       https://github.com/chipsenkbeil/typed-path
   typeid 1.0.3  [both]
@@ -2082,124 +2043,93 @@ MIT OR Apache-2.0  (153 crates)
   unicode-segmentation 1.13.3  [both]
       kwantam <kwantam@gmail.com>, Manish Goregaokar <manishsmail@gmail.com>
       https://github.com/unicode-rs/unicode-segmentation
-  universal-hash 0.5.1  [app]
+  universal-hash 0.6.1  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/traits
   url 2.5.8  [both]
       The rust-url developers
       https://github.com/servo/rust-url
-  utf-8 0.7.6  [app]
-      Simon Sapin <simon.sapin@exyr.org>
-      https://github.com/SimonSapin/rust-utf8
-  web_atoms 0.2.5  [both]
+  web-time 1.1.0  [both]
+      https://github.com/daxpedda/web-time
+  web_atoms 0.2.6  [both]
       The html5ever Project Developers
       https://github.com/servo/html5ever
   widestring 1.2.1  [both]
       https://github.com/VoidStarKat/widestring-rs
-  windows 0.58.0  [both]
+  windows 0.58.0  [app]
       Microsoft
       https://github.com/microsoft/windows-rs
-  windows 0.61.3  [both]
+  windows 0.62.2  [both]
+      https://github.com/microsoft/windows-rs
+  windows-collections 0.3.2  [both]
+      https://github.com/microsoft/windows-rs
+  windows-core 0.58.0  [app]
       Microsoft
       https://github.com/microsoft/windows-rs
-  windows_x86_64_msvc 0.48.5  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows_x86_64_msvc 0.52.6  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows_x86_64_msvc 0.53.1  [both]
-      https://github.com/microsoft/windows-rs
-  windows-collections 0.2.0  [both]
-      https://github.com/microsoft/windows-rs
-  windows-core 0.58.0  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows-core 0.61.2  [both]
-      Microsoft
+  windows-core 0.62.2  [both]
       https://github.com/microsoft/windows-rs
   windows-dpapi 0.2.0  [app]
       Sam Sheridan <sam@sheridan.uk>
       https://github.com/sheridans/windows-dpapi
-  windows-future 0.2.1  [both]
+  windows-future 0.3.2  [both]
       https://github.com/microsoft/windows-rs
-  windows-implement 0.58.0  [both]
+  windows-implement 0.58.0  [app]
       Microsoft
       https://github.com/microsoft/windows-rs
   windows-implement 0.60.2  [both]
       https://github.com/microsoft/windows-rs
-  windows-interface 0.58.0  [both]
+  windows-interface 0.58.0  [app]
       Microsoft
       https://github.com/microsoft/windows-rs
   windows-interface 0.59.3  [both]
       https://github.com/microsoft/windows-rs
-  windows-link 0.1.3  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
   windows-link 0.2.1  [both]
       https://github.com/microsoft/windows-rs
-  windows-numerics 0.2.0  [both]
+  windows-numerics 0.3.1  [both]
       https://github.com/microsoft/windows-rs
-  windows-result 0.2.0  [both]
+  windows-result 0.2.0  [app]
       Microsoft
       https://github.com/microsoft/windows-rs
-  windows-result 0.3.4  [both]
+  windows-result 0.4.1  [both]
+      https://github.com/microsoft/windows-rs
+  windows-strings 0.1.0  [app]
       Microsoft
       https://github.com/microsoft/windows-rs
-  windows-strings 0.1.0  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows-strings 0.4.2  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows-sys 0.48.0  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows-sys 0.59.0  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows-sys 0.60.2  [both]
-      Microsoft
+  windows-strings 0.5.1  [both]
       https://github.com/microsoft/windows-rs
   windows-sys 0.61.2  [both]
       https://github.com/microsoft/windows-rs
-  windows-targets 0.48.5  [both]
+  windows-targets 0.52.6  [app]
       Microsoft
       https://github.com/microsoft/windows-rs
-  windows-targets 0.52.6  [both]
-      Microsoft
-      https://github.com/microsoft/windows-rs
-  windows-targets 0.53.5  [both]
-      https://github.com/microsoft/windows-rs
-  windows-threading 0.1.0  [both]
-      Microsoft
+  windows-threading 0.2.1  [both]
       https://github.com/microsoft/windows-rs
   windows-version 0.1.7  [both]
+      https://github.com/microsoft/windows-rs
+  windows_x86_64_msvc 0.52.6  [app]
+      Microsoft
       https://github.com/microsoft/windows-rs
 
 ------------------------------------------------------------------------------
 MIT  (48 crates)
 ------------------------------------------------------------------------------
 
-  bytes 1.12.0  [app]
-      Carl Lerche <me@carllerche.com>, Sean McArthur <sean@seanmonstar.com>
-      https://github.com/tokio-rs/bytes
-  bytes 1.12.1  [setup]
+  bytes 1.12.1  [both]
       Carl Lerche <me@carllerche.com>, Sean McArthur <sean@seanmonstar.com>
       https://github.com/tokio-rs/bytes
   cargo_metadata 0.19.2  [both]
       Oliver Schneider <git-spam-no-reply9815368754983@oli-obk.de>
       https://github.com/oli-obk/cargo_metadata
-  cfb 0.7.3  [both]
+  cfb 0.14.0  [both]
       Matthew D. Steele <mdsteele@alum.mit.edu>
       https://github.com/mdsteele/rust-cfb
-  darling 0.23.0  [both]
+  darling 0.24.1  [both]
       Ted Driggs <ted.driggs@outlook.com>
       https://github.com/TedDriggs/darling
-  darling_core 0.23.0  [both]
+  darling_core 0.24.1  [both]
       Ted Driggs <ted.driggs@outlook.com>
       https://github.com/TedDriggs/darling
-  darling_macro 0.23.0  [both]
+  darling_macro 0.24.1  [both]
       Ted Driggs <ted.driggs@outlook.com>
       https://github.com/TedDriggs/darling
   derive_more 2.1.1  [both]
@@ -2208,31 +2138,31 @@ MIT  (48 crates)
   derive_more-impl 2.1.1  [both]
       Jelte Fennema <github-tech@jeltef.nl>
       https://github.com/JelteF/derive_more
-  dom_query 0.27.0  [both]
+  dom_query 0.28.0  [both]
       niklak <morgenpurple@gmail.com>, importcjj <importcjj@gmail.com>
       https://github.com/niklak/dom_query
   generic-array 0.14.7  [both]
       Bartłomiej Kamiński <fizyk20@gmail.com>, Aaron Trent <novacrazy@gmail.com>
       https://github.com/fizyk20/generic-array.git
-  http-range 0.1.5  [app]
+  http-range 0.1.6  [app]
       Luka Zakrajšek <luka@bancek.net>
       https://github.com/bancek/rust-http-range.git
-  ico 0.5.0  [both]
+  ico 0.6.0  [both]
       Matthew D. Steele <mdsteele@alum.mit.edu>
       https://github.com/mdsteele/rust-ico
-  imagesize 0.13.0  [app]
+  imagesize 0.15.0  [app]
       Maid Dog <maiddogsrl@gmail.com>
       https://github.com/Roughsketch/imagesize
-  infer 0.19.0  [both]
+  infer 0.22.0  [both]
       Bojan <dbojan@gmail.com>
       https://github.com/bojand/infer
-  memoffset 0.9.1  [both]
+  memoffset 0.9.1  [app]
       Gilad Naaman <gilad.naaman@gmail.com>
       https://github.com/Gilnaa/memoffset
   minisign-verify 0.3.0  [app]
       Frank Denis <github@pureftpd.org>
       https://github.com/jedisct1/rust-minisign-verify
-  mio 1.2.1  [both]
+  mio 1.2.5  [both]
       Carl Lerche <me@carllerche.com>, Thomas de Zeeuw <thomasdezeeuw@gmail.com>, Tokio Contributors <team@tokio.rs>
       https://github.com/tokio-rs/mio
   mslnk 0.1.8  [setup]
@@ -2240,7 +2170,7 @@ MIT  (48 crates)
   new_debug_unreachable 1.0.6  [both]
       Matt Brubeck <mbrubeck@limpet.net>, Jonathan Reem <jonathan.reem@gmail.com>
       https://github.com/mbrubeck/rust-debug-unreachable
-  open 5.3.6  [both]
+  open 5.4.5  [both]
       Sebastian Thiel <byronimo@gmail.com>
       https://github.com/Byron/open-rs
   phf 0.13.1  [both]
@@ -2255,15 +2185,17 @@ MIT  (48 crates)
   phf_shared 0.13.1  [both]
       Steven Fackler <sfackler@gmail.com>
       https://github.com/rust-phf/rust-phf
-  plist 1.10.0  [both]
+  plist 1.10.3  [both]
       Ed Barnard <eabarnard@gmail.com>
       https://github.com/ebarnard/rust-plist/
   precomputed-hash 0.1.1  [both]
       Emilio Cobos Álvarez <emilio@crisal.io>
       https://github.com/emilio/precomputed-hash
-  quick-xml 0.41.0  [both]
+  quick-xml 0.41.0  [app]
       https://github.com/tafia/quick-xml
-  rfd 0.16.0  [both]
+  quick-xml 0.42.0  [both]
+      https://github.com/tafia/quick-xml
+  rfd 0.17.2  [both]
       Poly <marynczak.bartlomiej@gmail.com>
       https://github.com/PolyMeilex/rfd
   schemars 0.8.22  [both]
@@ -2272,22 +2204,22 @@ MIT  (48 crates)
   schemars 0.9.0  [both]
       Graham Esau <gesau@hotmail.co.uk>
       https://github.com/GREsau/schemars
-  schemars 1.2.1  [both]
+  schemars 1.2.3  [both]
       Graham Esau <gesau@hotmail.co.uk>
       https://github.com/GREsau/schemars
   schemars_derive 0.8.22  [both]
       Graham Esau <gesau@hotmail.co.uk>
       https://github.com/GREsau/schemars
-  simd-adler32 0.3.9  [both]
+  simd-adler32 0.3.10  [both]
       Marvin Countryman <me@maar.vin>
       https://github.com/mcountryman/simd-adler32
   strsim 0.11.1  [both]
       Danny Guo <danny@dannyguo.com>, maxbachmann <oss@maxbachmann.de>
       https://github.com/rapidfuzz/strsim-rs
-  synstructure 0.13.2  [both]
+  synstructure 0.14.0  [both]
       Nika Layzell <nika@thelayzells.com>
       https://github.com/mystor/synstructure
-  tokio 1.52.3  [both]
+  tokio 1.54.1  [both]
       Tokio Contributors <team@tokio.rs>
       https://github.com/tokio-rs/tokio
   tracing 0.1.44  [both]
@@ -2299,32 +2231,32 @@ MIT  (48 crates)
   tracing-core 0.1.36  [both]
       Tokio Contributors <team@tokio.rs>
       https://github.com/tokio-rs/tracing
-  urlpattern 0.3.0  [both]
+  urlpattern 0.6.0  [both]
       the Deno authors, crowlKats <crowlkats@toaxl.com>
       https://github.com/denoland/rust-urlpattern
-  webview2-com 0.38.2  [both]
+  webview2-com 0.39.1  [both]
       https://github.com/wravery/webview2-rs
   webview2-com-macros 0.8.1  [both]
       https://github.com/wravery/webview2-rs
-  webview2-com-sys 0.38.2  [both]
+  webview2-com-sys 0.39.1  [both]
       https://github.com/wravery/webview2-rs
-  winnow 1.0.3  [both]
+  winnow 1.0.5  [both]
       https://github.com/winnow-rs/winnow
-  winreg 0.52.0  [both]
+  winreg 0.56.0  [both]
       Igor Shaula <gentoo90@gmail.com>
       https://github.com/gentoo90/winreg-rs
-  zip 9.0.1  [setup]
+  zip 9.5.1  [setup]
       Mathijs van de Nes <git@mathijs.vd-nes.nl>, Marli Frost <marli@frost.red>, Ryan Levick <ryan.levick@gmail.com>, Chris Hennick <hennickc@amazon.com>
       https://github.com/zip-rs/zip2
-  zmij 1.0.21  [both]
+  zmij 1.0.23  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/zmij
 
 ------------------------------------------------------------------------------
-Apache-2.0 OR MIT  (32 crates)
+Apache-2.0 OR MIT  (36 crates)
 ------------------------------------------------------------------------------
 
-  aes-gcm 0.10.3  [app]
+  aes-gcm 0.11.1  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/AEADs
   bit-set 0.8.0  [both]
@@ -2333,24 +2265,23 @@ Apache-2.0 OR MIT  (32 crates)
   bit-vec 0.8.0  [both]
       Alexis Beingessner <a.beingessner@gmail.com>
       https://github.com/contain-rs/bit-vec
-  ctor 0.8.0  [both]
+  cmov 0.5.4  [app]
+      RustCrypto Developers
+      https://github.com/RustCrypto/utils
+  ctor 1.0.14  [both]
       Matt Mastracci <matthew@mastracci.com>
-      https://github.com/mmastrac/rust-ctor
-  ctor-proc-macro 0.0.7  [both]
-      Matt Mastracci <matthew@mastracci.com>
-      https://github.com/mmastrac/rust-ctor
-  dtor 0.3.0  [both]
-      Matt Mastracci <matthew@mastracci.com>
-      https://github.com/mmastrac/rust-ctor
-  dtor-proc-macro 0.0.6  [both]
-      Matt Mastracci <matthew@mastracci.com>
-      https://github.com/mmastrac/rust-ctor
-  equivalent 1.0.2  [both]
+      https://github.com/mmastrac/linktime
+  ctutils 0.4.8  [app]
+      RustCrypto Developers
+      https://github.com/RustCrypto/utils
+  dos-date-time 0.3.0  [setup]
+      https://github.com/sorairolake/dos-date-time
+  equivalent 1.0.3  [both]
       https://github.com/indexmap-rs/equivalent
-  fastrand 2.4.1  [both]
+  fastrand 2.5.0  [both]
       Stjepan Glavina <stjepang@gmail.com>
       https://github.com/smol-rs/fastrand
-  ghash 0.5.1  [app]
+  ghash 0.6.0  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/universal-hashes
   idna_adapter 1.2.2  [both]
@@ -2358,165 +2289,138 @@ Apache-2.0 OR MIT  (32 crates)
       https://github.com/hsivonen/idna_adapter
   indexmap 1.9.3  [both]
       https://github.com/bluss/indexmap
-  indexmap 2.14.0  [both]
+  indexmap 2.14.2  [both]
       https://github.com/indexmap-rs/indexmap
-  muda 0.19.3  [both]
+  muda 0.20.0  [both]
       https://github.com/tauri-apps/muda
-  nt-time 0.8.1  [both]
+  nt-time 0.15.0  [setup]
+      https://github.com/sorairolake/nt-time
+  nt-time 0.8.1  [app]
       Shun Sakai <sorairolake@protonmail.ch>
       https://github.com/sorairolake/nt-time
   pin-project-lite 0.2.17  [both]
       https://github.com/taiki-e/pin-project-lite
-  polyval 0.6.2  [app]
+  polyval 0.7.3  [app]
       RustCrypto Developers
       https://github.com/RustCrypto/universal-hashes
   rustc-hash 2.1.3  [both]
       The Rust Project Developers
       https://github.com/rust-lang/rustc-hash
-  tauri 2.11.5  [both]
+  tauri 2.12.5  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/tauri
-  tauri-codegen 2.6.3  [both]
+  tauri-codegen 2.7.4  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/tauri
-  tauri-macros 2.6.3  [both]
+  tauri-macros 2.7.4  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/tauri
-  tauri-plugin-dialog 2.7.1  [both]
+  tauri-plugin-dialog 2.8.4  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/plugins-workspace
-  tauri-plugin-fs 2.5.1  [both]
+  tauri-plugin-fs 2.7.1  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/plugins-workspace
-  tauri-plugin-opener 2.5.4  [both]
+  tauri-plugin-opener 2.7.3  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/plugins-workspace
-  tauri-plugin-single-instance 2.4.2  [app]
+  tauri-plugin-single-instance 2.5.5  [app]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/plugins-workspace
-  tauri-runtime 2.11.3  [both]
+  tauri-runtime 2.12.2  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/tauri
-  tauri-runtime-wry 2.11.4  [both]
+  tauri-runtime-wry 2.12.3  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/tauri
-  tauri-utils 2.9.3  [both]
+  tauri-utils 2.10.2  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/tauri
-  utf8_iter 1.0.4  [both]
+  utf8_iter 1.1.0  [both]
       Henri Sivonen <hsivonen@hsivonen.fi>
       https://github.com/hsivonen/utf8_iter
-  uuid 1.23.4  [both]
-      Ashley Mannix<ashleymannix@live.com.au>, Dylan DPC<dylan.dpc@gmail.com>, Hunar Roop Kahlon<hunar.roop@gmail.com>
+  utf_types 1.0.0  [both]
+      Henri Sivonen <hsivonen@hsivonen.fi>
+      https://github.com/hsivonen/utf_types
+  uuid 1.29.2  [both]
       https://github.com/uuid-rs/uuid
-  window-vibrancy 0.6.0  [both]
+  window-vibrancy 0.8.1  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/tauri-plugin-vibrancy
-  wry 0.55.1  [both]
+  wry 0.57.2  [both]
       Tauri Programme within The Commons Conservancy
       https://github.com/tauri-apps/wry
+  zeroize 1.9.1  [setup]
+      The RustCrypto Project Developers
+      https://github.com/RustCrypto/utils
+  zeroize_derive 1.5.0  [setup]
+      The RustCrypto Project Developers
+      https://github.com/RustCrypto/utils
 
 ------------------------------------------------------------------------------
 Unicode-3.0  (18 crates)
 ------------------------------------------------------------------------------
 
-  icu_collections 2.2.0  [both]
+  icu_collections 2.4.0  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  icu_locale_core 2.2.0  [both]
+  icu_locale_core 2.4.0  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  icu_normalizer 2.2.0  [both]
+  icu_normalizer 2.4.0  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  icu_normalizer_data 2.2.0  [both]
+  icu_normalizer_data 2.4.0  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  icu_properties 2.2.0  [both]
+  icu_properties 2.4.0  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  icu_properties_data 2.2.0  [both]
+  icu_properties_data 2.4.0  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  icu_provider 2.2.0  [both]
+  icu_provider 2.4.0  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  litemap 0.8.2  [both]
+  litemap 0.8.3  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  potential_utf 0.1.5  [both]
+  potential_utf 0.1.6  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  tinystr 0.8.3  [both]
+  tinystr 0.8.5  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  writeable 0.6.3  [both]
+  writeable 0.6.4  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  yoke 0.8.3  [both]
+  yoke 0.8.4  [both]
       Manish Goregaokar <manishsmail@gmail.com>
       https://github.com/unicode-org/icu4x
-  yoke-derive 0.8.2  [both]
+  yoke-derive 0.8.4  [both]
       Manish Goregaokar <manishsmail@gmail.com>
       https://github.com/unicode-org/icu4x
   zerofrom 0.1.8  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  zerofrom-derive 0.1.7  [both]
+  zerofrom-derive 0.1.8  [both]
       Manish Goregaokar <manishsmail@gmail.com>
       https://github.com/unicode-org/icu4x
-  zerotrie 0.2.4  [both]
+  zerotrie 0.2.5  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  zerovec 0.11.6  [both]
+  zerovec 0.11.9  [both]
       The ICU4X Project Developers
       https://github.com/unicode-org/icu4x
-  zerovec-derive 0.11.3  [both]
+  zerovec-derive 0.11.7  [both]
       Manish Goregaokar <manishsmail@gmail.com>
       https://github.com/unicode-org/icu4x
 
 ------------------------------------------------------------------------------
-MIT/Apache-2.0  (11 crates)
+Unlicense OR MIT  (9 crates)
 ------------------------------------------------------------------------------
 
-  bitflags 1.3.2  [both]
-      The Rust Project Developers
-      https://github.com/bitflags/bitflags
-  bs58 0.5.1  [both]
-      https://github.com/Nullus157/bs58-rs
-  ident_case 1.0.1  [both]
-      Ted Driggs <ted.driggs@outlook.com>
-      https://github.com/TedDriggs/ident_case
-  json-patch 3.0.1  [both]
-      Ivan Dubrov <dubrov.ivan@gmail.com>
-      https://github.com/idubrov/json-patch
-  siphasher 1.0.3  [both]
-      Frank Denis <github@pureftpd.org>
-      https://github.com/jedisct1/rust-siphash
-  unic-char-property 0.9.0  [both]
-      The UNIC Project Developers
-      https://github.com/open-i18n/rust-unic/
-  unic-char-range 0.9.0  [both]
-      The UNIC Project Developers
-      https://github.com/open-i18n/rust-unic/
-  unic-common 0.9.0  [both]
-      The UNIC Project Developers
-      https://github.com/open-i18n/rust-unic/
-  unic-ucd-ident 0.9.0  [both]
-      The UNIC Project Developers
-      https://github.com/open-i18n/rust-unic/
-  unic-ucd-version 0.9.0  [both]
-      The UNIC Project Developers
-      https://github.com/open-i18n/rust-unic/
-  winapi 0.3.9  [app]
-      Peter Atashian <retep998@gmail.com>
-      https://github.com/retep998/winapi-rs
-
-------------------------------------------------------------------------------
-Unlicense OR MIT  (6 crates)
-------------------------------------------------------------------------------
-
-  aho-corasick 1.1.4  [both]
+  aho-corasick 1.1.5  [both]
       Andrew Gallant <jamslam@gmail.com>
       https://github.com/BurntSushi/aho-corasick
   byteorder 1.5.0  [both]
@@ -2524,10 +2428,19 @@ Unlicense OR MIT  (6 crates)
       https://github.com/BurntSushi/byteorder
   byteorder-lite 0.1.0  [app]
       https://github.com/image-rs/byteorder-lite
-  memchr 2.8.2  [app]
-      Andrew Gallant <jamslam@gmail.com>, bluss
-      https://github.com/BurntSushi/memchr
-  memchr 2.8.3  [setup]
+  jiff 0.2.43  [both]
+      Andrew Gallant <jamslam@gmail.com>
+      https://github.com/BurntSushi/jiff
+  jiff-core 0.1.5  [both]
+      Andrew Gallant <jamslam@gmail.com>
+      https://github.com/BurntSushi/jiff
+  jiff-tzdb 0.1.9  [both]
+      Andrew Gallant <jamslam@gmail.com>
+      https://github.com/BurntSushi/jiff
+  jiff-tzdb-platform 0.1.3  [both]
+      Andrew Gallant <jamslam@gmail.com>
+      https://github.com/BurntSushi/jiff
+  memchr 2.8.3  [both]
       Andrew Gallant <jamslam@gmail.com>, bluss
       https://github.com/BurntSushi/memchr
   winapi-util 0.1.11  [both]
@@ -2535,13 +2448,32 @@ Unlicense OR MIT  (6 crates)
       https://github.com/BurntSushi/winapi-util
 
 ------------------------------------------------------------------------------
+MIT/Apache-2.0  (5 crates)
+------------------------------------------------------------------------------
+
+  bitflags 1.3.2  [setup]
+      The Rust Project Developers
+      https://github.com/bitflags/bitflags
+  bs58 0.5.1  [both]
+      https://github.com/Nullus157/bs58-rs
+  ident_case 1.0.1  [both]
+      Ted Driggs <ted.driggs@outlook.com>
+      https://github.com/TedDriggs/ident_case
+  json-patch 4.2.0  [both]
+      Ivan Dubrov <dubrov.ivan@gmail.com>
+      https://github.com/idubrov/json-patch
+  winapi 0.3.9  [app]
+      Peter Atashian <retep998@gmail.com>
+      https://github.com/retep998/winapi-rs
+
+------------------------------------------------------------------------------
 MPL-2.0  (5 crates)
 ------------------------------------------------------------------------------
 
-  cssparser 0.36.0  [both]
+  cssparser 0.37.0  [both]
       Simon Sapin <simon.sapin@exyr.org>
       https://github.com/servo/rust-cssparser
-  cssparser-macros 0.6.1  [both]
+  cssparser-macros 0.7.1  [both]
       Simon Sapin <simon.sapin@exyr.org>
       https://github.com/servo/rust-cssparser
   dtoa-short 0.3.5  [both]
@@ -2550,37 +2482,29 @@ MPL-2.0  (5 crates)
   option-ext 0.2.0  [both]
       Simon Ochsenreither <simon@ochsenreither.de>
       https://github.com/soc/option-ext.git
-  selectors 0.36.1  [both]
+  selectors 0.38.0  [both]
       The Servo Project Developers
       https://github.com/servo/stylo
 
 ------------------------------------------------------------------------------
-BSD-3-Clause  (3 crates)
+BSD-3-Clause  (5 crates)
 ------------------------------------------------------------------------------
 
-  alloc-no-stdlib 2.0.4  [both]
+  alloc-no-stdlib 2.0.4  [app]
       Daniel Reiter Horn <danielrh@dropbox.com>
       https://github.com/dropbox/rust-alloc-no-stdlib
-  alloc-stdlib 0.2.4  [both]
+  alloc-no-stdlib 3.0.0  [both]
+      Daniel Reiter Horn <danielrh@dropbox.com>
+      https://github.com/dropbox/rust-alloc-no-stdlib
+  alloc-stdlib 0.2.4  [app]
+      Daniel Reiter Horn <danielrh@dropbox.com>
+      https://github.com/dropbox/rust-alloc-no-stdlib
+  alloc-stdlib 0.3.0  [both]
       Daniel Reiter Horn <danielrh@dropbox.com>
       https://github.com/dropbox/rust-alloc-no-stdlib
   subtle 2.6.1  [app]
       Isis Lovecruft <isis@patternsinthevoid.net>, Henry de Valence <hdevalence@hdevalence.ca>
       https://github.com/dalek-cryptography/subtle
-
-------------------------------------------------------------------------------
-Zlib OR Apache-2.0 OR MIT  (3 crates)
-------------------------------------------------------------------------------
-
-  bytemuck 1.25.0  [app]
-      Lokathor <zefria@gmail.com>
-      https://github.com/Lokathor/bytemuck
-  tinyvec 1.11.0  [app]
-      Lokathor <zefria@gmail.com>
-      https://github.com/Lokathor/tinyvec
-  tinyvec 1.12.0  [setup]
-      Lokathor <zefria@gmail.com>
-      https://github.com/Lokathor/tinyvec
 
 ------------------------------------------------------------------------------
 Apache-2.0  (3 crates)
@@ -2589,11 +2513,22 @@ Apache-2.0  (3 crates)
   flagset 0.4.7  [both]
       Nathaniel McCallum <nathaniel@profian.com>
       https://github.com/enarx/flagset
-  tao 0.35.3  [both]
+  tao 0.37.2  [both]
       Tauri Programme within The Commons Conservancy, The winit contributors
       https://github.com/tauri-apps/tao
-  zopfli 0.8.3  [setup]
+  zopfli 0.8.4  [setup]
       https://github.com/zopfli-rs/zopfli
+
+------------------------------------------------------------------------------
+Zlib OR Apache-2.0 OR MIT  (2 crates)
+------------------------------------------------------------------------------
+
+  bytemuck 1.25.2  [app]
+      Lokathor <zefria@gmail.com>
+      https://github.com/Lokathor/bytemuck
+  tinyvec 1.13.3  [both]
+      Lokathor <zefria@gmail.com>
+      https://github.com/Lokathor/tinyvec
 
 ------------------------------------------------------------------------------
 Zlib  (2 crates)
@@ -2602,14 +2537,14 @@ Zlib  (2 crates)
   foldhash 0.2.0  [both]
       Orson Peters <orsonpeters@gmail.com>
       https://github.com/orlp/foldhash
-  zlib-rs 0.6.8  [setup]
+  zlib-rs 0.6.8  [both]
       https://github.com/trifectatechfoundation/zlib-rs
 
 ------------------------------------------------------------------------------
 BSD-2-Clause  (2 crates)
 ------------------------------------------------------------------------------
 
-  kamadak-exif 0.6.1  [app]
+  kamadak-exif 0.6.2  [app]
       KAMADA Ken'ichi <kamada@nanohz.org>
       https://github.com/kamadak/exif-rs
   mutate_once 0.1.2  [app]
@@ -2628,17 +2563,6 @@ BSD-3-Clause OR Apache-2.0  (2 crates)
       https://github.com/awxkee/pxfm
 
 ------------------------------------------------------------------------------
-MIT OR Apache-2.0 OR Zlib  (2 crates)
-------------------------------------------------------------------------------
-
-  raw-window-handle 0.6.2  [both]
-      Osspial <osspial@gmail.com>
-      https://github.com/rust-windowing/raw-window-handle
-  tinyvec_macros 0.1.1  [both]
-      Soveu <marx.tomasz@gmail.com>
-      https://github.com/Soveu/tinyvec_macros
-
-------------------------------------------------------------------------------
 Unlicense/MIT  (2 crates)
 ------------------------------------------------------------------------------
 
@@ -2650,6 +2574,58 @@ Unlicense/MIT  (2 crates)
       https://github.com/BurntSushi/walkdir
 
 ------------------------------------------------------------------------------
+BSD-3-Clause AND MIT  (2 crates)
+------------------------------------------------------------------------------
+
+  brotli 8.0.4  [app]
+      Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors
+      https://github.com/dropbox/rust-brotli
+  brotli 9.1.1  [both]
+      Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors
+      https://github.com/dropbox/rust-brotli
+
+------------------------------------------------------------------------------
+BSD-3-Clause/MIT  (2 crates)
+------------------------------------------------------------------------------
+
+  brotli-decompressor 5.0.3  [app]
+      Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors
+      https://github.com/dropbox/rust-brotli-decompressor
+  brotli-decompressor 6.3.1  [both]
+      Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors
+      https://github.com/dropbox/rust-brotli-decompressor
+
+------------------------------------------------------------------------------
+CC0-1.0 OR MIT-0 OR Apache-2.0  (2 crates)
+------------------------------------------------------------------------------
+
+  constant_time_eq 0.6.1  [setup]
+      Cesar Eduardo Barros <cesarb@cesarb.eti.br>
+      https://codeberg.org/cesarb/constant_time_eq
+  dunce 1.0.5  [both]
+      Kornel <kornel@geekhood.net>
+      https://gitlab.com/kornelski/dunce
+
+------------------------------------------------------------------------------
+MIT OR Zlib OR Apache-2.0  (2 crates)
+------------------------------------------------------------------------------
+
+  miniz_oxide 0.8.9  [both]
+      Frommi <daniil.liferenko@gmail.com>, oyvindln <oyvindln@users.noreply.github.com>, Rich Geldreich richgel99@gmail.com
+      https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
+  miniz_oxide 0.9.1  [both]
+      Frommi <daniil.liferenko@gmail.com>, oyvindln <oyvindln@users.noreply.github.com>, Rich Geldreich richgel99@gmail.com
+      https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
+
+------------------------------------------------------------------------------
+MIT OR Apache-2.0 OR Zlib  (1 crate)
+------------------------------------------------------------------------------
+
+  raw-window-handle 0.6.2  [both]
+      Osspial <osspial@gmail.com>
+      https://github.com/rust-windowing/raw-window-handle
+
+------------------------------------------------------------------------------
 0BSD OR MIT OR Apache-2.0  (1 crate)
 ------------------------------------------------------------------------------
 
@@ -2658,35 +2634,11 @@ Unlicense/MIT  (2 crates)
       https://github.com/oyvindln/adler2
 
 ------------------------------------------------------------------------------
-BSD-3-Clause AND MIT  (1 crate)
-------------------------------------------------------------------------------
-
-  brotli 8.0.4  [both]
-      Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors
-      https://github.com/dropbox/rust-brotli
-
-------------------------------------------------------------------------------
-BSD-3-Clause/MIT  (1 crate)
-------------------------------------------------------------------------------
-
-  brotli-decompressor 5.0.3  [both]
-      Daniel Reiter Horn <danielrh@dropbox.com>, The Brotli Authors
-      https://github.com/dropbox/rust-brotli-decompressor
-
-------------------------------------------------------------------------------
 Apache-2.0 AND MIT  (1 crate)
 ------------------------------------------------------------------------------
 
   dpi 0.1.2  [both]
       https://github.com/rust-windowing/winit
-
-------------------------------------------------------------------------------
-CC0-1.0 OR MIT-0 OR Apache-2.0  (1 crate)
-------------------------------------------------------------------------------
-
-  dunce 1.0.5  [both]
-      Kornel <kornel@geekhood.net>
-      https://gitlab.com/kornelski/dunce
 
 ------------------------------------------------------------------------------
 Apache-2.0 / MIT  (1 crate)
@@ -2697,18 +2649,10 @@ Apache-2.0 / MIT  (1 crate)
       https://github.com/servo/rust-fnv
 
 ------------------------------------------------------------------------------
-MIT OR Zlib OR Apache-2.0  (1 crate)
-------------------------------------------------------------------------------
-
-  miniz_oxide 0.8.9  [both]
-      Frommi <daniil.liferenko@gmail.com>, oyvindln <oyvindln@users.noreply.github.com>, Rich Geldreich richgel99@gmail.com
-      https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
-
-------------------------------------------------------------------------------
 (MIT OR Apache-2.0) AND Unicode-3.0  (1 crate)
 ------------------------------------------------------------------------------
 
-  unicode-ident 1.0.24  [both]
+  unicode-ident 1.0.27  [both]
       David Tolnay <dtolnay@gmail.com>
       https://github.com/dtolnay/unicode-ident
 
@@ -2717,9 +2661,10 @@ MIT OR Zlib OR Apache-2.0  (1 crate)
 ==============================================================================
 
 The Windows Cloud Filter binding is vendored into this repository at
-app/src-tauri/vendor/cloud-filter and compiled into app.exe and setup.exe. It
-is third-party MIT-licensed source, kept under its own licence, and its files
-deliberately carry no Photos for Proton header.
+app/src-tauri/vendor/cloud-filter and compiled into app.exe. It is third-party
+MIT-licensed source, kept under its own licence, and its files deliberately
+carry no Photos for Proton header. setup.exe links the unmodified crates.io
+release cloud-filter 0.0.7 under the same MIT licence and copyright.
 
   cloud-filter 0.0.6
   https://github.com/ho-229/cloud-filter-rs
@@ -2993,7 +2938,7 @@ Apache-2.0
 ------------------------------------------------------------------------------
 BSD-2-Clause
 ------------------------------------------------------------------------------
-(quoted from kamadak-exif 0.6.1, file LICENSE, copyright line omitted as above)
+(quoted from kamadak-exif 0.6.2, file LICENSE, copyright line omitted as above)
 
     Redistribution and use in source and binary forms, with or without
     modification, are permitted provided that the following conditions
@@ -3190,7 +3135,7 @@ MIT
 ------------------------------------------------------------------------------
 MPL-2.0
 ------------------------------------------------------------------------------
-(quoted from cssparser 0.36.0, file LICENSE)
+(quoted from cssparser 0.37.0, file LICENSE)
 
     Mozilla Public License Version 2.0
     ==================================
@@ -3569,7 +3514,7 @@ MPL-2.0
 ------------------------------------------------------------------------------
 Unicode-3.0
 ------------------------------------------------------------------------------
-(quoted from icu_collections 2.2.0, file LICENSE)
+(quoted from icu_collections 2.4.0, file LICENSE)
 
     UNICODE LICENSE V3
 
@@ -3621,7 +3566,7 @@ Unicode-3.0
 ------------------------------------------------------------------------------
 Unlicense
 ------------------------------------------------------------------------------
-(quoted from aho-corasick 1.1.4, file UNLICENSE)
+(quoted from aho-corasick 1.1.5, file UNLICENSE)
 
     This is free and unencumbered software released into the public domain.
 
@@ -3679,6 +3624,1180 @@ Licences named in section 4 with no text reproduced here
       No file carrying this text ships with the crate above, and none is
       written here from memory. The crate is offered under a choice of
       licences, and the text of CC0-1.0 and Apache-2.0 is reproduced above.
+
+==============================================================================
+7. ffmpeg, used to compress videos for upload
+==============================================================================
+
+The application compresses videos with its own build of ffmpeg, installed as
+resources\ffmpeg\ffmpeg.exe and resources\ffmpeg\ffprobe.exe. It is built by
+ffmpeg/build.sh in this application's published source, from the exact
+upstream commits below, with no source modified. Because x264 is linked in,
+the built ffmpeg as a whole is licensed GPL-2.0-or-later, which is compatible
+with the GPL-3.0 this application uses. The GPL version 2 text is installed
+in full beside it as resources\ffmpeg\FFMPEG-LICENSE.txt, taken from the
+ffmpeg source (COPYING.GPLv2).
+
+  FFmpeg n9.0.2, commit 946fcce07b6dcd0331c8cc609192aeff5e1924f8
+  https://git.ffmpeg.org/ffmpeg.git
+  Licence: LGPL-2.1-or-later, built here as GPL-2.0-or-later
+
+  x264, commit b35605ace3ddf7c1a5d67a2eb553f034aef41d55 (stable)
+  https://code.videolan.org/videolan/x264.git
+  Licence: GPL-2.0-or-later
+
+  zimg release-3.0.6, commit f819b14e8f39d1282400b0d9543e8ef73c1b2bbd
+  https://github.com/sekrit-twc/zimg
+  Licence: WTFPL
+
+  libvpl v2.17.0, commit d77f9195cf495b937631607333288fd917ae8939
+  https://github.com/intel/libvpl
+  Licence: MIT
+
+  nv-codec-headers n13.0.19.0, commit e844e5b26f46bb77479f063029595293aa8f812d
+  https://git.videolan.org/git/ffmpeg/nv-codec-headers.git
+  Licence: MIT
+
+  AMF headers v1.5.3, commit 57ee0cfb0e1a08d9041f77435653794c1b012be0
+  https://github.com/GPUOpen-LibrariesAndSDKs/AMF
+  Licence: MIT
+
+------------------------------------------------------------------------------
+Licence texts for the ffmpeg components
+------------------------------------------------------------------------------
+
+    Quoted from zimg COPYING:
+
+                DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+                        Version 2, December 2004
+
+     Copyright (C) 2004 Sam Hocevar <sam@hocevar.net>
+
+     Everyone is permitted to copy and distribute verbatim or modified
+     copies of this license document, and changing it is allowed as long
+     as the name is changed.
+
+                DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
+       TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+
+      0. You just DO WHAT THE FUCK YOU WANT TO.
+
+
+    Quoted from libvpl LICENSE:
+
+    MIT License
+
+    Copyright (c) 2020 Intel Corporation
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+    Quoted from nv-codec-headers include/ffnvcodec/nvEncodeAPI.h:
+
+    This copyright notice applies to this header file only:
+
+    Copyright (c) 2010-2024 NVIDIA Corporation
+
+    Permission is hereby granted, free of charge, to any person
+    obtaining a copy of this software and associated documentation
+    files (the "Software"), to deal in the Software without
+    restriction, including without limitation the rights to use,
+    copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the software, and to permit persons to whom the
+    software is furnished to do so, subject to the following
+    conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+    OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+    NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+    HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+    WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+    OTHER DEALINGS IN THE SOFTWARE.
+
+    Quoted from AMF LICENSE.txt:
+
+    Notice Regarding Standards.  AMD does not provide a license or sublicense to
+    any Intellectual Property Rights relating to any standards, including but not
+    limited to any audio and/or video codec technologies such as MPEG-2, MPEG-4;
+    AVC/H.264; HEVC/H.265; AAC decode/FFMPEG; AAC encode/FFMPEG; VC-1; and MP3
+    (collectively, the "Media Technologies"). For clarity, you will pay any
+    royalties due for such third party technologies, which may include the Media
+    Technologies that are owed as a result of AMD providing the Software to you.
+
+    This software uses libraries from the FFmpeg project under the LGPLv2.1.
+
+    MIT license
+
+    Copyright (c) 2016 Advanced Micro Devices, Inc. All rights reserved.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+    THE SOFTWARE.
+
+==============================================================================
+8. The macOS build
+==============================================================================
+
+The macOS app is one universal bundle for Apple silicon and Intel Macs. It
+carries the same application and the same third-party software as the Windows
+build, listed in sections 1 to 7 and 9, except for what this section names.
+Inside the bundle this file, LICENSE and NODE-LICENSE.txt are in
+Contents/Resources.
+
+------------------------------------------------------------------------------
+Node.js runtime
+------------------------------------------------------------------------------
+
+The sidecar runs on the official Node.js v24.15.0 builds for macOS arm64 and
+x64, as distributed by the Node.js project, joined into one universal file and
+installed as Contents/Resources/sidecar-runtime. No Node.js source or code is
+modified. Its licence and the notices it carries are as in section 1, and
+NODE-LICENSE.txt is installed beside this file.
+
+------------------------------------------------------------------------------
+npm packages with native code
+------------------------------------------------------------------------------
+
+In place of @img/sharp-win32-x64, the macOS build ships sharp's prebuilt
+binaries for both Mac architectures. The libvips packages bundle libvips and
+its dependencies under LGPL-3.0-or-later; the licence file installed with each
+of them, in Contents/Resources/sidecar/node_modules, enumerates the components
+involved. The LGPL-3.0 text is reproduced in section 2.
+
+  @img/sharp-darwin-arm64 0.35.5              Apache-2.0
+  @img/sharp-darwin-x64 0.35.5                Apache-2.0
+  @img/sharp-libvips-darwin-arm64 1.3.4       LGPL-3.0-or-later
+  @img/sharp-libvips-darwin-x64 1.3.4         LGPL-3.0-or-later
+
+onnxruntime-node 1.30.0 ships its macOS arm64 build of ONNX Runtime
+(libonnxruntime.dylib) in place of the Windows one. ONNX Runtime publishes no
+build for Intel Macs, so the x64 library and its Node binding are compiled
+from the same release's unmodified source, licensed MIT:
+
+  ONNX Runtime v1.30.0, commit f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7
+  https://github.com/microsoft/onnxruntime
+
+Its third-party notices are at the address given in section 3.
+
+------------------------------------------------------------------------------
+ffmpeg
+------------------------------------------------------------------------------
+
+The macOS app compresses videos and draws the picture a video or a HEIC still
+is uploaded with using its own build of ffmpeg, installed as
+Contents/Resources/ffmpeg/ffmpeg and ffprobe. It is built by ffmpeg/build.sh
+in this application's published source from the same FFmpeg and zimg commits
+as section 7, with no source modified. It links neither x264 nor any other GPL
+component, and encodes with VideoToolbox, which is part of macOS, so the built
+ffmpeg is licensed LGPL-2.1-or-later. The LGPL version 2.1 text is installed in
+full beside it as Contents/Resources/ffmpeg/FFMPEG-LICENSE.txt, taken from the
+ffmpeg source (COPYING.LGPLv2.1). The corresponding source of this ffmpeg is
+the FFmpeg commit named in section 7.
+
+  FFmpeg n9.0.2, commit 946fcce07b6dcd0331c8cc609192aeff5e1924f8
+  https://git.ffmpeg.org/ffmpeg.git
+  Licence: LGPL-2.1-or-later
+
+  zimg release-3.0.6, commit f819b14e8f39d1282400b0d9543e8ef73c1b2bbd
+  https://github.com/sekrit-twc/zimg
+  Licence: WTFPL, text in section 7
+
+x264, libvpl, nv-codec-headers and the AMF headers are not part of the macOS
+build.
+
+------------------------------------------------------------------------------
+Rust crates linked into the macOS app only
+------------------------------------------------------------------------------
+
+Found as in section 4, with `cargo metadata --filter-platform` for
+aarch64-apple-darwin and x86_64-apple-darwin: these 27 crates are linked into
+the macOS app and not into the Windows one. Their licence texts are in
+section 6.
+
+------------------------------------------------------------------------------
+MIT OR Apache-2.0  (11 crates)
+------------------------------------------------------------------------------
+
+  base64 0.21.7
+      Alice Maz <alice@alicemaz.com>, Marshall Pierce <marshall@mpierce.org>
+      https://github.com/marshallpierce/rust-base64
+  core-foundation 0.10.1
+      The Servo Project Developers
+      https://github.com/servo/core-foundation-rs
+  core-foundation-sys 0.8.7
+      The Servo Project Developers
+      https://github.com/servo/core-foundation-rs
+  core-graphics 0.25.0
+      The Servo Project Developers
+      https://github.com/servo/core-foundation-rs
+  core-graphics-types 0.2.0
+      The Servo Project Developers
+      https://github.com/servo/core-foundation-rs
+  embed_plist 1.2.2
+      Nikolai Vazquez <hello@nikolaivazquez.com>
+      https://github.com/nvzqz/embed-plist-rs
+  iana-time-zone 0.1.65
+      Andrew Straw <strawman@astraw.com>, René Kijewski <rene.kijewski@fu-berlin.de>, Ryan Lopopolo <rjl@hyperbo.la>
+      https://github.com/strawlab/iana-time-zone
+  keyring 3.6.3
+      Walther Chen <walther.chen@gmail.com>, Daniel Brotsky <dev@brotsky.com>
+      https://github.com/hwchen/keyring-rs.git
+  security-framework 3.7.0
+      Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net>
+      https://github.com/kornelski/rust-security-framework
+  security-framework-sys 2.17.0
+      Steven Fackler <sfackler@gmail.com>, Kornel <kornel@geekhood.net>
+      https://github.com/kornelski/rust-security-framework
+  swift-rs 1.0.9
+      The swift-rs contributors
+      https://github.com/Brendonovich/swift-rs
+
+------------------------------------------------------------------------------
+Zlib OR Apache-2.0 OR MIT  (9 crates)
+------------------------------------------------------------------------------
+
+  dispatch2 0.3.1
+      Mads Marquart <mads@marquart.dk>, Mary <mary@mary.zone>
+      https://github.com/madsmtm/objc2
+  objc2-app-kit 0.3.2
+      The objc2-app-kit authors
+      https://github.com/madsmtm/objc2
+  objc2-core-foundation 0.3.2
+      The objc2-core-foundation authors
+      https://github.com/madsmtm/objc2
+  objc2-core-graphics 0.3.2
+      The objc2-core-graphics authors
+      https://github.com/madsmtm/objc2
+  objc2-exception-helper 0.1.1
+      Mads Marquart <mads@marquart.dk>
+      https://github.com/madsmtm/objc2
+  objc2-io-surface 0.3.2
+      The objc2-io-surface authors
+      https://github.com/madsmtm/objc2
+  objc2-local-authentication 0.3.2
+      The objc2-local-authentication authors
+      https://github.com/madsmtm/objc2
+  objc2-quartz-core 0.3.2
+      The objc2-quartz-core authors
+      https://github.com/madsmtm/objc2
+  objc2-web-kit 0.3.2
+      The objc2-web-kit authors
+      https://github.com/madsmtm/objc2
+
+------------------------------------------------------------------------------
+MIT  (4 crates)
+------------------------------------------------------------------------------
+
+  block2 0.6.2
+      Mads Marquart <mads@marquart.dk>
+      https://github.com/madsmtm/objc2
+  objc2 0.6.5
+      Mads Marquart <mads@marquart.dk>
+      https://github.com/madsmtm/objc2
+  objc2-encode 4.1.0
+      Mads Marquart <mads@marquart.dk>
+      https://github.com/madsmtm/objc2
+  objc2-foundation 0.3.2
+      The objc2-foundation authors
+      https://github.com/madsmtm/objc2
+
+------------------------------------------------------------------------------
+MIT/Apache-2.0  (3 crates)
+------------------------------------------------------------------------------
+
+  foreign-types 0.5.0
+      Steven Fackler <sfackler@gmail.com>
+      https://github.com/sfackler/foreign-types
+  foreign-types-macros 0.2.4
+      Steven Fackler <sfackler@gmail.com>
+      https://github.com/sfackler/foreign-types
+  foreign-types-shared 0.3.1
+      Steven Fackler <sfackler@gmail.com>
+      https://github.com/sfackler/foreign-types
+
+==============================================================================
+9. npm packages compiled into the app's window
+==============================================================================
+
+These packages are compiled into the application's window, the page that
+app.exe shows. The build puts that page inside app.exe itself. The list is
+every production dependency of app/package.json together with what each of
+them depends on.
+
+7 packages:
+
+  @tauri-apps/api 2.12.4                      Apache-2.0 OR MIT
+  @tauri-apps/plugin-dialog 2.8.4             MIT OR Apache-2.0
+  @tauri-apps/plugin-opener 2.7.3             MIT OR Apache-2.0
+  leaflet 1.9.4                               BSD-2-Clause
+  react 19.3.1                                MIT
+  react-dom 19.3.1                            MIT
+  scheduler 0.28.0                            MIT
+
+------------------------------------------------------------------------------
+
+@tauri-apps/api 2.12.4
+  Licence: Apache-2.0 OR MIT (the Apache-2.0 text is in section 6)
+  Project: https://github.com/tauri-apps/tauri#readme
+
+    MIT License
+
+    Copyright (c) 2017 - Present Tauri Apps Contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+------------------------------------------------------------------------------
+
+@tauri-apps/plugin-dialog 2.8.4
+  Licence: MIT OR Apache-2.0 (both texts are in section 6)
+  Project: https://github.com/tauri-apps/plugins-workspace
+
+    This package ships no licence text. Its LICENSE.spdx names MIT and
+    Apache-2.0 with the copyright 2019-2022, The Tauri Programme in the Commons
+    Conservancy. The licence recorded above is the one declared in its own
+    package.json.
+
+------------------------------------------------------------------------------
+
+@tauri-apps/plugin-opener 2.7.3
+  Licence: MIT OR Apache-2.0 (both texts are in section 6)
+  Project: https://github.com/tauri-apps/plugins-workspace
+
+    This package ships no licence text. Its LICENSE.spdx names MIT and
+    Apache-2.0 with the copyright 2019-2022, The Tauri Programme in the Commons
+    Conservancy. The licence recorded above is the one declared in its own
+    package.json.
+
+------------------------------------------------------------------------------
+
+leaflet 1.9.4
+  Licence: BSD-2-Clause
+  Project: https://leafletjs.com
+
+    BSD 2-Clause License
+
+    Copyright (c) 2010-2023, Volodymyr Agafonkin
+    Copyright (c) 2010-2011, CloudMade
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+    1. Redistributions of source code must retain the above copyright notice, this
+       list of conditions and the following disclaimer.
+
+    2. Redistributions in binary form must reproduce the above copyright notice,
+       this list of conditions and the following disclaimer in the documentation
+       and/or other materials provided with the distribution.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+    DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+    OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+------------------------------------------------------------------------------
+
+react 19.3.1
+  Licence: MIT
+  Project: https://react.dev/
+
+    MIT License
+
+    Copyright (c) Meta Platforms, Inc. and affiliates.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+------------------------------------------------------------------------------
+
+react-dom 19.3.1
+  Licence: MIT
+  Project: https://react.dev/
+
+    MIT License
+
+    Copyright (c) Meta Platforms, Inc. and affiliates.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+------------------------------------------------------------------------------
+
+scheduler 0.28.0
+  Licence: MIT
+  Project: https://react.dev/
+
+    MIT License
+
+    Copyright (c) Meta Platforms, Inc. and affiliates.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+==============================================================================
+10. The Linux build
+==============================================================================
+
+The Linux app is a Flatpak that runs on the GNOME runtime from Flathub. It
+carries the same application and the same third-party software as the Windows
+build, listed in sections 1 to 7 and 9, except for what this section names.
+The GNOME runtime and the codecs extension it brings are installed by Flatpak
+from Flathub and are not part of this bundle. Inside the Flatpak this file,
+LICENSE and NODE-LICENSE.txt are in /app/share/licenses/eu.akoos.photos.
+
+------------------------------------------------------------------------------
+Node.js runtime
+------------------------------------------------------------------------------
+
+The sidecar runs on Node.js v24.22.3 for Linux x64, built by the Flatpak SDK's
+Node.js 24 extension (org.freedesktop.Sdk.Extension.node24) from the official
+source release, and installed as /app/bin/resources/sidecar-runtime. This
+application modifies no Node.js source or code. Node.js is licensed MIT, and
+the licence and notices it carries are installed as NODE-LICENSE.txt, taken
+from that extension.
+
+  Node.js v24.22.3
+  https://nodejs.org/
+  Licence: MIT
+
+------------------------------------------------------------------------------
+npm packages with native code
+------------------------------------------------------------------------------
+
+In place of @img/sharp-win32-x64 and the @img/sharp-wasm32 fallback, the Linux
+build ships sharp's prebuilt binaries for Linux x64; @emnapi/runtime and tslib,
+which only that fallback needs, are not shipped. The libvips package bundles
+libvips and its dependencies under LGPL-3.0-or-later; the licence file
+installed with it, in /app/bin/resources/sidecar/node_modules, enumerates the
+components involved. The LGPL-3.0 text is reproduced in section 2.
+
+  @img/sharp-linux-x64 0.35.5                 Apache-2.0
+  @img/sharp-libvips-linux-x64 1.3.4          LGPL-3.0-or-later
+
+onnxruntime-node 1.30.0 ships its Linux x64 build of ONNX Runtime
+(libonnxruntime.so.1 and libonnxruntime_providers_shared.so) in place of the
+Windows one. Its third-party notices are at the address given in section 3.
+
+------------------------------------------------------------------------------
+ffmpeg
+------------------------------------------------------------------------------
+
+The Linux app compresses videos with its own build of ffmpeg, installed as
+/app/bin/resources/ffmpeg/ffmpeg and ffprobe. It is built by ffmpeg/build.sh in
+this application's published source from the same FFmpeg, x264, zimg and
+nv-codec-headers commits as section 7, with no source modified, and reaches the
+graphics card through VA-API and NVENC. VA-API and libdrm come from the GNOME
+runtime and are not part of this bundle. Because x264 is linked in, the built
+ffmpeg is licensed GPL-2.0-or-later; the GPL version 2 text is installed in
+full beside it as /app/bin/resources/ffmpeg/FFMPEG-LICENSE.txt. libvpl and the
+AMF headers are not part of the Linux build.
+
+------------------------------------------------------------------------------
+Rust crates linked into the Linux app only
+------------------------------------------------------------------------------
+
+Found as in section 4, with `cargo metadata --filter-platform` for
+x86_64-unknown-linux-gnu: these 158 crates are linked into the Linux app and
+not into the Windows one. The texts of the licences they name are in section
+6, except ISC and IJG, which are reproduced below. Where a crate offers a
+choice that includes MIT or Apache-2.0, those texts apply.
+
+------------------------------------------------------------------------------
+MIT OR Apache-2.0  (68 crates)
+------------------------------------------------------------------------------
+
+  aes 0.8.4
+      RustCrypto Developers
+      https://github.com/RustCrypto/block-ciphers
+  async-broadcast 0.7.2
+      Stjepan Glavina <stjepang@gmail.com>, Yoshua Wuyts <yoshuawuyts@gmail.com>, Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/smol-rs/async-broadcast
+  async-recursion 1.2.0
+      Robert Usher <266585+dcchut@users.noreply.github.com>
+      https://github.com/dcchut/async-recursion
+  async-trait 0.1.92
+      David Tolnay <dtolnay@gmail.com>
+      https://github.com/dtolnay/async-trait
+  block-padding 0.3.3
+      RustCrypto Developers
+      https://github.com/RustCrypto/utils
+  cbc 0.1.2
+      RustCrypto Developers
+      https://github.com/RustCrypto/block-modes
+  chunked_transfer 1.5.0
+      Corey Farwell <coreyf@rwell.org>
+      https://github.com/frewsxcv/rust-chunked-transfer
+  cipher 0.4.4
+      RustCrypto Developers
+      https://github.com/RustCrypto/traits
+  dbus-secret-service 4.1.0
+      Daniel Brotsky <dev@brotsky.com>
+      https://github.com/brotskydotcom/dbus-secret-service.git
+  either 1.19.0
+      The either authors
+      https://github.com/rayon-rs/either
+  enumflags2 0.7.12
+      maik klein <maikklein@googlemail.com>, Maja Kądziołka <maya@compilercrim.es>
+      https://github.com/meithecatte/enumflags2
+  enumflags2_derive 0.7.12
+      maik klein <maikklein@googlemail.com>, Maja Kądziołka <maya@compilercrim.es>
+      https://github.com/meithecatte/enumflags2
+  enumn 0.1.14
+      David Tolnay <dtolnay@gmail.com>
+      https://github.com/dtolnay/enumn
+  errno 0.3.15
+      Chris Wong <lambda.fairy@gmail.com>, Dan Gohman <dev@sunfishcode.online>
+      https://github.com/lambda-fairy/rust-errno
+  field-offset 0.3.6
+      Diggory Blake <diggsey@googlemail.com>
+      https://github.com/Diggsey/rust-field-offset
+  futures-channel 0.3.34
+      The futures-channel authors
+      https://github.com/rust-lang/futures-rs
+  futures-core 0.3.34
+      The futures-core authors
+      https://github.com/rust-lang/futures-rs
+  futures-executor 0.3.34
+      The futures-executor authors
+      https://github.com/rust-lang/futures-rs
+  futures-io 0.3.34
+      The futures-io authors
+      https://github.com/rust-lang/futures-rs
+  futures-macro 0.3.34
+      The futures-macro authors
+      https://github.com/rust-lang/futures-rs
+  futures-sink 0.3.34
+      The futures-sink authors
+      https://github.com/rust-lang/futures-rs
+  futures-task 0.3.34
+      The futures-task authors
+      https://github.com/rust-lang/futures-rs
+  futures-util 0.3.34
+      The futures-util authors
+      https://github.com/rust-lang/futures-rs
+  getrandom 0.2.17
+      The Rand Project Developers
+      https://github.com/rust-random/getrandom
+  gstreamer 0.21.3
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-app 0.21.2
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-audio 0.21.3
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-base 0.21.2
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-pbutils 0.21.3
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-video 0.21.2
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  heck 0.4.1
+      Without Boats <woboats@gmail.com>
+      https://github.com/withoutboats/heck
+  hkdf 0.12.4
+      RustCrypto Developers
+      https://github.com/RustCrypto/KDFs/
+  hmac 0.12.1
+      RustCrypto Developers
+      https://github.com/RustCrypto/MACs
+  httpdate 1.0.3
+      Pyfisch <pyfisch@posteo.org>
+      https://github.com/pyfisch/httpdate
+  iana-time-zone 0.1.65
+      Andrew Straw <strawman@astraw.com>, René Kijewski <rene.kijewski@fu-berlin.de>, Ryan Lopopolo <rjl@hyperbo.la>
+      https://github.com/strawlab/iana-time-zone
+  inout 0.1.4
+      RustCrypto Developers
+      https://github.com/RustCrypto/utils
+  itertools 0.12.1
+      bluss
+      https://github.com/rust-itertools/itertools
+  keyring 3.6.3
+      Walther Chen <walther.chen@gmail.com>, Daniel Brotsky <dev@brotsky.com>
+      https://github.com/hwchen/keyring-rs.git
+  num 0.4.3
+      The Rust Project Developers
+      https://github.com/rust-num/num
+  num-bigint 0.4.8
+      The Rust Project Developers
+      https://github.com/rust-num/num-bigint
+  num-complex 0.4.6
+      The Rust Project Developers
+      https://github.com/rust-num/num-complex
+  num-integer 0.1.47
+      The Rust Project Developers
+      https://github.com/rust-num/num-integer
+  num-iter 0.1.46
+      The Rust Project Developers
+      https://github.com/rust-num/num-iter
+  num-rational 0.4.2
+      The Rust Project Developers
+      https://github.com/rust-num/num-rational
+  ordered-stream 0.2.0
+      Daniel De Graaf <code@danieldg.net>, Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/danieldg/ordered-stream
+  piper 0.2.5
+      Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net>
+      https://github.com/smol-rs/piper
+  ppv-lite86 0.2.21
+      The CryptoCorrosion Contributors
+      https://github.com/cryptocorrosion/cryptocorrosion
+  proc-macro-crate 1.3.1
+      Bastian Köcher <git@kchr.de>
+      https://github.com/bkchr/proc-macro-crate
+  proc-macro-crate 2.0.2
+      Bastian Köcher <git@kchr.de>
+      https://github.com/bkchr/proc-macro-crate
+  proc-macro-crate 3.5.0
+      Bastian Köcher <git@kchr.de>
+      https://github.com/bkchr/proc-macro-crate
+  proc-macro-error 1.0.4
+      CreepySkeleton <creepy-skeleton@yandex.ru>
+      https://gitlab.com/CreepySkeleton/proc-macro-error
+  proc-macro-error-attr 1.0.4
+      CreepySkeleton <creepy-skeleton@yandex.ru>
+      https://gitlab.com/CreepySkeleton/proc-macro-error
+  rand 0.8.8
+      The Rand Project Developers, The Rust Project Developers
+      https://github.com/rust-random/rand
+  rand_chacha 0.3.1
+      The Rand Project Developers, The Rust Project Developers, The CryptoCorrosion Contributors
+      https://github.com/rust-random/rand
+  rand_core 0.6.4
+      The Rand Project Developers, The Rust Project Developers
+      https://github.com/rust-random/rand
+  secret-service 4.0.0
+      Walther Chen <walther.chen@gmail.com>
+      https://github.com/hwchen/secret-service-rs.git
+  serde_spanned 0.6.9
+      The serde_spanned authors
+      https://github.com/toml-rs/toml
+  sha1 0.10.7
+      RustCrypto Developers
+      https://github.com/RustCrypto/hashes
+  signal-hook-registry 1.4.8
+      Michal 'vorner' Vaner <vorner@vorner.cz>, Masaki Hara <ackie.h.gmai@gmail.com>
+      https://github.com/vorner/signal-hook
+  static_assertions 1.1.0
+      Nikolai Vazquez
+      https://github.com/nvzqz/static-assertions-rs
+  syn 1.0.109
+      David Tolnay <dtolnay@gmail.com>
+      https://github.com/dtolnay/syn
+  thiserror 1.0.69
+      David Tolnay <dtolnay@gmail.com>
+      https://github.com/dtolnay/thiserror
+  thiserror-impl 1.0.69
+      David Tolnay <dtolnay@gmail.com>
+      https://github.com/dtolnay/thiserror
+  tiny_http 0.12.0
+      pierre.krieger1708@gmail.com, Corey Farwell <coreyf@rwell.org>
+      https://github.com/tiny-http/tiny-http
+  toml_datetime 0.6.3
+      Alex Crichton <alex@alexcrichton.com>
+      https://github.com/toml-rs/toml
+  toml_edit 0.19.15
+      Andronik Ordian <write@reusable.software>, Ed Page <eopage@gmail.com>
+      https://github.com/toml-rs/toml
+  toml_edit 0.20.2
+      Andronik Ordian <write@reusable.software>, Ed Page <eopage@gmail.com>
+      https://github.com/toml-rs/toml
+  toml_edit 0.25.19+spec-1.1.0
+      The toml_edit authors
+      https://github.com/toml-rs/toml
+
+------------------------------------------------------------------------------
+MIT  (62 crates)
+------------------------------------------------------------------------------
+
+  atk 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  atk-sys 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  cairo-rs 0.18.5
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  cairo-sys-rs 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  dlopen2 0.8.2
+      Szymon Wieloch <szymon.wieloch@gmail.com>, Ahmed Masud <ahmed.masud@saf.ai>, OpenByte <development.openbyte@gmail.com>
+      https://github.com/OpenByteDev/dlopen2
+  dlopen2_derive 0.4.3
+      Szymon Wieloch <szymon.wieloch@gmail.com>, OpenByte <development.openbyte@gmail.com>
+      https://github.com/OpenByteDev/dlopen2
+  endi 1.1.1
+      Zeeshan Ali Khan <zeenix@gmail.com>
+      https://github.com/zeenix/endi
+  gdk 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  gdk-pixbuf 0.18.5
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  gdk-pixbuf-sys 0.18.0
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  gdk-sys 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  gdkwayland-sys 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  gdkx11 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  gdkx11-sys 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  gio 0.18.4
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  gio-sys 0.18.1
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  glib 0.18.5
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  glib-macros 0.18.5
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  glib-sys 0.18.1
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  gobject-sys 0.18.0
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  gstreamer-app-sys 0.21.1
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-audio-sys 0.21.1
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-base-sys 0.21.1
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-pbutils-sys 0.21.0
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-sys 0.21.2
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gstreamer-video-sys 0.21.2
+      Sebastian Dröge <sebastian@centricular.com>
+      https://gitlab.freedesktop.org/gstreamer/gstreamer-rs
+  gtk 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  gtk-sys 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  gtk3-macros 0.18.2
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk3-rs
+  is-docker 0.2.0
+      Sean Larkin <TheLarkInn@users.noreply.github.com>
+      https://github.com/TheLarkInn/is-docker
+  is-wsl 0.4.0
+      Sean Larkin <TheLarkInn@users.noreply.github.com>
+      https://github.com/TheLarkInn/is-wsl
+  javascriptcore-rs 1.1.2
+      The javascriptcore-rs authors
+      https://github.com/tauri-apps/javascriptcore-rs
+  javascriptcore-rs-sys 1.1.1
+      The Gtk-rs Project Developers
+      https://github.com/tauri-apps/javascriptcore-rs
+  libheif-rs 3.0.0
+      Kirill Kuzminykh <cykooz@gmail.com>
+      https://github.com/Cykooz/libheif-rs
+  libheif-sys 5.3.1+1.23.1
+      Kirill Kuzminykh <cykooz@gmail.com>
+      https://github.com/cykooz/libheif-sys
+  muldiv 1.0.1
+      Sebastian Dröge <sebastian@centricular.com>
+      https://github.com/sdroege/rust-muldiv
+  nix 0.29.0
+      The nix-rust Project Developers
+      https://github.com/nix-rust/nix
+  pango 0.18.3
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  pango-sys 0.18.0
+      The gtk-rs Project Developers
+      https://github.com/gtk-rs/gtk-rs-core
+  pretty-hex 0.4.2
+      Andrei Volnin <wolandr@gmail.com>
+      https://github.com/wolandr/pretty-hex
+  slab 0.4.12
+      Carl Lerche <me@carllerche.com>
+      https://github.com/tokio-rs/slab
+  soup3 0.5.0
+      The soup3 authors
+      https://gitlab.gnome.org/World/Rust/soup3-rs
+  soup3-sys 0.5.0
+      The Gtk-rs Project Developers
+      https://gitlab.gnome.org/World/Rust/soup3-rs
+  webkit2gtk 2.0.2
+      The webkit2gtk authors
+      https://github.com/tauri-apps/webkit2gtk-rs
+  webkit2gtk-sys 2.0.2
+      The webkit2gtk-sys authors
+      https://github.com/tauri-apps/webkit2gtk-rs
+  winnow 0.5.40
+      The winnow authors
+      https://github.com/winnow-rs/winnow
+  x11 2.21.0
+      daggerbot <daggerbot@gmail.com>, Erle Pereira <erle@erlepereira.com>, AltF02 <contact@altf2.dev>
+      https://github.com/AltF02/x11-rs.git
+  x11-dl 2.21.0
+      daggerbot <daggerbot@gmail.com>, Erle Pereira <erle@erlepereira.com>, AltF02 <contact@altf2.dev>
+      https://github.com/AltF02/x11-rs.git
+  xdg-home 1.3.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/zeenix/xdg-home
+  zbus 4.4.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/dbus2/zbus/
+  zbus 5.19.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/z-galaxy/zbus/
+  zbus_macros 4.4.0
+      Marc-André Lureau <marcandre.lureau@redhat.com>, Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/dbus2/zbus/
+  zbus_macros 5.19.0
+      Marc-André Lureau <marcandre.lureau@redhat.com>, Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/z-galaxy/zbus/
+  zbus_names 3.0.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/dbus2/zbus/
+  zbus_names 4.3.5
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/z-galaxy/zbus/
+  zcheapstr 1.2.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/z-galaxy/zcheapstr/
+  zvariant 4.2.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/dbus2/zbus/
+  zvariant 5.15.1
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/z-galaxy/zbus/
+  zvariant_derive 4.2.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/dbus2/zbus/
+  zvariant_derive 5.15.1
+      Zeeshan Ali Khan <zeeshanak@gnome.org>
+      https://github.com/z-galaxy/zbus/
+  zvariant_utils 2.1.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>, turbocooler <turbocooler@cocaine.ninja>
+      https://github.com/dbus2/zbus/
+  zvariant_utils 4.2.0
+      Zeeshan Ali Khan <zeeshanak@gnome.org>, turbocooler <turbocooler@cocaine.ninja>
+      https://github.com/z-galaxy/zbus/
+
+------------------------------------------------------------------------------
+Apache-2.0 OR MIT  (19 crates)
+------------------------------------------------------------------------------
+
+  ascii 1.1.0
+      Thomas Bahn <thomas@thomas-bahn.net>, Torbjørn Birch Moltu <t.b.moltu@lyse.net>, Simon Sapin <simon.sapin@exyr.org>
+      https://github.com/tomprogrammer/rust-ascii
+  async-channel 2.5.0
+      Stjepan Glavina <stjepang@gmail.com>
+      https://github.com/smol-rs/async-channel
+  async-executor 1.14.1
+      Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net>
+      https://github.com/smol-rs/async-executor
+  async-io 2.6.0
+      Stjepan Glavina <stjepang@gmail.com>
+      https://github.com/smol-rs/async-io
+  async-lock 3.5.0
+      Stjepan Glavina <stjepang@gmail.com>
+      https://github.com/smol-rs/async-lock
+  async-process 2.5.0
+      Stjepan Glavina <stjepang@gmail.com>
+      https://github.com/smol-rs/async-process
+  async-signal 0.2.14
+      John Nunley <dev@notgull.net>
+      https://github.com/smol-rs/async-signal
+  async-task 4.7.1
+      Stjepan Glavina <stjepang@gmail.com>
+      https://github.com/smol-rs/async-task
+  atomic_refcell 0.1.14
+      Bobby Holley <bobbyholley@gmail.com>
+      https://github.com/mozilla/atomic_refcell
+  atomic-waker 1.1.2
+      Stjepan Glavina <stjepang@gmail.com>, Contributors to futures-rs
+      https://github.com/smol-rs/atomic-waker
+  blocking 1.7.0
+      The blocking authors
+      https://github.com/smol-rs/blocking
+  concurrent-queue 2.5.0
+      Stjepan Glavina <stjepang@gmail.com>, Taiki Endo <te316e89@gmail.com>, John Nunley <dev@notgull.net>
+      https://github.com/smol-rs/concurrent-queue
+  event-listener 5.4.2
+      Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net>
+      https://github.com/smol-rs/event-listener
+  event-listener-strategy 0.5.4
+      John Nunley <dev@notgull.net>
+      https://github.com/smol-rs/event-listener-strategy
+  futures-lite 2.6.1
+      Stjepan Glavina <stjepang@gmail.com>, Contributors to futures-rs
+      https://github.com/smol-rs/futures-lite
+  libappindicator 0.9.0
+      The libappindicator authors
+  libappindicator-sys 0.9.0
+      The libappindicator-sys authors
+  parking 2.2.1
+      Stjepan Glavina <stjepang@gmail.com>, The Rust Project Developers
+      https://github.com/smol-rs/parking
+  polling 3.11.0
+      Stjepan Glavina <stjepang@gmail.com>, John Nunley <dev@notgull.net>
+      https://github.com/smol-rs/polling
+
+------------------------------------------------------------------------------
+Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT  (2 crates)
+------------------------------------------------------------------------------
+
+  linux-raw-sys 0.12.1
+      Dan Gohman <dev@sunfishcode.online>
+      https://github.com/sunfishcode/linux-raw-sys
+  rustix 1.1.6
+      Dan Gohman <dev@sunfishcode.online>, Jakub Konka <kubkon@jakubkonka.com>
+      https://github.com/bytecodealliance/rustix
+
+------------------------------------------------------------------------------
+Apache-2.0/MIT  (2 crates)
+------------------------------------------------------------------------------
+
+  dbus 0.9.12
+      David Henningsson <diwic@ubuntu.com>
+      https://github.com/diwic/dbus-rs
+  libdbus-sys 0.2.7
+      David Henningsson <diwic@ubuntu.com>
+      https://github.com/diwic/dbus-rs
+
+------------------------------------------------------------------------------
+MIT/Apache-2.0  (2 crates)
+------------------------------------------------------------------------------
+
+  four-cc 0.4.0
+      David Holroyd <dave@badgers-in-foil.co.uk>
+      https://github.com/dholroyd/four-cc
+  option-operations 0.5.0
+      François Laignel <fengalin@free.fr>
+      https://github.com/fengalin/option-operations
+
+------------------------------------------------------------------------------
+(MIT OR Apache-2.0) AND IJG  (1 crate)
+------------------------------------------------------------------------------
+
+  jpeg-encoder 0.6.1
+      Volker Ströbel <volkerstroebel@mysurdity.de>
+      https://github.com/vstroebel/jpeg-encoder
+
+------------------------------------------------------------------------------
+BSD-2-Clause OR Apache-2.0 OR MIT  (1 crate)
+------------------------------------------------------------------------------
+
+  zerocopy 0.8.63
+      The zerocopy authors
+      https://github.com/google/zerocopy
+
+------------------------------------------------------------------------------
+ISC  (1 crate)
+------------------------------------------------------------------------------
+
+  libloading 0.7.4
+      Simonas Kazlauskas <libloading@kazlauskas.me>
+      https://github.com/nagisa/rust_libloading/
+------------------------------------------------------------------------------
+Licence texts for the Linux-only crates
+------------------------------------------------------------------------------
+
+ISC: libloading 0.7.4
+
+    Quoted from libloading 0.7.4 LICENSE:
+
+    Copyright © 2015, Simonas Kazlauskas
+
+    Permission to use, copy, modify, and/or distribute this software for any purpose with or without
+    fee is hereby granted, provided that the above copyright notice and this permission notice appear
+    in all copies.
+
+    THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS
+    SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+    AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+    NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+    THIS SOFTWARE.
+
+IJG: jpeg-encoder 0.6.1
+
+This software is based in part on the work of the Independent JPEG Group:
+jpeg-encoder carries a port of part of its code. No licence file for that part
+ships with the crate; its conditions are in the header of its src/fdct.rs.
+
+    Quoted from jpeg-encoder 0.6.1 src/fdct.rs:
+
+    This file was part of the Independent JPEG Group's software:
+    Copyright (C) 1991-1996, Thomas G. Lane.
+    libjpeg-turbo Modifications:
+    Copyright (C) 2015, 2020, D. R. Commander.
+
+    Conditions of distribution and use:
+    In plain English:
+
+    1. We don't promise that this software works.  (But if you find any bugs,
+       please let us know!)
+    2. You can use this software for whatever you want.  You don't have to pay us.
+    3. You may not pretend that you wrote this software.  If you use it in a
+       program, you must acknowledge somewhere in your documentation that
+       you've used the IJG code.
+
+    In legalese:
+
+    The authors make NO WARRANTY or representation, either express or implied,
+    with respect to this software, its quality, accuracy, merchantability, or
+    fitness for a particular purpose.  This software is provided "AS IS", and you,
+    its user, assume the entire risk as to its quality and accuracy.
+
+    This software is copyright (C) 1991-2020, Thomas G. Lane, Guido Vollbeding.
+    All Rights Reserved except as specified below.
+
+    Permission is hereby granted to use, copy, modify, and distribute this
+    software (or portions thereof) for any purpose, without fee, subject to these
+    conditions:
+    (1) If any part of the source code for this software is distributed, then this
+    README file must be included, with this copyright and no-warranty notice
+    unaltered; and any additions, deletions, or changes to the original files
+    must be clearly indicated in accompanying documentation.
+    (2) If only executable code is distributed, then the accompanying
+    documentation must state that "this software is based in part on the work of
+    the Independent JPEG Group".
+    (3) Permission for use of this software is granted only if the user accepts
+    full responsibility for any undesirable consequences; the authors accept
+    NO LIABILITY for damages of any kind.
+
+    These conditions apply to any software derived from or based on the IJG code,
+    not just to the unmodified library.  If you use our work, you ought to
+    acknowledge us.
+
+    Permission is NOT granted for the use of any IJG author's name or company name
+    in advertising or publicity relating to this software or products derived from
+    it.  This software may be referred to only as "the Independent JPEG Group's
+    software".
+
+    We specifically permit and encourage the use of this software as the basis of
+    commercial products, provided that all warranty or liability claims are
 
 ==============================================================================
 End of third-party notices.

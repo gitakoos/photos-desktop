@@ -1,0 +1,147 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The clip of a Live Photo or a motion photo: the video over the still, and the controls. */
+.lbx-motion {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+/* The clip fills the box the still is drawn in, and the still steps aside while it plays. */
+.lbx-stage.clip-playing .pv-img {
+  opacity: 0;
+}
+.lbx-motion-video {
+  position: absolute;
+  top: 28px;
+  left: 28px;
+  width: calc(100% - 56px);
+  height: calc(100% - 56px);
+  object-fit: contain;
+  border-radius: 6px;
+  opacity: 0;
+  pointer-events: none;
+}
+.lbx-motion-video.on {
+  opacity: 1;
+}
+.lbx-motion-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 15px 0 10px;
+  border: 0.5px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(28, 28, 30, 0.72);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.lbx-motion-pill:hover {
+  background: rgba(48, 48, 52, 0.85);
+}
+.lbx-motion-pill.playing {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+.lbx-motion-pill:focus-visible,
+.lbx-motion-snd:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.lbx-motion-ring {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+}
+.lbx-motion-ring svg.r {
+  position: absolute;
+  inset: 0;
+  transform: rotate(-90deg);
+}
+.lbx-motion-ring circle.t {
+  stroke: rgba(255, 255, 255, 0.35);
+}
+.lbx-motion-ring circle.f {
+  stroke: #fff;
+  stroke-dasharray: 62.8;
+  stroke-dashoffset: 62.8;
+  animation: lbx-motion-ring 3s linear forwards;
+}
+@keyframes lbx-motion-ring {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.lbx-motion-snd {
+  position: absolute;
+  right: 14px;
+  bottom: 16px;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 0.5px solid rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  background: rgba(28, 28, 30, 0.72);
+  color: #fff;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.lbx-motion-snd:hover {
+  background: rgba(48, 48, 52, 0.85);
+}
+.lbx-motion-hint {
+  position: absolute;
+  left: 14px;
+  bottom: 24px;
+  max-width: 28%;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.lbx-motion-hint.err {
+  color: var(--error);
+}
+@media (max-width: 760px) {
+  .lbx-motion-hint {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lbx-motion-ring circle.f {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}

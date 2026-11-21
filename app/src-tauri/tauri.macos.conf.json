@@ -1,0 +1,20 @@
+{
+  "bundle": {
+    "targets": ["app", "dmg"],
+    "category": "Photography",
+    "externalBin": [],
+    "resources": {
+      "../../sidecar/build/": "sidecar/",
+      "binaries/macos/sidecar-runtime": "sidecar-runtime",
+      "binaries/ffmpeg-macos/": "ffmpeg/",
+      "../../LICENSE": "LICENSE",
+      "../../THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt",
+      "../../NODE-LICENSE.txt": "NODE-LICENSE.txt"
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.5",
+      "signingIdentity": "-",
+      "hardenedRuntime": false
+    }
+  }
+}

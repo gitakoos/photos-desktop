@@ -31,7 +31,7 @@ import { CalendarIcon, LockIcon, VisibilityIcon } from "../components/icons";
 import { SelectionBar } from "../hooks/useSelection";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { useT } from "../lib/i18n";
-import { isWindows } from "../lib/platform";
+import { hasOsLock, isMac } from "../lib/platform";
 import type { Album } from "./Albums";
 import "../styles/Hidden.css";
 
@@ -79,14 +79,14 @@ export function Hidden({
   const [menu, setMenu] = useState<{ x: number; y: number; album?: Album; uid?: string } | null>(null);
   const asked = useRef(false);
 
-  // Linux has no Windows Hello: the page asks for the local lock's password instead.
+  // Linux has no Windows Hello or Touch ID: the page asks for the local lock's password instead.
   const [lockKind] = useLocalLockKind();
 
   async function unlock() {
-    if (asking || !isWindows) return;
+    if (asking || !hasOsLock) return;
     setAsking(true);
     try {
-      const answer = await invoke<Verification>("hello_verify", { message: t("hidden.helloPrompt") });
+      const answer = await invoke<Verification>("hello_verify", { message: t(isMac ? "hidden.helloPromptMac" : "hidden.helloPrompt") });
       if (answer === "verified") onAccess("verified");
       else if (answer === "unavailable") onAccess("unprotected");
     } catch {
@@ -118,7 +118,7 @@ export function Hidden({
           <LockIcon size={30} />
         </span>
         <h2 className="hd-locktitle">{t("hidden.title")}</h2>
-        {isWindows ? (
+        {hasOsLock ? (
           <>
             <p className="hd-locktext">{t("hidden.authPrompt")}</p>
             <button className="hd-unlock" onClick={() => void unlock()} disabled={asking}>
@@ -142,7 +142,7 @@ export function Hidden({
 
   return (
     <div className="hd-page">
-      {access === "unprotected" && <p className="hd-note">{t("hidden.noHello")}</p>}
+      {access === "unprotected" && <p className="hd-note">{t(isMac ? "hidden.noHelloMac" : "hidden.noHello")}</p>}
 
       {albums.length === 0 && photos.length === 0 ? (
         <div className="g-empty">

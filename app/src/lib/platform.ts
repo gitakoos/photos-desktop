@@ -27,3 +27,13 @@
 // Filter integration, the tray and the self-updater is Windows-only, which is exactly
 // what `isWindows` guards; the Linux build has its own file-manager drive instead.
 export const isWindows = /windows/i.test(navigator.userAgent);
+
+// WKWebView (the macOS build) reports "Macintosh". The Linux-only integrations, the
+// file-manager drive and running on after the window closes, are hidden there; every other
+// non-Windows branch still serves macOS as it serves Linux.
+export const isMac = !isWindows && /macintosh|mac os x/i.test(navigator.userAgent);
+export const isLinux = !isWindows && !isMac;
+
+// The OS itself confirms it is the account's owner: Windows Hello, or Touch ID with the Mac's
+// password behind it. Linux has no such prompt for an app, so its locks use a password of their own.
+export const hasOsLock = isWindows || isMac;

@@ -129,7 +129,7 @@ export function ProfileMenu({
       {/* Linux has no tray, and closing the window can leave the app running for the
           file-manager drive, so quitting for real lives here. */}
       {!isWindows && (
-        <button className="pm-item" onClick={() => void invoke("quit_app")}>
+        <button className="pm-item" onClick={() => void invoke("request_quit")}>
           <PowerIcon size={15} />
           {t("menu.quit")}
         </button>

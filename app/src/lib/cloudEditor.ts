@@ -26,6 +26,8 @@ import type { EditorSource } from "./localFile";
 /** The source metadata the saved copy carries, handed back by the editor at save time. */
 export type CloudEditMeta = {
   name: string;
+  /** A copy that is not an edit of one photo (a collage) is saved as `<fileStem>_<stamp>.jpg`. */
+  fileStem?: string;
   captureTime: number | null;
   camera: string | null;
   latitude: number | null;
@@ -41,11 +43,12 @@ export const cloudEditorSource = (uid: string) => rpc<EditorSource>("cloudEditor
 
 /**
  * Save an edited cloud photo as a new node on the timeline, carrying the source's date,
- * place and camera. Resolves with the new node's uid once it has uploaded. The original
- * is never touched: Drive has no in-place overwrite for a photo.
+ * place and camera, and into `albumUid` when the editor was opened from an album. Resolves
+ * with the new node's uid once it has uploaded; `albumFailed` means the copy is saved but
+ * not in the album. The original is never touched: Drive has no in-place overwrite for a photo.
  */
-export const saveCloudEdit = (jpegBase64: string, meta: CloudEditMeta) =>
-  rpc<{ uid: string }>("saveCloudEdit", { jpegBase64, meta });
+export const saveCloudEdit = (jpegBase64: string, meta: CloudEditMeta, albumUid?: string) =>
+  rpc<{ uid: string; albumFailed?: boolean }>("saveCloudEdit", { jpegBase64, meta, albumUid });
 
 /**
  * Whether the cloud editor can open this photo. The sidecar decodes with sharp, which has

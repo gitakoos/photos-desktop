@@ -147,7 +147,7 @@ export function geometryWarp(
  * sampled bilinearly at each output pixel's centre. A point that lands just past an edge
  * takes the edge's colour; one well outside the picture stays transparent.
  */
-export function warpPixels(src: Uint8ClampedArray, w: number, h: number, m: Mat3): Uint8ClampedArray {
+export function warpPixels(src: Uint8ClampedArray, w: number, h: number, m: Mat3): Uint8ClampedArray<ArrayBuffer> {
   const out = new Uint8ClampedArray(w * h * 4);
   const inv = invert3(m);
   if (!inv) return out;

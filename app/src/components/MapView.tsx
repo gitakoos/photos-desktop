@@ -24,6 +24,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { useThumbnails } from "../hooks/useThumbnails";
+import { cachedThumbnail } from "../lib/thumbStore";
 import { useLang, useT } from "../lib/i18n";
 import { groupByCity, loadCities, type Place } from "../lib/geocoder";
 import citiesUrl from "../assets/geo/cities15000.tsv?url";
@@ -35,6 +36,9 @@ import "../styles/Map.css";
 export type MapPoint = { uid: string; lat: number; lon: number; captureTime: number };
 
 type Pin = { key: string; lat: number; lon: number; uids: string[]; cover: string };
+
+/** How long after a zoom's last step the pins are grouped again for the new zoom. */
+const REGROUP_AFTER_MS = 180;
 
 /** How close, in screen pixels at the current zoom, two photos are to share a pin. */
 const PIN_CELL_PX = 76;
@@ -153,18 +157,32 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
   const moved = useRef(false);
+  /** Set while the map moves by itself (framing the photos, following its box), not by the user. */
+  const byApp = useRef(false);
   const pointsRef = useRef<MapPoint[]>([]);
+  /**
+   * Runs a move the app makes by itself, so it is not taken for the user's. Its zooms are not
+   * animated: an animated zoom starts a frame later, outside this, and would count as the user's.
+   */
+  const asApp = (move: () => void) => {
+    byApp.current = true;
+    try {
+      move();
+    } finally {
+      byApp.current = false;
+    }
+  };
   /** Frames every photo, or the whole world when there are none yet. */
   const frame = () => {
     const map = mapRef.current;
     if (!map) return;
     const pts = pointsRef.current;
     if (pts.length === 0) {
-      map.fitBounds(WORLD);
+      asApp(() => map.fitBounds(WORLD, { animate: false }));
       return;
     }
     const bounds = L.latLngBounds(pts.map((p) => [p.lat, p.lon] as [number, number]));
-    map.fitBounds(bounds, { padding: [60, 60], maxZoom: FIT_MAX_ZOOM });
+    asApp(() => map.fitBounds(bounds, { padding: [60, 60], maxZoom: FIT_MAX_ZOOM, animate: false }));
   };
   const [pins, setPins] = useState<Pin[]>([]);
   const onOpenRef = useRef(onOpen);
@@ -191,12 +209,18 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     }).addTo(map);
     layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
-    map.setMinZoom(fillZoom(map));
+    asApp(() => map.setMinZoom(fillZoom(map)));
     // The map follows its box: a new size sets a new widest zoom, and frames the photos
     // again until the user has moved the map themselves.
     const sized = new ResizeObserver(() => {
-      map.invalidateSize();
-      map.setMinZoom(fillZoom(map));
+      asApp(() => {
+        map.invalidateSize();
+        // Not setMinZoom: below the new floor it zooms with an animation, and the floor holds
+        // at once.
+        const floor = fillZoom(map);
+        map.options.minZoom = floor;
+        if (map.getZoom() < floor) map.setZoom(floor, { animate: false });
+      });
       if (!moved.current) frame();
     });
     sized.observe(host.current);
@@ -204,10 +228,18 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
       moved.current = true;
     };
     map.on("dragstart", touched);
+    // Any zoom the app did not make is the user's: the buttons, a double-click, the keys, a
+    // pinch, as well as the wheel. Left unmarked, the next batch of photos framed the map again
+    // and threw it back to where it was.
+    map.on("zoomstart", () => {
+      if (!byApp.current) touched();
+    });
     map.getContainer().addEventListener("wheel", touched, { passive: true });
     return () => {
       sized.disconnect();
       map.remove();
+      // Their layer goes with the map: a map made again starts with no pins drawn.
+      markers.current.clear();
       mapRef.current = null;
       layerRef.current = null;
     };
@@ -218,28 +250,80 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     const map = mapRef.current;
     if (!map) return;
     pointsRef.current = points;
-    const regroup = () => setPins(pinsAt(map, points));
+    // The zoom the pins were last grouped for.
+    let grouped = map.getZoom();
+    const regroup = () => {
+      grouped = map.getZoom();
+      setPins(pinsAt(map, points));
+    };
     if (!moved.current) frame();
     regroup();
-    map.on("zoomend", regroup);
+    // Once the zoom has settled, not at the end of each step of it: a turn of the wheel is
+    // several quick steps, and pins grouped again after each one drew every grouping in
+    // between for a frame or two, the pins of a moment ago coming and going. Between, the
+    // pins ride the map's own zoom as they are.
+    let settle: ReturnType<typeof setTimeout> | undefined;
+    const regroupSoon = () => {
+      clearTimeout(settle);
+      settle = setTimeout(regroup, REGROUP_AFTER_MS);
+    };
+    const holdOff = () => clearTimeout(settle);
+    // A flight cut short (by a drag, say) ends with no zoomend: the zoom it stopped at is
+    // grouped once the map has stopped.
+    const checkZoom = () => {
+      if (map.getZoom() !== grouped) regroupSoon();
+    };
+    map.on("zoomend", regroupSoon);
+    map.on("zoomstart", holdOff);
+    map.on("moveend", checkZoom);
     return () => {
-      map.off("zoomend", regroup);
+      clearTimeout(settle);
+      map.off("zoomend", regroupSoon);
+      map.off("zoomstart", holdOff);
+      map.off("moveend", checkZoom);
     };
   }, [points]);
 
   const covers = useThumbnails(useMemo(() => pins.map((p) => p.cover), [pins]));
 
+  // The pins on the map, kept from one change to the next: a pin still there keeps its marker,
+  // and only one whose picture or count changed is drawn again. Clearing and rebuilding them
+  // all at every zoom and every arriving picture made them blink.
+  const markers = useRef(new Map<string, { marker: L.Marker; html: string; uids: string[] }>());
   useEffect(() => {
     const layer = layerRef.current;
     if (!layer) return;
-    layer.clearLayers();
+    const kept = markers.current;
+    const now = new Set<string>();
     for (const pin of pins) {
-      const marker = L.marker([pin.lat, pin.lon], {
-        icon: L.divIcon({ className: "map-pinwrap", html: pinHtml(covers[pin.cover], pin.uids.length), iconSize: [56, 64], iconAnchor: [28, 64] }),
-        keyboard: false,
-      });
-      marker.on("click", () => onOpenRef.current(pin.uids));
-      layer.addLayer(marker);
+      // By its newest photo and how many it holds, not by the grid cell of this zoom: a pin
+      // that is the same group at the next zoom keeps its marker and picture, and moves.
+      const key = `${pin.cover}|${pin.uids.length}`;
+      now.add(key);
+      // The picture from the shared cache at once when the hook has not handed it over yet:
+      // a pin drawn empty and filled a frame later blinked.
+      const html = pinHtml(covers[pin.cover] ?? cachedThumbnail(pin.cover), pin.uids.length);
+      const icon = () => L.divIcon({ className: "map-pinwrap", html, iconSize: [56, 64], iconAnchor: [28, 64] });
+      const have = kept.get(key);
+      if (have) {
+        have.uids = pin.uids;
+        const at = have.marker.getLatLng();
+        if (at.lat !== pin.lat || at.lng !== pin.lon) have.marker.setLatLng([pin.lat, pin.lon]);
+        if (have.html !== html) {
+          have.marker.setIcon(icon());
+          have.html = html;
+        }
+        continue;
+      }
+      const entry = { marker: L.marker([pin.lat, pin.lon], { icon: icon(), keyboard: false }), html, uids: pin.uids };
+      entry.marker.on("click", () => onOpenRef.current(entry.uids));
+      layer.addLayer(entry.marker);
+      kept.set(key, entry);
+    }
+    for (const [key, entry] of kept) {
+      if (now.has(key)) continue;
+      layer.removeLayer(entry.marker);
+      kept.delete(key);
     }
   }, [pins, covers]);
 

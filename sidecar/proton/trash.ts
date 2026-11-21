@@ -20,12 +20,11 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-// Trash: what was trashed, putting it back, and the one action the app cannot
-// undo.
+// Trash: what was trashed, putting it back, and destroying it for good.
 //
 // Every call here is scoped to the photos volume, because the SDK resolves the
-// volume from the client's own root share: `emptyTrash` on the Photos client
-// reaches the photos trash and cannot touch My files.
+// volume from the client's own root share: a node uid from the Photos client's
+// trash listing reaches the photos trash and cannot touch My files.
 //
 // Restore and delete report per node the way `trashNodes` does, so one node's
 // failure never sinks the batch. The SDK owns the batching (100 uids a request)
@@ -57,7 +56,7 @@ export type TrashResult = NodeOpResult;
  * The listing yields uids alone, so names and capture times need a second pass
  * over `iterateNodes` (the same batched lookup the search index uses). Albums
  * land in the trash beside photos and restore just as well, so both are listed:
- * hiding one would leave `emptyTrash` a victim the view never showed.
+ * hiding one would leave Empty trash a victim the view never showed.
  */
 export async function listTrashed(photos: any): Promise<TrashItem[]> {
   const uids: string[] = [];
@@ -103,8 +102,99 @@ export async function deletePhotosForever(photos: any, uids: string[]): Promise<
   return collectResults(photos.deleteNodes(uids));
 }
 
-/** Destroys the whole photos trash. Same finality, whole volume at once. */
-export async function emptyTrash(photos: any): Promise<{ emptied: boolean }> {
-  await photos.emptyTrash();
-  return { emptied: true };
+/**
+ * Empty trash: destroys what the window listed and nothing else. A node trashed since,
+ * on another device, stays for the user to see first, and one put back since is left
+ * where it is. Same finality as `deletePhotosForever`.
+ */
+export async function emptyTrash(photos: any, listed: string[]): Promise<TrashResult[]> {
+  const shown = new Set(listed);
+  const still: string[] = [];
+  if (shown.size === 0) return [];
+  for await (const uid of withStallGuard(
+    photos.iterateTrashedNodeUids(),
+    SDK_STALL_MS,
+    "iterateTrashedNodeUids",
+  )) {
+    if (shown.has(uid as string)) still.push(uid as string);
+  }
+  if (still.length === 0) return [];
+  return collectResults(photos.deleteNodes(still));
+}
+
+/** How many of `uids` the trash still holds (all it holds without them), read without decrypting any. */
+export async function countTrashed(photos: any, uids?: string[]): Promise<number> {
+  const wanted = uids ? new Set(uids) : null;
+  let count = 0;
+  for await (const uid of withStallGuard(
+    photos.iterateTrashedNodeUids(),
+    SDK_STALL_MS,
+    "iterateTrashedNodeUids",
+  )) {
+    if (!wanted || wanted.has(uid as string)) count++;
+  }
+  return count;
+}
+
+/** How long a read of the trash stands for the next one. */
+const TRASH_FRESH_MS = 20_000;
+
+/**
+ * The trash, read once for everyone who asks at about the same time.
+ *
+ * Two readers want it together: the window warming its Trash view, and the file
+ * manager's drive listing what is in the trash beside the library. Each read lists every
+ * trashed uid and then decrypts every node, which on a large trash runs to tens of
+ * seconds. A read under way is joined rather than started again, and a finished one
+ * stands for a short while, until the app itself changes the trash.
+ */
+export class TrashListing {
+  private read: { rows: Promise<TrashItem[]>; generation: number; at: number | null } | null = null;
+  private generation = 0;
+
+  constructor(
+    private freshMs = TRASH_FRESH_MS,
+    private now: () => number = Date.now,
+  ) {}
+
+  /**
+   * The trash: a read under way is joined, and a finished one is taken while it is fresh,
+   * unless `joinOnly`, for a caller that promises the trash as it is now (the Trash view on
+   * arrival): it shares a read still running but never takes a finished one.
+   */
+  get(load: () => Promise<TrashItem[]>, joinOnly = false): Promise<TrashItem[]> {
+    const read = this.read;
+    const usable =
+      read &&
+      read.generation === this.generation &&
+      (read.at === null || (!joinOnly && this.now() - read.at < this.freshMs));
+    if (usable) return read.rows;
+    const mine: { rows: Promise<TrashItem[]>; generation: number; at: number | null } = {
+      rows: Promise.resolve([]),
+      generation: this.generation,
+      at: null,
+    };
+    mine.rows = load().then(
+      (rows) => {
+        mine.at = this.now();
+        return rows;
+      },
+      (e) => {
+        // A failed read is not kept: the next caller tries again.
+        if (this.read === mine) this.read = null;
+        throw e;
+      },
+    );
+    this.read = mine;
+    return mine.rows;
+  }
+
+  /**
+   * The trash has changed (a photo trashed, restored or deleted, the trash emptied, an
+   * album deleted) or the session is going: no read from before this stands after it.
+   */
+  changed(): void {
+    this.generation++;
+    this.read = null;
+  }
 }

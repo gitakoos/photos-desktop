@@ -62,7 +62,13 @@ use file_assoc::{APP_EXE, APP_NAME, LEGACY_APP_EXE, PACK_ID};
 #[path = "../../../app/src-tauri/src/autostart.rs"]
 pub mod autostart;
 
-const VERSION: &str = "1.3.0";
+// The hold on this installer's own executable, compiled from the app's source: the app
+// holds the update installer it starts by the same rules.
+#[cfg(windows)]
+#[path = "../../../app/src-tauri/src/file_hold.rs"]
+mod file_hold;
+
+const VERSION: &str = "1.4.0";
 const PUBLISHER: &str = "Akoos";
 const DATA_DIR_NAME: &str = "eu.akoos.photos.desktop"; // where the app keeps its vault/caches
 
@@ -100,6 +106,40 @@ mod quit_tests {
         assert!(script.contains("Name='photosforproton.exe'"));
         assert!(script.contains(r"StartsWith('C:\Users\O''Brien\AppData\Local\Photos for Proton\'"));
         assert!(!script.contains("__"));
+    }
+}
+
+#[cfg(test)]
+mod sync_root_tests {
+    use super::{chosen_sync_root, on_chosen_volume};
+    use std::path::PathBuf;
+
+    fn default() -> PathBuf {
+        PathBuf::from(r"C:\Users\ann\Proton Photos")
+    }
+
+    #[test]
+    fn nothing_stored_is_the_default_place() {
+        assert_eq!(chosen_sync_root(None, default()), default());
+        for bad in ["", "  ", "Photos", r"\\server\share\Photos"] {
+            assert_eq!(chosen_sync_root(Some(bad.to_string()), default()), default());
+        }
+    }
+
+    #[test]
+    fn a_stored_place_is_the_one_used() {
+        assert_eq!(
+            chosen_sync_root(Some(r"E:\Proton Photos".to_string()), default()),
+            PathBuf::from(r"E:\Proton Photos")
+        );
+    }
+
+    #[test]
+    fn a_stored_volume_must_be_the_one_present() {
+        assert!(on_chosen_volume(None, None));
+        assert!(on_chosen_volume(Some(7), Some(7)));
+        assert!(!on_chosen_volume(Some(7), Some(8)));
+        assert!(!on_chosen_volume(Some(7), None));
     }
 }
 
@@ -174,6 +214,62 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_uninstaller_is_copied_whole_from_the_handle() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("pfp-self-copy-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("setup.exe");
+        let dest = dir.join("uninstall.exe");
+        fs::write(&src, b"the installer's own bytes").unwrap();
+        // A longer leftover is replaced, not written over in part.
+        fs::write(&dest, b"an older and longer uninstaller left behind").unwrap();
+        let mut handle = fs::File::open(&src).unwrap();
+        let mut head = [0u8; 4];
+        handle.read_exact(&mut head).unwrap();
+        copy_from_handle(&handle, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"the installer's own bytes");
+        drop(handle);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_copy_cut_short_leaves_the_previous_uninstaller() {
+        let dir = std::env::temp_dir().join(format!("pfp-self-copy-fail-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("setup.exe");
+        let dest = dir.join("uninstall.exe");
+        fs::write(&src, b"the installer's own bytes").unwrap();
+        fs::write(&dest, b"the uninstaller that works").unwrap();
+        // Opened for writing only, so every read from it fails.
+        let handle = fs::OpenOptions::new().write(true).open(&src).unwrap();
+        assert!(copy_from_handle(&handle, &dest).is_err());
+        drop(handle);
+        assert_eq!(fs::read(&dest).unwrap(), b"the uninstaller that works");
+        let left: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The running test binary stands in for the running installer: its own exe can be
+    /// held, and what comes out of the hold is that exe.
+    #[cfg(windows)]
+    #[test]
+    fn the_running_exe_is_held_and_copied_from_its_hold() {
+        let dest = std::env::temp_dir().join(format!("pfp-self-hold-test-{}.bin", std::process::id()));
+        copy_self_to(&dest).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), fs::read(&exe).unwrap());
+        let moved = exe.with_extension("moved");
+        if fs::rename(&exe, &moved).is_ok() {
+            let _ = fs::rename(&moved, &exe);
+            panic!("held, the exe cannot be renamed away");
+        }
+        let _ = fs::remove_file(&dest);
+    }
 
     #[test]
     fn only_a_version_that_knows_quit_is_asked_to_quit() {
@@ -537,6 +633,59 @@ fn mode() -> String {
     }
 }
 
+/// This installer's own executable, held from the start of the run to its end, or why it
+/// could not be. The uninstaller is copied out of this handle rather than from the file by
+/// name: the installer runs from a folder anything of this user's can write to (Downloads,
+/// or TEMP for an update), where the running exe could be renamed away and another file
+/// put under its name before the copy. Held, it can be neither renamed nor changed.
+/// Never taken by an uninstall, which moves its own exe out of the folder it removes.
+#[cfg(windows)]
+static SELF_EXE: std::sync::OnceLock<Result<fs::File, String>> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn held_self() -> Result<&'static fs::File, String> {
+    SELF_EXE
+        .get_or_init(|| {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            file_hold::hold(&exe).map_err(|e| format!("this installer: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
+/// Writes this installer to `dest`, read through its hold.
+#[cfg(windows)]
+fn copy_self_to(dest: &Path) -> Result<(), String> {
+    copy_from_handle(held_self()?, dest)
+}
+
+#[cfg(not(windows))]
+fn copy_self_to(dest: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    fs::copy(&exe, dest).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Writes everything behind `src` to a new `dest`, from the start of the file wherever
+/// the handle was left, replacing what `dest` held. The copy is written beside `dest` and
+/// moved over it once whole, so one cut short leaves the previous `dest` working.
+fn copy_from_handle(src: &fs::File, dest: &Path) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom};
+    let mut src = src;
+    src.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let written = fs::File::create(&part).and_then(|mut out| {
+        std::io::copy(&mut src, &mut out)?;
+        out.sync_all()
+    });
+    if let Err(e) = written.and_then(|()| fs::rename(&part, dest)) {
+        let _ = fs::remove_file(&part);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
 /// Where an update started by the running app stands: "running", "done", or
 /// "failed: <reason>". The work runs on its own from `run()`, so it happens even if
 /// the window never draws; the window only shows it.
@@ -876,9 +1025,8 @@ fn install_impl(
     carry_data(&install_data_dir(&target));
 
     // Copy ourselves in as the uninstaller.
-    let self_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let uninstaller = target.join("uninstall.exe");
-    fs::copy(&self_exe, &uninstaller).map_err(|e| format!("copy uninstaller: {e}"))?;
+    copy_self_to(&uninstaller).map_err(|e| format!("copy uninstaller: {e}"))?;
 
     let app_exe = target.join(APP_EXE);
     if desktop {
@@ -973,9 +1121,8 @@ fn upgrade_impl(install: &Path, relaunch: bool) -> Result<bool, String> {
     autostart::repoint(&app_exe);
 
     // Refresh the uninstaller (this newer exe) and the Add/Remove-Programs entry.
-    let self_exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let uninstaller = install.join("uninstall.exe");
-    let _ = fs::copy(&self_exe, &uninstaller);
+    let _ = copy_self_to(&uninstaller);
     // The entry's version is what the next update installer checks itself against, so
     // one left behind refuses every later update. Not a reason to fail this one, whose
     // files are already in place, but tried again and written down if it still fails.
@@ -1053,11 +1200,55 @@ fn remove_uninstall_entry() {
 #[cfg(not(windows))]
 fn remove_uninstall_entry() {}
 
-/// The Explorer sync root: `%USERPROFILE%\Proton Photos` (must match the app's
-/// `cloud_mount::sync_root_path`).
+/// The place the app's Settings stored for the Explorer folder, if it is a place the folder can
+/// be: an absolute path on this PC. Anything else is no choice, and the default stands.
+#[cfg(any(windows, test))]
+fn chosen_sync_root(stored: Option<String>, default: PathBuf) -> PathBuf {
+    match stored.map(|s| PathBuf::from(s.trim())) {
+        Some(path) if path.is_absolute() && !path.to_string_lossy().starts_with(r"\\") => path,
+        _ => default,
+    }
+}
+
+/// Whether the folder's volume is the one it was chosen on. A folder with no volume stored is
+/// on the default place, which is always there.
+#[cfg(any(windows, test))]
+fn on_chosen_volume(stored: Option<u32>, actual: Option<u32>) -> bool {
+    match stored {
+        None => true,
+        Some(serial) => actual == Some(serial),
+    }
+}
+
+/// The serial number of the volume a path is on.
 #[cfg(windows)]
-fn sync_root_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Proton Photos")
+fn volume_serial(path: &Path) -> Option<u32> {
+    use windows::core::HSTRING;
+    use windows::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    let mut root = [0u16; 261];
+    unsafe { GetVolumePathNameW(&HSTRING::from(path.as_os_str()), &mut root) }.ok()?;
+    let len = root.iter().position(|&c| c == 0)?;
+    let mut serial = 0u32;
+    let root = HSTRING::from_wide(&root[..len]);
+    unsafe { GetVolumeInformationW(&root, None, Some(&mut serial), None, None, None) }.ok()?;
+    Some(serial)
+}
+
+/// The Explorer sync root, read the way the app reads it (`cloud_mount::sync_root_path`): the
+/// place chosen in its Settings, else `%USERPROFILE%\Proton Photos`. None when the chosen place is
+/// on a drive that is not there, or on another disk that took its letter: nothing is touched then.
+#[cfg(windows)]
+fn sync_root_path() -> Option<std::path::PathBuf> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let default = std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default()).join("Proton Photos");
+    let key = RegKey::predef(HKEY_CURRENT_USER).open_subkey(app_prefs_key()).ok();
+    let stored = key.as_ref().and_then(|k| k.get_value::<String, _>("SyncRoot").ok());
+    let chosen = stored.is_some();
+    let root = chosen_sync_root(stored, default);
+    // A volume stored without a place belongs to nothing.
+    let volume = key.as_ref().and_then(|k| k.get_value::<u32, _>("SyncRootVolume").ok()).filter(|_| chosen);
+    on_chosen_volume(volume, volume_serial(&root)).then_some(root)
 }
 
 /// Settle every file in the sync root into something that stands on its own,
@@ -1076,7 +1267,9 @@ fn sync_root_path() -> std::path::PathBuf {
 ///     Never delete something that might be holding the only copy.
 #[cfg(windows)]
 fn detach_sync_root() {
-    let root = sync_root_path();
+    let Some(root) = sync_root_path() else {
+        return;
+    };
     if !root.is_dir() {
         return;
     }
@@ -1623,6 +1816,12 @@ pub fn run() {
     //   setup.exe --silent            install to the default location + shortcuts
     //   uninstall.exe --uninstall --silent   remove everything, no prompt
     let args: Vec<String> = std::env::args().collect();
+    // Taken now and kept until exit, so the exe the uninstaller is copied from later is
+    // the one that started.
+    #[cfg(windows)]
+    if !is_uninstall() {
+        let _ = held_self();
+    }
     // The running app's updater: it has already quit, so bring it back up when the
     // payload is in place. The window below shows this while it runs.
     if is_update() {

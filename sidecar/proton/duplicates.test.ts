@@ -21,7 +21,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
@@ -34,11 +34,12 @@ import {
   deletableExtras,
   fingerprintOf,
   groupKey,
+  listingSettled,
   withListingTap,
   type DuplicateSource,
 } from "./duplicates.ts";
 import { COLOR_BYTES, distance, type Fingerprint } from "./pdq.ts";
-import { initStore, setDataKey } from "./store.ts";
+import { DUPLICATES_FILE, initStore, setDataKey, storeDir } from "./store.ts";
 
 beforeAll(() => {
   initStore(mkdtempSync(join(tmpdir(), "pfp-dup-")));
@@ -291,6 +292,97 @@ describe("the duplicate finder", () => {
   });
 });
 
+describe("saving the fingerprints while a scan runs", () => {
+  it("saves about once a minute, not every few hundred photos, and keeps what was saved through a crash", async () => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-dup-")));
+    const photos = Array.from({ length: 700 }, (_, i) => ({ uid: `v~p${i}`, look: i }));
+    const file = join(storeDir(), DUPLICATES_FILE);
+    let clock = 0;
+    let made = 0;
+    const seen = new Map<number, boolean>();
+    let crashAt = 650;
+    let first: DuplicateFinder | null = null;
+    const asked: string[] = [];
+    const source: DuplicateSource = {
+      list: async () => photos.map((p, i) => ({ uid: p.uid, captureTime: i })),
+      async *thumbnails(uids) {
+        for (const uid of uids) {
+          asked.push(uid);
+          yield { uid, bytes: Buffer.from(String(photos.find((p) => p.uid === uid)!.look)) };
+        }
+      },
+    };
+    // Each fingerprint takes a tenth of a second on the finder's clock.
+    const fingerprint = async (b: Buffer) => {
+      clock += 100;
+      made++;
+      seen.set(made, existsSync(file));
+      if (made === crashAt) first?.setSource(null);
+      return fpOf(Number(b.toString()));
+    };
+    first = new DuplicateFinder(fingerprint, true, 0, 0, 60_000, () => clock);
+    first.setSource(source);
+    first.start();
+    await first.settled();
+    // Not at 240 or 480 photos, as before: the first save comes once a minute's work is done.
+    expect(seen.get(300)).toBe(false);
+    expect(seen.get(590)).toBe(false);
+    expect(seen.get(640)).toBe(true);
+
+    // Cut off at 650: a restart reads again only what came after the save.
+    crashAt = -1;
+    asked.length = 0;
+    const second = new DuplicateFinder(fingerprint, true, 0, 0, 60_000, () => clock);
+    second.setSource(source);
+    second.start();
+    await second.settled();
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.length).toBeLessThanOrEqual(700 - 600);
+  });
+});
+
+describe("a hidden photo", () => {
+  it("leaves every group the moment it is hidden, also from another device, and comes back when shown", async () => {
+    const hidden = new Set<string>();
+    let version = 0;
+    const photos = [
+      { uid: "v~a", t: 1, look: 5 },
+      { uid: "v~b", t: 2, look: 5 },
+      { uid: "v~c", t: 3, look: 5 },
+      { uid: "v~d", t: 4, look: 7 },
+      { uid: "v~e", t: 5, look: 7 },
+    ];
+    const source: DuplicateSource = {
+      list: async () => photos.map((p) => ({ uid: p.uid, captureTime: p.t })),
+      async *thumbnails(uids) {
+        for (const uid of uids) yield { uid, bytes: Buffer.from(String(photos.find((p) => p.uid === uid)!.look)) };
+      },
+      hiddenTest: () => (uid) => hidden.has(uid),
+      hiddenVersion: () => version,
+    };
+    const f = new DuplicateFinder(async (bytes) => fpOf(Number(bytes.toString())), false, 0, 0);
+    f.setSource(source);
+    f.start();
+    await f.settled();
+    expect(f.groups().similar.map((g) => g.uids)).toEqual([["v~a", "v~b", "v~c"], ["v~d", "v~e"]]);
+    const before = f.getStatus().version;
+
+    hidden.add("v~b");
+    hidden.add("v~d");
+    version++;
+    // The window sees a new version, and reads groups without the hidden ones.
+    expect(f.getStatus().version).not.toBe(before);
+    expect(f.groups().similar.map((g) => g.uids)).toEqual([["v~a", "v~c"]]);
+    // A group that held a hidden photo is no longer one the trash may act on as it was.
+    const trashNodes = async (uids: string[]) => uids.map((uid) => ({ uid, ok: true }));
+    expect((await f.trash([{ uids: ["v~a", "v~b", "v~c"], keep: ["v~a"] }], [], trashNodes, allThere)).skipped).toBe(1);
+
+    hidden.clear();
+    version++;
+    expect(f.groups().similar.map((g) => g.uids)).toEqual([["v~a", "v~b", "v~c"], ["v~d", "v~e"]]);
+  });
+});
+
 describe("the listing tap", () => {
   it("reads the content hashes of a timeline page and leaves the answer whole for the library", async () => {
     const pages: [string, unknown][] = [];
@@ -307,6 +399,41 @@ describe("the listing tap", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(pages).toEqual([["V=", body]]);
     expect(typeof tapped.fetchBlob).toBe("function");
+  });
+
+  it("can be waited for until every page read is taken in", async () => {
+    const pages: string[] = [];
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const client = {
+      fetchJson: async (_req: { url: string; method: string }) =>
+        ({
+          ok: true,
+          clone: () => ({ json: async () => (await slow, { Photos: [] }) }),
+        }) as unknown as Response,
+    };
+    const tapped = withListingTap(client, (v) => pages.push(v));
+    await tapped.fetchJson({ url: "https://drive-api.proton.me/drive/volumes/V/photos", method: "GET" });
+    let settled = false;
+    const waiting = listingSettled().then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+    release();
+    await waiting;
+    expect(pages).toEqual(["V"]);
+  });
+
+  it("notes every photo it went through, with a content hash or without", () => {
+    const f = new DuplicateFinder(async () => null, false, 0, 0);
+    f.setSource({ list: async () => [], async *thumbnails() {} });
+    f.takeListing("v", listing([["a", "h1"], ["b", null]]));
+    f.takeListing("v", { Photos: [{ LinkID: "c", ContentHash: "h3", RelatedPhotos: [{ ContentHash: "hv" }] }] });
+    expect([...f.listedUids()].sort()).toEqual(["v~a", "v~b", "v~c"]);
+    expect(f.contentHashEntries()).toEqual([
+      ["v~a", "h1"],
+      ["v~c", "h3"],
+      ["v~c", "hv"],
+    ]);
   });
 });
 

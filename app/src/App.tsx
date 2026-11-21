@@ -34,12 +34,14 @@ import { Photos } from "./views/Photos";
 import { LoginCard } from "./components/LoginCard";
 import { Lock } from "./views/Lock";
 import { AppLock } from "./components/AppLock";
-import { SignOutConfirm } from "./components/SignOutConfirm";
+import { SignOutConfirm, SignOutSaving, SignOutUnsaved } from "./components/SignOutConfirm";
+import { Confirm } from "./components/Confirm";
 import { rpc } from "./lib/rpc";
+import { requestSignOut } from "./lib/signOut";
 import { applyTheme, type ThemeMode } from "./lib/theme";
 import { useT } from "./lib/i18n";
 import "./styles/App.css";
-import { isWindows } from "./lib/platform";
+import { hasOsLock, isMac, isWindows } from "./lib/platform";
 
 type Phase = "credentials" | "browser" | "protect" | "offline";
 type MenuState = { x: number; y: number } | null;
@@ -66,6 +68,10 @@ const BROWSER_POLL_MS = 500;
 const REOPEN_AFTER_MS = 4000;
 /** As the sidecar requires of a password of the user's own. */
 const MIN_APP_PASSWORD = 8;
+/** How long a sign-out waits for the shared backup's save before it asks what to do. */
+const SIGN_OUT_SAVE_MS = 90_000;
+/** What the save before a sign-out answers: whether a round still runs, and the kinds not on Drive. */
+type SignOutSave = { done: boolean; unsaved: string[] };
 /** The sign-in message for a session that lapsed, kept as its key (see `shownStatus`). */
 const SESSION_ENDED = "login.sessionEnded";
 
@@ -121,6 +127,21 @@ function App() {
   const shownStatus = status === SESSION_ENDED ? t(SESSION_ENDED) : status;
   const [menu, setMenu] = useState<MenuState>(null);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  // The sign-out under way: saving what it deletes to Drive, or asking what to do with what could
+  // not be saved (`unsaved`, empty while a save still runs past the wait).
+  const [signingOut, setSigningOut] = useState<null | { saving: true } | { unsaved: string[] }>(null);
+  /** Counts the sign-outs started; a wait the user cancelled stops at its next step. */
+  const signOutRun = useRef(0);
+  /** Set when the sidecar did not confirm a sign-out: the account stays open and this says so. */
+  const [signOutFailed, setSignOutFailed] = useState(false);
+  // A Quit asked for while an upload or import runs (the host asks this only on a Mac).
+  const [confirmQuit, setConfirmQuit] = useState(false);
+  useEffect(() => {
+    const off = listen("quit-requested", () => setConfirmQuit(true));
+    return () => {
+      void off.then((f) => f());
+    };
+  }, []);
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   // The browser sign-in's button turns into "open the page again" a moment after it starts.
   const [reopenReady, setReopenReady] = useState(false);
@@ -130,10 +151,11 @@ function App() {
   const [protection, setProtection] = useState<"hello" | "password" | "device">("password");
   // A password of the user's own is set on a step of its own, after the choice.
   const [protectStep, setProtectStep] = useState<"choose" | "password">("choose");
-  // Windows Hello is offered for the sign-in, and picked first, where it can answer here.
+  // Windows Hello (Touch ID on a Mac) is offered for the sign-in, and picked first, where it can
+  // answer here.
   const [helloReady, setHelloReady] = useState(false);
   useEffect(() => {
-    if (!isWindows) return;
+    if (!hasOsLock) return;
     void invoke<boolean>("hello_available")
       .then((ready) => {
         setHelloReady(ready);
@@ -498,7 +520,7 @@ function App() {
     }
     if (protection === "hello") {
       // Hello answers once here, so nobody keeps a lock they cannot open.
-      const answer = await invoke<string>("hello_verify", { message: t("appLock.prompt") }).catch(() => "failed");
+      const answer = await invoke<string>("hello_verify", { message: t(isMac ? "appLock.promptMac" : "appLock.prompt") }).catch(() => "failed");
       if (answer !== "verified") return;
     }
     setBusy(true);
@@ -523,9 +545,52 @@ function App() {
     setBusy(false);
   }
 
-  /** Forget the account. The sidecar deletes the saved session and vault; here we relock the UI. */
-  async function signOut() {
-    await rpc("signOut").catch(() => {});
+  /**
+   * Sign-out deletes the labels, the hidden list, the faces and the synced settings on this PC, so
+   * what of them is not on Drive goes there first, the window showing the wait. What could not be
+   * saved is the user's to decide: try again, or sign out and lose it.
+   */
+  async function saveThenSignOut() {
+    const run = ++signOutRun.current;
+    setSigningOut({ saving: true });
+    const until = Date.now() + SIGN_OUT_SAVE_MS;
+    let answer: SignOutSave = { done: true, unsaved: [] };
+    try {
+      answer = await rpc<SignOutSave>("signOutSave", { waitMs: 1000, start: true });
+      while (!answer.done && Date.now() < until && signOutRun.current === run) {
+        answer = await rpc<SignOutSave>("signOutSave", { waitMs: 1000, start: false });
+      }
+    } catch {
+      // The sidecar did not answer: the sign-out itself still refuses to delete what is not on Drive.
+    }
+    if (signOutRun.current !== run) return;
+    if (!answer.done || answer.unsaved.length > 0) {
+      setSigningOut({ unsaved: answer.done ? answer.unsaved : [] });
+      return;
+    }
+    await signOut(false);
+  }
+
+  function cancelSignOut() {
+    signOutRun.current++;
+    setSigningOut(null);
+  }
+
+  /**
+   * Forget the account. The sidecar deletes the saved session and vault; here we relock the UI.
+   * Without `discard`, a change not on Drive yet holds the sign-out and the question comes back.
+   */
+  async function signOut(discard = false) {
+    const outcome = await requestSignOut(rpc, discard);
+    if (outcome.kind === "held") {
+      setSigningOut({ unsaved: outcome.unsaved });
+      return;
+    }
+    setSigningOut(null);
+    if (outcome.kind === "failed") {
+      setSignOutFailed(true);
+      return;
+    }
     setEmail(null);
     setLocked(null);
     setHelloLocked(false);
@@ -554,7 +619,7 @@ function App() {
     e.preventDefault();
     setStatus("");
     if (moveChoice === "hello") {
-      const answer = await invoke<string>("hello_verify", { message: t("appLock.prompt") }).catch(() => "failed");
+      const answer = await invoke<string>("hello_verify", { message: t(isMac ? "appLock.promptMac" : "appLock.prompt") }).catch(() => "failed");
       if (answer !== "verified") return;
     }
     setBusy(true);
@@ -804,8 +869,8 @@ function App() {
                     onChange={() => setMoveChoice("hello")}
                   />
                   <span>
-                    <strong>{t("protect.hello")}</strong>
-                    <small>{t("protect.helloDesc")}</small>
+                    <strong>{t(isMac ? "protect.helloMac" : "protect.hello")}</strong>
+                    <small>{t(isMac ? "protect.helloDescMac" : "protect.helloDesc")}</small>
                   </span>
                 </label>
               )}
@@ -830,7 +895,7 @@ function App() {
                 />
                 <span>
                   <strong>{t("protect.device")}</strong>
-                  <small>{t(isWindows ? "protect.deviceDesc" : "protect.deviceDescLinux")}</small>
+                  <small>{t(isWindows ? "protect.deviceDesc" : isMac ? "protect.deviceDescMac" : "protect.deviceDescLinux")}</small>
                 </span>
               </label>
               <button type="submit" disabled={busy}>
@@ -920,8 +985,8 @@ function App() {
                       onChange={() => setProtection("hello")}
                     />
                     <span>
-                      <strong>{t("protect.hello")}</strong>
-                      <small>{t("protect.helloDesc")}</small>
+                      <strong>{t(isMac ? "protect.helloMac" : "protect.hello")}</strong>
+                      <small>{t(isMac ? "protect.helloDescMac" : "protect.helloDesc")}</small>
                     </span>
                   </label>
                 )}
@@ -946,7 +1011,7 @@ function App() {
                   />
                   <span>
                     <strong>{t("protect.device")}</strong>
-                    <small>{t(isWindows ? "protect.deviceDesc" : "protect.deviceDescLinux")}</small>
+                    <small>{t(isWindows ? "protect.deviceDesc" : isMac ? "protect.deviceDescMac" : "protect.deviceDescLinux")}</small>
                   </span>
                 </label>
                 <button type="submit" disabled={busy}>
@@ -1007,9 +1072,49 @@ function App() {
         <SignOutConfirm
           onConfirm={() => {
             setConfirmSignOut(false);
-            void signOut();
+            void saveThenSignOut();
           }}
           onCancel={() => setConfirmSignOut(false)}
+        />
+      )}
+
+      {signingOut && "saving" in signingOut && <SignOutSaving onCancel={cancelSignOut} />}
+      {signingOut && "unsaved" in signingOut && (
+        <SignOutUnsaved
+          unsaved={signingOut.unsaved}
+          locked={locked !== null}
+          onRetry={() => void saveThenSignOut()}
+          onSignOut={() => {
+            signOutRun.current++;
+            void signOut(true);
+          }}
+          onCancel={cancelSignOut}
+        />
+      )}
+
+      {signOutFailed && (
+        <Confirm
+          title={t("profile.signOut")}
+          message={t("signOut.failed")}
+          confirmLabel={t("common.close")}
+          noCancel
+          onConfirm={() => setSignOutFailed(false)}
+          onCancel={() => setSignOutFailed(false)}
+        />
+      )}
+
+      {confirmQuit && (
+        <Confirm
+          title={t("quit.busyTitle")}
+          message={t("quit.busyMessage")}
+          confirmLabel={t("quit.anyway")}
+          danger
+          irreversible
+          onConfirm={() => {
+            setConfirmQuit(false);
+            void invoke("quit_app");
+          }}
+          onCancel={() => setConfirmQuit(false)}
         />
       )}
 

@@ -39,6 +39,7 @@ import {
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { ClipTokenizer, CONTEXT_LENGTH } from "./clipTokenizer.ts";
+import { OrtSession, tensor } from "./ortSession.ts";
 import { storeDir } from "./store.ts";
 
 /**
@@ -231,7 +232,7 @@ export function removeModel(): ModelStatus {
 // ---- The text encoder ----
 
 let tokenizer: ClipTokenizer | null = null;
-let session: any = null;
+let session: OrtSession | null = null;
 /** Whether the model on disk was checked against its digest in this run. The native runtime
  *  parses it, so a file changed on disk since the download is never handed to it. */
 let verified = false;
@@ -275,10 +276,9 @@ export async function encodeText(text: string): Promise<Float32Array | null> {
   if (!modelReady()) return null;
   if (!session) {
     if (!(await modelIntact())) return null;
-    const ort = await import("onnxruntime-node");
     // Basic optimisation, as on the phone: the extended fusions are not what the model was
     // checked under.
-    session = await ort.InferenceSession.create(modelPath(), {
+    session = await OrtSession.open(modelPath(), {
       graphOptimizationLevel: "basic",
       executionProviders: ["cpu"],
       // Warnings only say which half-precision constants could not be folded ahead of time.
@@ -287,16 +287,16 @@ export async function encodeText(text: string): Promise<Float32Array | null> {
   }
   if (idle) clearTimeout(idle);
   idle = setTimeout(closeEncoder, ENCODER_IDLE_MS);
-  const ort = await import("onnxruntime-node");
+  const open: OrtSession = session;
   const ids = tokenizerOnce().encode(text);
-  const input = session.inputNames[0];
-  const meta = session.inputMetadata?.[0];
-  const tensor =
+  const input = open.inputNames[0];
+  const meta = open.inputMetadata?.[0];
+  const feed =
     meta?.type === "int64"
-      ? new ort.Tensor("int64", BigInt64Array.from(ids, (v) => BigInt(v)), [1, CONTEXT_LENGTH])
-      : new ort.Tensor("int32", ids, [1, CONTEXT_LENGTH]);
-  const output = await session.run({ [input]: tensor });
-  const raw = output[session.outputNames[0]].data as Float32Array;
+      ? tensor("int64", BigInt64Array.from(ids, (v) => BigInt(v)), [1, CONTEXT_LENGTH])
+      : tensor("int32", ids, [1, CONTEXT_LENGTH]);
+  const output = await open.run({ [input]: feed });
+  const raw = output[open.outputNames[0]].data as Float32Array;
   let norm = 0;
   for (const v of raw) norm += v * v;
   norm = Math.sqrt(norm);

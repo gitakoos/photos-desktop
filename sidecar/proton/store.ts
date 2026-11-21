@@ -34,6 +34,7 @@ import {
   createReadStream,
   createWriteStream,
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -88,6 +89,10 @@ export const PEOPLE_FILE = "people.enc";
  *  takes it. */
 export const SEARCH_DIR = "search";
 
+/** The theme assignments of the library and the embedded theme prompts (themes.ts). The
+ *  account's own data, so `wipeCache` takes it. */
+export const THEMES_DIR = "themes";
+
 /** What this install's copies on Drive held when last written (sharedBackup.ts). */
 export const BACKUP_STATE_FILE = "backup-state";
 
@@ -104,8 +109,19 @@ export const LABELS_DIR = "labels";
 export const DUPLICATES_FILE = "duplicates.enc";
 /** The photos and albums hidden on this computer (hidden.ts). The account's own, so `wipeCache` takes it. */
 export const HIDDEN_FILE = "hidden.enc";
+/** When each synced setting was last chosen here (settingsSync.ts). The account's own, so `wipeCache` takes it. */
+export const SETTINGS_SYNC_FILE = "settings-sync.enc";
+/** The photo order inside each album (albumOrder.ts). The account's own, so `wipeCache` takes it. */
+export const ALBUM_ORDER_FILE = "album-order.enc";
 /** Which original each lighter copy uploaded from here was made from (compressedUploads.ts). */
 export const COMPRESSED_UPLOADS_FILE = "compressed-uploads.enc";
+/** The user key ids of the account the store belongs to, so a sign-in again after the saved session
+ *  was lost can tell whether it is the same account. The account's own, so `wipeCache` takes it. */
+export const ACCOUNT_FILE = "account.enc";
+/** The last event of the photos volume taken in (photoEvents.ts). The account's own, so `wipeCache` takes it. */
+export const PHOTO_EVENTS_FILE = "photo-events.enc";
+/** The photos the face and search scan could not read (scanMisses.ts). The account's own, so `wipeCache` takes it. */
+export const SCAN_MISSES_FILE = "scan-misses.enc";
 
 let dataDir: string | null = null;
 let dataKey: Buffer | null = null;
@@ -211,16 +227,87 @@ export function wipeCache(): void {
     discardDir(join(dataDir, DRIVE_COPIES_DIR));
     discardDir(join(dataDir, FACES_DIR));
     discardDir(join(dataDir, SEARCH_DIR));
+    discardDir(join(dataDir, THEMES_DIR));
     discardDir(join(dataDir, LABELS_DIR));
     rmSync(join(dataDir, DEVICE_ID_FILE), { force: true });
     rmSync(join(dataDir, BACKUP_STATE_FILE), { force: true });
     rmSync(join(dataDir, BACKUP_FLAGS_FILE), { force: true });
     rmSync(join(dataDir, DUPLICATES_FILE), { force: true });
     rmSync(join(dataDir, HIDDEN_FILE), { force: true });
+    rmSync(join(dataDir, SETTINGS_SYNC_FILE), { force: true });
+    rmSync(join(dataDir, ALBUM_ORDER_FILE), { force: true });
     rmSync(join(dataDir, COMPRESSED_UPLOADS_FILE), { force: true });
+    rmSync(join(dataDir, ACCOUNT_FILE), { force: true });
+    rmSync(join(dataDir, PHOTO_EVENTS_FILE), { force: true });
+    rmSync(join(dataDir, SCAN_MISSES_FILE), { force: true });
+    // The files set aside as unreadable, and the vaults set aside whole, belong to the account
+    // as much as the ones above.
+    for (const name of readdirSync(dataDir)) {
+      if (name.includes(UNREADABLE_MARK)) rmSync(join(dataDir, name), { force: true });
+      else if (name.startsWith(SET_ASIDE_PREFIX)) discardDir(join(dataDir, name));
+    }
   } catch {
     /* best-effort */
   }
+}
+
+/** Names a folder holding a vault that was set aside whole (`setAsideVault`). */
+export const SET_ASIDE_PREFIX = "set-aside-";
+
+/**
+ * Moves the vault and everything sealed under its key into a folder of its own, kept rather than
+ * deleted, so a new vault starts clean beside it. For a vault this computer could not open with
+ * what was chosen: a keyring that lost its key, or a password not given again. Only a sign-out
+ * deletes it. `files` names the vault's own files (its meta) to move with the rest. Answers the
+ * folder, or null when nothing was there to move.
+ */
+export function setAsideVault(files: string[]): string | null {
+  if (!dataDir) return null;
+  const names = [
+    "thumbs",
+    "meta",
+    "originals",
+    OFFLINE_LIST_FILE,
+    SESSION_FILE,
+    ALBUM_MEMBERS_FILE,
+    DRIVE_COPIES_DIR,
+    FACES_DIR,
+    SEARCH_DIR,
+    THEMES_DIR,
+    LABELS_DIR,
+    DEVICE_ID_FILE,
+    BACKUP_STATE_FILE,
+    BACKUP_FLAGS_FILE,
+    DUPLICATES_FILE,
+    HIDDEN_FILE,
+    SETTINGS_SYNC_FILE,
+    ALBUM_ORDER_FILE,
+    COMPRESSED_UPLOADS_FILE,
+    ACCOUNT_FILE,
+    PHOTO_EVENTS_FILE,
+    SCAN_MISSES_FILE,
+    ...files,
+  ];
+  let present: string[];
+  try {
+    present = readdirSync(dataDir).filter((n) => names.includes(n) || n.includes(UNREADABLE_MARK));
+  } catch {
+    return null;
+  }
+  if (present.length === 0) return null;
+  const aside = join(dataDir, `${SET_ASIDE_PREFIX}${Date.now()}`);
+  mkdirSync(aside, { recursive: true });
+  for (const name of present) {
+    // A rename on the same disk, whatever a folder holds. One that cannot move (a file in it is
+    // open) stays where it is: nothing is deleted either way.
+    try {
+      renameSync(join(dataDir, name), join(aside, name));
+    } catch {
+      process.stderr.write(`[store] could not set aside ${name}\n`);
+    }
+  }
+  mkdirSync(thumbDir(), { recursive: true });
+  return aside;
 }
 
 export function seal(plain: Buffer): Buffer {
@@ -243,22 +330,34 @@ export function unseal(blob: Buffer): Buffer {
 }
 
 /**
- * Seal `plain` and publish it at `path` by writing aside and renaming, the way
- * `OriginalSealer` publishes a finished blob.
- *
- * The small sealed files are rewritten in place during ordinary use: the session on
- * every token refresh, the pin list on every pin. A bare write truncates the old blob
- * before it writes the new one, so a crash or a power cut mid-write leaves a file that
- * will never decrypt again. Renaming over the destination is atomic, so a reader sees
- * either the previous blob whole or the new one whole.
- *
- * Throws what the write threw, leaving the destination untouched; each caller decides
- * what a failure to persist costs it.
+ * Thrown by a read of the store while it is locked: the key that opens it is not here. The
+ * caller answers "locked" and tries again after the unlock; nothing on disk is touched, and
+ * nothing read this way may stand in for what the file holds.
  */
-export function writeSealedAtomic(path: string, plain: Buffer): void {
+export class StoreLockedError extends Error {
+  constructor() {
+    super("Locked");
+    this.name = "StoreLockedError";
+  }
+}
+
+/** Marks a sealed file set aside because it would not open under the store's key. */
+export const UNREADABLE_MARK = ".unreadable-";
+
+/**
+ * Writes `data` at `path` by writing aside, flushing to the disk and renaming over it, so a
+ * reader sees the previous file whole or the new one whole, never a torn one.
+ */
+export function writeFileAtomic(path: string, data: Buffer): void {
   const part = `${path}.part`;
   try {
-    writeFileSync(part, seal(plain));
+    const fd = openSync(part, "w");
+    try {
+      writeFileSync(fd, data);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(part, path);
   } catch (e) {
     try {
@@ -271,33 +370,70 @@ export function writeSealedAtomic(path: string, plain: Buffer): void {
 }
 
 /**
- * Read a sealed file, discarding it if it will not open. Null covers both outcomes, so
- * a caller handles "nothing saved" once.
+ * Seal `plain` and publish it at `path` by writing aside and renaming, the way
+ * `OriginalSealer` publishes a finished blob.
  *
- * The counterpart to `writeSealedAtomic`, and the reason a torn blob is survivable. A
- * file that fails to unseal is torn, or was written under a previous key; either way
- * nothing will ever read it again. Leaving it turns an unreadable kilobyte into a state
- * that fails identically on every retry, and the only way out of that is the one that
- * takes the whole cache with it. Dropping it makes the next start look like a first
- * start instead.
+ * The small sealed files are rewritten in place during ordinary use: the session on
+ * every token refresh, the pin list on every pin. A bare write truncates the old blob
+ * before it writes the new one, so a crash or a power cut mid-write leaves a file that
+ * will never decrypt again. Renaming over the destination is atomic, so a reader sees
+ * either the previous blob whole or the new one whole.
+ *
+ * The aside file is flushed to the disk before the rename. Without that a power cut soon
+ * after can leave the rename on disk but not the data it points at, an empty file in
+ * place of the previous blob; for the session that is a sign-in.
+ *
+ * Throws what the write threw, leaving the destination untouched; each caller decides
+ * what a failure to persist costs it. A locked store refuses before anything is written.
  */
-export function readSealedOrDiscard(path: string): Buffer | null {
-  if (!existsSync(path)) return null;
+export function writeSealedAtomic(path: string, plain: Buffer): void {
+  if (!dataKey) throw new StoreLockedError();
+  writeFileAtomic(path, seal(plain));
+}
+
+/**
+ * Moves a sealed file that would not open out of the way, under a name that says so, and
+ * keeps it: nothing reads it again, and the next write starts a fresh one in its place.
+ */
+function setAside(path: string): void {
   try {
-    return unseal(readFileSync(path));
+    renameSync(path, `${path}${UNREADABLE_MARK}${Date.now()}`);
   } catch {
-    // The discard is silent to the user by design, since it costs only a sign-in.
-    // Silent in the log too would mean an unexplained sign-in with nothing to look
-    // at, so the fact is recorded. The base name only: it names which of a handful
-    // of fixed files this was, and carries no uid or account.
-    process.stderr.write(`[store] discarded a sealed file that would not open: ${basename(path)}\n`);
-    try {
-      rmSync(path, { force: true });
-    } catch {
-      /* it fails to open the same way next time, and is dropped then */
-    }
+    /* left where it is: the next read sets it aside then */
+  }
+}
+
+/**
+ * Read a sealed file. Null when there is none, or when it will not open under the store's
+ * key; such a file is set aside, never deleted.
+ *
+ * Throws `StoreLockedError` while the store is locked, and touches nothing: without the key
+ * every file fails to open, and a locked read taken for an empty one is how a list was lost.
+ * A file that cannot be read at all (held open by another program) throws what the read threw.
+ *
+ * The key is set only once the vault has proved it (the password's verifier, or the meta file
+ * sealed for this account), so a blob it does not open is torn, or was written under a previous
+ * key. Leaving it in place would fail identically on every start; set aside, the next start looks
+ * like a first one for that file, and the file is still there.
+ */
+export function readSealedOrSetAside(path: string): Buffer | null {
+  if (!dataDir || !dataKey) throw new StoreLockedError();
+  if (!existsSync(path)) return null;
+  const blob = readFileSync(path);
+  try {
+    return unseal(blob);
+  } catch {
+    // The base name only: it names which of a handful of fixed files this was, and carries no
+    // uid or account.
+    process.stderr.write(`[store] set aside a sealed file that would not open: ${basename(path)}\n`);
+    setAside(path);
     return null;
   }
+}
+
+/** Rethrows a locked store's refusal, for a reader that answers anything else as "nothing saved". */
+export function rethrowLocked(e: unknown): void {
+  if (e instanceof StoreLockedError) throw e;
 }
 
 /** Content-addressed file name; the uid never appears in the clear on disk. */

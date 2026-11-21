@@ -112,3 +112,20 @@ export function loadCities(url: string): Promise<CityIndex> {
   }
   return shipped;
 }
+
+/** Towns whose name starts with `query`, then those that hold it, accents and case aside; the
+ *  shorter name first within each, so the town itself comes before its suburbs. */
+export function searchCities(index: CityIndex, query: string, limit: number): City[] {
+  const fold = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase().trim();
+  const q = fold(query);
+  if (!q) return [];
+  const starts: City[] = [];
+  const holds: City[] = [];
+  for (const c of index.cities) {
+    const name = fold(c.name);
+    if (name.startsWith(q)) starts.push(c);
+    else if (name.includes(q)) holds.push(c);
+  }
+  const byLength = (a: City, b: City) => a.name.length - b.name.length || a.name.localeCompare(b.name);
+  return [...starts.sort(byLength), ...holds.sort(byLength)].slice(0, limit);
+}

@@ -25,11 +25,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { rpc } from "../lib/rpc";
 import { isNewer } from "../lib/version";
 import { START_UPDATE_EVENT } from "../components/UpdateOverlay";
 import { autoUpdateOn, setAutoUpdate } from "../lib/updatePrefs";
-import { isWindows } from "../lib/platform";
+import { hasOsLock, isLinux, isMac, isWindows } from "../lib/platform";
 import { cardMatches, queryWords } from "../lib/settingsSearch";
 import { Confirm } from "../components/Confirm";
 import { LocalPasswordDialog, useLocalLockKind } from "../components/LocalPassword";
@@ -82,6 +83,7 @@ import { barColor, formatBytes, type Account } from "../components/ProfileMenu";
 import type { CompressionTier, VideoCodecChoice } from "../lib/compression";
 import type { Activity } from "../components/Sidebar";
 import type { LocalLabel } from "../hooks/useLocalLabels";
+import { searchOnOffer } from "../lib/driveModel";
 import { matchingLabels, sameLabel } from "../lib/labels";
 import { MyFilesPicker, type ChosenFile } from "../components/MyFilesPicker";
 import { unpinAllOffline, watchOffline, type OfflineStatus } from "../lib/offline";
@@ -98,6 +100,8 @@ import {
   type FaceScanStatus,
   type ScanSpeed,
 } from "../lib/localFaces";
+import type { AlbumLayout, AlbumPhotoOrder, AlbumSort } from "../lib/albumView";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/Settings.css";
 
 export type AppSettings = {
@@ -126,6 +130,14 @@ export type AppSettings = {
   zoom: number;
   /** Album-list zoom step, an index into the album card-size ladder (0 = smallest, the default). */
   albumZoom: number;
+  /** How the album list is ordered; rides the shared backup to the other devices. */
+  albumSort: AlbumSort;
+  /** The album list as cards or as rows. */
+  albumLayout: AlbumLayout;
+  /** The album list arrangement, as album link ids (older builds kept whole uids); rides the shared backup. */
+  albumOrder: string[];
+  /** The per-album photo order older builds kept here, handed once to the synced album order store. */
+  albumPhotoOrder: Record<string, AlbumPhotoOrder>;
   /** The desktop layout: the collapsible left sidebar and the top strip. Always on; the earlier
    *  bottom dock layout is no longer offered. */
   sidebarLayout: boolean;
@@ -133,13 +145,8 @@ export type AppSettings = {
   sidebarCollapsed: boolean;
   /** Pure black behind everything in dark mode, beside whichever palette. */
   amoled: boolean;
-  /** Read the people the phone saved to Drive. */
-  driveFaces: boolean;
   /** Read the labels the phone saved to Drive. */
   driveLabels: boolean;
-  /** Search by what a photo shows, from the index the phone saved to Drive. Off until asked for:
-   *  it downloads the text model. */
-  semanticSearch: boolean;
   /** Find the faces in the photos on this computer and group them into people. Off until
    *  asked for: it downloads the face models and reads every photo once. */
   localFaces: boolean;
@@ -149,10 +156,12 @@ export type AppSettings = {
   faceFindMore: boolean;
   /** How fast the scan for the faces and the search reads the library; null for the speed this PC starts at. */
   scanSpeed: ScanSpeed | null;
-  /** The shared backup on Proton Drive: the faces, the labels and this PC's search index, each
-   *  device's copy taken in before this one is saved. */
+  /** The shared backup on Proton Drive: the faces, the labels, the hidden items and this PC's search
+   *  index, each device's copy taken in before this one is saved. On, the people and the search
+   *  copies other devices saved are available here with the scan and the indexing off. */
   sharedBackup: boolean;
-  /** Index the photos for the search by what they show on this computer, with the phone's model. */
+  /** Index the photos for the search by what they show on this computer, with the phone's model.
+   *  Off until asked for: it downloads the models and reads every photo once. */
   localSearch: boolean;
   /** Let the app read the folders of My files, to bring their photos in. Off until asked for. */
   myFilesAccess: boolean;
@@ -171,6 +180,8 @@ export type AppSettings = {
   compressVideos: boolean;
   compressVideoTier: CompressionTier;
   compressCodec: VideoCodecChoice;
+  /** A file put in the Proton Photos folder is compressed too, the lighter copy kept there. */
+  compressLocal: boolean;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -185,12 +196,14 @@ export const DEFAULT_SETTINGS: AppSettings = {
   lang: BROWSER_LANG,
   zoom: 1,
   albumZoom: 0,
+  albumSort: "activity",
+  albumLayout: "grid",
+  albumOrder: [],
+  albumPhotoOrder: {},
   sidebarLayout: true,
   sidebarCollapsed: false,
   amoled: false,
-  driveFaces: false,
   driveLabels: true,
-  semanticSearch: false,
   localFaces: false,
   faceAutoMerge: false,
   faceFindMore: false,
@@ -207,6 +220,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   compressVideos: false,
   compressVideoTier: "balanced",
   compressCodec: "avc",
+  compressLocal: false,
 };
 
 const THEMES: { value: ThemeMode; labelKey: string }[] = [
@@ -248,10 +262,12 @@ const CATEGORIES: { key: Category; labelKey: string }[] = [
   { key: "storage", labelKey: "settings.storage" },
   ...(isWindows
     ? ([{ key: "fileTypes", labelKey: "settings.fileTypes" }] as { key: Category; labelKey: string }[])
-    : ([{ key: "explorer", labelKey: "settings.filesDrive" }] as {
-        key: Category;
-        labelKey: string;
-      }[])),
+    : isLinux
+      ? ([{ key: "explorer", labelKey: "settings.filesDrive" }] as {
+          key: Category;
+          labelKey: string;
+        }[])
+      : []),
   { key: "security", labelKey: "settings.security" },
   { key: "about", labelKey: "settings.about" },
 ];
@@ -296,10 +312,12 @@ const CATEGORY_DESCS: Record<Category, string> = {
   security: "settings.securityNav",
   about: "settings.aboutNav",
 };
-const CATEGORY_DESCS_LINUX: Partial<Record<Category, string>> = {
-  general: "settings.generalNavLinux",
-  explorer: "settings.explorerNavLinux",
-};
+const CATEGORY_DESCS_LINUX: Partial<Record<Category, string>> = isMac
+  ? { general: "settings.generalNavMac", storage: "settings.storageNavMac" }
+  : {
+      general: "settings.generalNavLinux",
+      explorer: "settings.explorerNavLinux",
+    };
 
 /** What is running now, in one line; the same readout the upload button gives. */
 function activityLine(activity: Activity | null, t: (key: string, values?: Record<string, string | number>) => string): string {
@@ -480,6 +498,68 @@ function StoragePane({
     };
   }, []);
 
+  // Where the Explorer folder is. Moving it is a pick, a check of the place, and a confirmation.
+  const [place, setPlace] = useState<ExplorerLocation | null>(null);
+  const [moving, setMoving] = useState(false);
+  const [pending, setPending] = useState<LocationCheck | null>(null);
+  const [placeNote, setPlaceNote] = useState<{ bad: boolean; text: string } | null>(null);
+  const readPlace = useCallback(() => {
+    void invoke<ExplorerLocation>("explorer_location").then(setPlace).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!isWindows) return;
+    readPlace();
+    const un = listen<ExplorerLocation>("explorer-location", (e) => setPlace(e.payload));
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [readPlace]);
+
+  async function chooseLocation() {
+    setPlaceNote(null);
+    const picked = await openDialog({ directory: true, multiple: false, defaultPath: place?.path }).catch(
+      () => null,
+    );
+    if (typeof picked !== "string") return;
+    const check = await invoke<LocationCheck>("check_explorer_location", { path: picked }).catch(() => null);
+    if (!check) {
+      setPlaceNote({ bad: true, text: t("settings.folderMoveFail.other") });
+      return;
+    }
+    if (!check.ok) {
+      const reason = FOLDER_REJECTS.find((r) => r === check.reason) ?? "unreadable";
+      setPlaceNote({ bad: true, text: t(`settings.folderReject.${reason}`) });
+      return;
+    }
+    setPending(check);
+  }
+
+  async function moveLocation(check: LocationCheck) {
+    setPending(null);
+    setMoving(true);
+    setPlaceNote(null);
+    try {
+      const moved = await invoke<{ path: string; left: number }>("move_explorer_location", { path: check.path });
+      const left =
+        moved.left > 0
+          ? t(moved.left === 1 ? "settings.folderMovedLeft.one" : "settings.folderMovedLeft.other", {
+              count: moved.left,
+            })
+          : "";
+      setPlaceNote({ bad: false, text: [t("settings.folderMoved", { path: moved.path }), left].filter(Boolean).join(" ") });
+    } catch (e) {
+      const code = String(e);
+      const known = FOLDER_MOVE_FAILS.find((f) => f === code) ?? "other";
+      setPlaceNote({
+        bad: true,
+        text: code === "driveMissing" ? t("settings.folderLocationMissing") : t(`settings.folderMoveFail.${known}`),
+      });
+    }
+    setMoving(false);
+    readPlace();
+    void measure();
+  }
+
   // What the folder keeps on this PC by itself, and how the download of it stands.
   const [keep, setKeep] = useState<KeepStatus | null>(null);
   const [askAll, setAskAll] = useState<KeepEstimate | null>(null);
@@ -639,6 +719,27 @@ function StoragePane({
                 />
               </label>
             )}
+            {/* Where the folder is kept. A drive that is not connected pauses the folder, and the row says so. */}
+            {explorer && (
+              <div className="st-row">
+                <span className="st-row-ico" aria-hidden>
+                  <ComputerIcon size={18} />
+                </span>
+                <div className="st-text">
+                  <div className="st-label">{t("settings.folderLocation")}</div>
+                  <div className="st-desc st-address">{place?.path ?? ""}</div>
+                  {place && !place.available && <div className="st-desc bad">{t("settings.folderLocationMissing")}</div>}
+                </div>
+                <button
+                  className="st-row-btn"
+                  disabled={place === null || moving || place.moving || !place.available}
+                  onClick={() => void chooseLocation()}
+                >
+                  {moving || place?.moving ? t("settings.folderLocationMoving") : t("settings.folderLocationChange")}
+                </button>
+              </div>
+            )}
+            {explorer && placeNote && <p className={`st-note${placeNote.bad ? " bad" : ""}`}>{placeNote.text}</p>}
             {restartNeeded && (
               <div className="st-restart">
                 <span>{t("settings.restartNeeded")}</span>
@@ -757,6 +858,22 @@ function StoragePane({
         />
       )}
 
+      {pending && (
+        <Confirm
+          title={t("confirm.moveFolderTitle")}
+          message={[
+            t("confirm.moveFolderMessage", { path: pending.path }),
+            pending.adjusted ? t("confirm.moveFolderAdjusted") : "",
+            pending.free !== null ? t("confirm.moveFolderFree", { free: formatBytes(pending.free) }) : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          confirmLabel={t("confirm.moveFolderConfirm")}
+          onConfirm={() => void moveLocation(pending)}
+          onCancel={() => setPending(null)}
+        />
+      )}
+
       {confirmingOffline && (
         <Confirm
           title={t("confirm.removeOfflineAllTitle")}
@@ -769,6 +886,27 @@ function StoragePane({
     </div>
   );
 }
+
+/** Where the Explorer folder is, as the host reports it. */
+type ExplorerLocation = { path: string; isDefault: boolean; available: boolean; moving: boolean };
+
+/** What the host says about a picked place: where the folder would go and the room there, or why not. */
+type LocationCheck = { ok: boolean; reason: string | null; path: string; free: number | null; adjusted: boolean };
+
+/** The reasons a place is refused, each with its own text. */
+const FOLDER_REJECTS = [
+  "network",
+  "notNtfs",
+  "unreadable",
+  "same",
+  "insideCurrent",
+  "containsCurrent",
+  "otherSyncRoot",
+  "notEmpty",
+] as const;
+
+/** The steps of a move that have a text of their own; any other failure reads as the last. */
+const FOLDER_MOVE_FAILS = ["busy", "unregister", "clean", "other"] as const;
 
 type KeepMode = "off" | "new" | "all";
 const KEEP_MODES: KeepMode[] = ["off", "new", "all"];
@@ -1187,10 +1325,10 @@ export function Settings({
   function askLocalPassword(change = false): Promise<boolean> {
     return new Promise((resolve) => setPasswordAsk({ change, resolve }));
   }
-  // Whether Windows Hello can answer here, so the app lock is offered only where it can.
+  // Whether Windows Hello (Touch ID on a Mac) can answer here, so the app lock is offered only where it can.
   const [helloReady, setHelloReady] = useState(false);
   useEffect(() => {
-    if (!isWindows) return;
+    if (!hasOsLock) return;
     invoke<boolean>("hello_available")
       .then(setHelloReady)
       .catch(() => {});
@@ -1202,9 +1340,9 @@ export function Settings({
    */
   async function helloSays(needed: boolean, turningOn = false): Promise<boolean> {
     if (!needed) return true;
-    // Linux has no Windows Hello: the local lock's password guards the same changes.
-    if (!isWindows) return askLocalPassword();
-    const answer = await invoke<string>("hello_verify", { message: t("appLock.prompt") }).catch(() => "failed");
+    // Linux has no Windows Hello or Touch ID: the local lock's password guards the same changes.
+    if (!hasOsLock) return askLocalPassword();
+    const answer = await invoke<string>("hello_verify", { message: t(isMac ? "appLock.promptMac" : "appLock.prompt") }).catch(() => "failed");
     return answer === "verified" || (answer === "unavailable" && !turningOn);
   }
   async function pickReopenLock(next: "off" | "password" | "hello") {
@@ -1231,7 +1369,7 @@ export function Settings({
       </span>
       <div className="st-text">
         <div className="st-label">{t("settings.lockOnMinimize")}</div>
-        <div className="st-desc">{t("settings.lockOnMinimizeDesc")}</div>
+        <div className="st-desc">{t(isMac ? "settings.lockOnMinimizeDescMac" : "settings.lockOnMinimizeDesc")}</div>
       </div>
       <input
         className="st-switch"
@@ -1248,7 +1386,7 @@ export function Settings({
       </span>
       <div className="st-text">
         <div className="st-label">{t("settings.lockAfter")}</div>
-        <div className="st-desc">{t("settings.lockAfterDesc")}</div>
+        <div className="st-desc">{t(isMac ? "settings.lockAfterDescMac" : "settings.lockAfterDesc")}</div>
       </div>
       <div className="st-seg" role="group" aria-label={t("settings.lockAfter")}>
         {LOCK_AFTER.map((secs) => (
@@ -1460,7 +1598,7 @@ export function Settings({
                     </button>
                     {langOpen && (
                       <>
-                        <div className="st-dropdown-scrim" onClick={() => setLangOpen(false)} />
+                        <div className="st-dropdown-scrim" {...backdropClose(() => setLangOpen(false), false)} />
                         <ul className="st-dropdown-menu" role="listbox">
                           {LANGS.map((l) => (
                             <li key={l.value}>
@@ -1527,36 +1665,38 @@ export function Settings({
               <div className="st-rows">
                 {/* Starting at sign-in. Windows starts in the tray; Linux has no tray,
                     so there it opens the window, and the text says which. */}
-                <label className="st-row">
-                  <span className="st-row-ico" aria-hidden>
-                    <PowerIcon size={18} />
-                  </span>
-                  <div className="st-text">
-                    <div className="st-label">
-                      {t(isWindows ? "settings.launchAtLogin" : "settings.launchAtLoginLinux")}
+                {!isMac && (
+                  <label className="st-row">
+                    <span className="st-row-ico" aria-hidden>
+                      <PowerIcon size={18} />
+                    </span>
+                    <div className="st-text">
+                      <div className="st-label">
+                        {t(isWindows ? "settings.launchAtLogin" : "settings.launchAtLoginLinux")}
+                      </div>
+                      <div className="st-desc">
+                        {t(isWindows ? "settings.launchAtLoginDesc" : "settings.launchAtLoginLinuxDesc")}
+                      </div>
                     </div>
-                    <div className="st-desc">
-                      {t(isWindows ? "settings.launchAtLoginDesc" : "settings.launchAtLoginLinuxDesc")}
-                    </div>
-                  </div>
-                  <input
-                    className="st-switch"
-                    type="checkbox"
-                    checked={launchAtLogin}
-                    onChange={(e) => {
-                      const on = e.currentTarget.checked;
-                      // Shown as set only once it is set: this one writes outside the
-                      // app, so a refused write has to move the switch back rather
-                      // than leave it saying something that is not true.
-                      setLaunchAtLogin(on);
-                      void invoke("set_launch_at_login", { enabled: on }).catch(() =>
-                        setLaunchAtLogin(!on),
-                      );
-                    }}
-                  />
-                </label>
+                    <input
+                      className="st-switch"
+                      type="checkbox"
+                      checked={launchAtLogin}
+                      onChange={(e) => {
+                        const on = e.currentTarget.checked;
+                        // Shown as set only once it is set: this one writes outside the
+                        // app, so a refused write has to move the switch back rather
+                        // than leave it saying something that is not true.
+                        setLaunchAtLogin(on);
+                        void invoke("set_launch_at_login", { enabled: on }).catch(() =>
+                          setLaunchAtLogin(!on),
+                        );
+                      }}
+                    />
+                  </label>
+                )}
                 {/* Linux only: Windows always keeps running in the tray. */}
-                {!isWindows && (
+                {isLinux && (
                   <label className="st-row">
                     <span className="st-row-ico" aria-hidden>
                       <PowerIcon size={18} />
@@ -1599,7 +1739,7 @@ export function Settings({
               </div>
             )}
 
-            {category === "explorer" && !isWindows && <FilesDrivePane />}
+            {category === "explorer" && isLinux && <FilesDrivePane />}
 
             {category === "fileTypes" && <FileTypesPane />}
 
@@ -1610,19 +1750,37 @@ export function Settings({
                     <LockIcon size={18} />
                   </span>
                   <div className="st-text">
-                    <div className="st-label">{t(isWindows ? "settings.deviceProtected" : "settings.deviceProtectedLinux")}</div>
-                    <div className="st-desc">{t(isWindows ? "settings.deviceProtectedDesc" : "settings.deviceProtectedDescLinux")}</div>
+                    <div className="st-label">
+                      {t(isWindows ? "settings.deviceProtected" : isMac ? "settings.deviceProtectedMac" : "settings.deviceProtectedLinux")}
+                    </div>
+                    <div className="st-desc">
+                      {t(
+                        isWindows
+                          ? "settings.deviceProtectedDesc"
+                          : isMac
+                            ? "settings.deviceProtectedDescMac"
+                            : "settings.deviceProtectedDescLinux",
+                      )}
+                    </div>
                   </div>
                 </div>
-                {isWindows && (
+                {hasOsLock && (
                   <label className={`st-row${!helloReady && !settings.helloLock ? " off" : ""}`}>
                     <span className="st-row-ico" aria-hidden>
                       <FingerprintIcon size={18} />
                     </span>
                     <div className="st-text">
-                      <div className="st-label">{t("settings.helloLock")}</div>
+                      <div className="st-label">{t(isMac ? "settings.helloLockMac" : "settings.helloLock")}</div>
                       <div className="st-desc">
-                        {t(helloReady || settings.helloLock ? "settings.helloLockDesc" : "settings.helloLockUnavailable")}
+                        {t(
+                          helloReady || settings.helloLock
+                            ? isMac
+                              ? "settings.helloLockDescMac"
+                              : "settings.helloLockDesc"
+                            : isMac
+                              ? "settings.helloLockUnavailableMac"
+                              : "settings.helloLockUnavailable",
+                        )}
                       </div>
                     </div>
                     <input
@@ -1634,7 +1792,7 @@ export function Settings({
                     />
                   </label>
                 )}
-                {!isWindows && (
+                {!hasOsLock && (
                   <label className="st-row">
                     <span className="st-row-ico" aria-hidden>
                       <LockIcon size={18} />
@@ -1651,7 +1809,7 @@ export function Settings({
                     />
                   </label>
                 )}
-                {!isWindows && (
+                {!hasOsLock && (
                   <div className="st-row">
                     <span className="st-row-ico" aria-hidden>
                       <FingerprintIcon size={18} />
@@ -1670,24 +1828,32 @@ export function Settings({
               </div>
             )}
 
-            {category === "security" && vaultMode !== "device" && isWindows && (
+            {category === "security" && vaultMode !== "device" && hasOsLock && (
               <div className="st-rows">
                 <div className="st-row">
                   <span className="st-row-ico" aria-hidden>
                     <LockIcon size={18} />
                   </span>
                   <div className="st-text">
-                    <div className="st-label">{t("settings.reopenLock")}</div>
+                    <div className="st-label">{t(isMac ? "settings.reopenLockMac" : "settings.reopenLock")}</div>
                     <div className="st-desc">
-                      {t(helloReady || settings.helloLock ? "settings.reopenLockDesc" : "settings.helloLockUnavailable")}
+                      {t(
+                        helloReady || settings.helloLock
+                          ? isMac
+                            ? "settings.reopenLockDescMac"
+                            : "settings.reopenLockDesc"
+                          : isMac
+                            ? "settings.helloLockUnavailableMac"
+                            : "settings.helloLockUnavailable",
+                      )}
                     </div>
                   </div>
-                  <div className="st-seg" role="group" aria-label={t("settings.reopenLock")}>
+                  <div className="st-seg" role="group" aria-label={t(isMac ? "settings.reopenLockMac" : "settings.reopenLock")}>
                     {(
                       [
                         ["off", "settings.reopenOff"],
                         ["password", "settings.reopenPassword"],
-                        ["hello", "settings.reopenHello"],
+                        ["hello", isMac ? "settings.reopenHelloMac" : "settings.reopenHello"],
                       ] as const
                     ).map(([key, label]) => {
                       const on = key === "hello" ? settings.helloLock : key === "password" ? settings.lockOnHide && !settings.helloLock : !settings.lockOnHide && !settings.helloLock;
@@ -1710,7 +1876,7 @@ export function Settings({
               </div>
             )}
 
-            {category === "security" && vaultMode !== "device" && !isWindows && (
+            {category === "security" && vaultMode !== "device" && !hasOsLock && (
               <div className="st-rows">
                 <label className="st-row">
                   <span className="st-row-ico" aria-hidden>
@@ -1973,7 +2139,7 @@ export function Settings({
                     </span>
                     <div className="st-text">
                       <div className="st-label">{t("profile.signOut")}</div>
-                      <div className="st-desc">{t("settings.signOutDesc")}</div>
+                      <div className="st-desc">{t(isMac ? "settings.signOutDescMac" : "settings.signOutDesc")}</div>
                     </div>
                   </button>
                 </div>
@@ -2191,16 +2357,16 @@ function MlPane({
   const facesScan = settings.localFaces ? facesStatus(scan) : null;
   const facesLeft = !!facesScan && facesScan.done < facesScan.total;
   const facesDesc = !settings.localFaces
-    ? t(settings.driveFaces ? "settings.drivePeopleDesc" : "settings.faceRecognitionShort")
+    ? t(isMac ? "settings.faceRecognitionShortMac" : "settings.faceRecognitionShort")
     : facesScan?.state === "paused" && facesLeft
       ? t("settings.mlPaused")
       : scanBusy(facesScan)
         ? t("settings.mlScanning")
         : facesScan?.state === "done"
           ? t("faces.state.done", { total: facesScan.total.toLocaleString(lang), faces: facesScan.faces.toLocaleString(lang) })
-          : t("settings.faceRecognitionShort");
+          : t(isMac ? "settings.faceRecognitionShortMac" : "settings.faceRecognitionShort");
 
-  const index = settings.semanticSearch && settings.localSearch ? (scan?.search ?? null) : null;
+  const index = settings.localSearch ? (scan?.search ?? null) : null;
   const indexLeft = !!index && index.indexed + index.unreadable < index.total;
   const searchDesc = !index
     ? t("settings.semanticShort")
@@ -2208,7 +2374,7 @@ function MlPane({
       ? t("settings.mlPaused")
       : searchIndexing(scan)
         ? t("settings.mlScanning")
-        : t("settings.localSearchCount", { count: index.indexed.toLocaleString(lang) });
+        : t(isMac ? "settings.localSearchCountMac" : "settings.localSearchCount", { count: index.indexed.toLocaleString(lang) });
 
   return (
     <>
@@ -2268,7 +2434,7 @@ function FacesPane({
   // On, the faces are found here and, with the shared backup, put together with every other
   // device's, each photo looked at by one of them only.
   const source: "pc" | "off" = settings.localFaces ? "pc" : "off";
-  const pickSource = (next: "pc" | "off") => onChange({ ...settings, localFaces: next === "pc", driveFaces: false });
+  const pickSource = (next: "pc" | "off") => onChange({ ...settings, localFaces: next === "pc" });
 
   return (
     <>
@@ -2278,9 +2444,9 @@ function FacesPane({
             <FaceIcon size={18} />
           </span>
           <div className="st-text">
-            <div className="st-label">{t("settings.drivePeople")}</div>
+            <div className="st-label">{t(isMac ? "settings.drivePeopleMac" : "settings.drivePeople")}</div>
             <div className="st-desc">
-              {t(source === "pc" ? "settings.facesIntro" : "settings.peopleOffDesc")}
+              {t(source === "pc" ? (isMac ? "settings.facesIntroMac" : "settings.facesIntro") : isMac ? "settings.peopleOffDescMac" : "settings.peopleOffDesc")}
             </div>
             {line && <div className="st-desc st-status">{t(line.key, values)}</div>}
             {status?.accel && scanBusy(status) && (
@@ -2295,7 +2461,7 @@ function FacesPane({
           <input
             className="st-switch"
             type="checkbox"
-            aria-label={t("settings.drivePeople")}
+            aria-label={t(isMac ? "settings.drivePeopleMac" : "settings.drivePeople")}
             checked={source === "pc"}
             onChange={(e) => pickSource(e.currentTarget.checked ? "pc" : "off")}
           />
@@ -2342,7 +2508,7 @@ function FacesPane({
           </span>
           <div className="st-text">
             <div className="st-label">{t("faces.clear")}</div>
-            <div className="st-desc">{t("faces.clearDesc")}</div>
+            <div className="st-desc">{t(isMac ? "faces.clearDescMac" : "faces.clearDesc")}</div>
           </div>
           <button className="st-row-btn" onClick={() => setConfirmClear(true)}>
             {t("faces.clearAction")}
@@ -2354,8 +2520,8 @@ function FacesPane({
         // it comes back from Drive, or everywhere, where face recognition goes off on each.
         <Confirm
           title={t("faces.clearWhereTitle")}
-          message={t("faces.clearWhereMessage")}
-          altLabel={t("faces.clearHere")}
+          message={t(isMac ? "faces.clearWhereMessageMac" : "faces.clearWhereMessage")}
+          altLabel={t(isMac ? "faces.clearHereMac" : "faces.clearHere")}
           onAlt={() => {
             setConfirmClear(false);
             void faces?.act("faceClearHere").catch(() => {});
@@ -2374,7 +2540,7 @@ function FacesPane({
       {confirmClear && !settings.sharedBackup && (
         <Confirm
           title={t("faces.clearConfirmTitle")}
-          message={t("faces.clearConfirmMessage")}
+          message={t(isMac ? "faces.clearConfirmMessageMac" : "faces.clearConfirmMessage")}
           confirmLabel={t("faces.clearAction")}
           danger
           irreversible
@@ -2563,7 +2729,9 @@ function SearchPane({
 
   // On, the photos are indexed here and, with the shared backup, every other device's index fills
   // what it already read.
-  const searchSource: "pc" | "off" = settings.semanticSearch && settings.localSearch ? "pc" : "off";
+  const searchSource: "pc" | "off" = settings.localSearch ? "pc" : "off";
+  // The model also stays while the search runs on other devices' copies alone.
+  const searchWanted = searchOnOffer(settings, drive?.data?.searchPhotos ?? 0);
   // Leaving the index made here: whether to keep it, ready at once on the way back, or delete it.
   const [askDeleteIndex, setAskDeleteIndex] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
@@ -2571,8 +2739,8 @@ function SearchPane({
     if (searchSource === "pc" && next !== "pc" && scan?.search && scan.search.indexed + scan.search.unreadable > 0) {
       setAskDeleteIndex(true);
     }
-    onChange({ ...settings, semanticSearch: next !== "off", localSearch: next === "pc" });
-    if (next !== "off" && model?.state !== "ready" && model?.state !== "downloading") void startDownload();
+    onChange({ ...settings, localSearch: next === "pc" });
+    if (next === "pc" && model?.state !== "ready" && model?.state !== "downloading") void startDownload();
   }
 
   async function removeModel() {
@@ -2585,7 +2753,7 @@ function SearchPane({
 
   const data = drive?.data ?? null;
   let searchLine = "";
-  if (settings.semanticSearch) {
+  if (searchWanted) {
     if (model?.state === "downloading") {
       searchLine = t("settings.semanticDownloading", { done: megabytes(model.done), total: megabytes(model.total) });
     } else if (model?.state === "failed") {
@@ -2595,7 +2763,7 @@ function SearchPane({
         ? t("settings.semanticReady", { count: data.searchPhotos.toLocaleString(lang) })
         : data.searchOtherModel
           ? t("settings.semanticOtherModel")
-          : t("settings.semanticNoIndex");
+          : t(isMac ? "settings.semanticNoIndexMac" : "settings.semanticNoIndex");
     }
   }
 
@@ -2613,15 +2781,15 @@ function SearchPane({
             <SearchIcon size={18} />
           </span>
           <div className="st-text">
-            <div className="st-label">{t("settings.semantic")}</div>
+            <div className="st-label">{t(isMac ? "settings.localSearchSwitchMac" : "settings.localSearchSwitch")}</div>
             <div className="st-desc">
-              {t(searchSource === "pc" ? "settings.localSearchDesc" : "settings.semanticOffDesc")}
+              {t(searchSource === "pc" ? "settings.localSearchDesc" : isMac ? "settings.semanticOffDescMac" : "settings.semanticOffDesc")}
             </div>
             {index && (
               <div className="st-desc st-status">
                 {indexLeft
-                  ? t("settings.localSearchProgress", { done: read.toLocaleString(lang), total: index.total.toLocaleString(lang) })
-                  : t("settings.localSearchCount", { count: index.indexed.toLocaleString(lang) })}
+                  ? t(isMac ? "settings.localSearchProgressMac" : "settings.localSearchProgress", { done: read.toLocaleString(lang), total: index.total.toLocaleString(lang) })
+                  : t(isMac ? "settings.localSearchCountMac" : "settings.localSearchCount", { count: index.indexed.toLocaleString(lang) })}
               </div>
             )}
             {indexing && index && index.total >= BAR_FROM && (
@@ -2640,7 +2808,7 @@ function SearchPane({
                 })}
               </div>
             )}
-            {settings.semanticSearch && model?.state === "downloading" && (
+            {searchWanted && model?.state === "downloading" && (
               <>
                 <div className="st-desc st-status">{searchLine}</div>
                 <div className="st-progress">
@@ -2652,7 +2820,7 @@ function SearchPane({
           <input
             className="st-switch"
             type="checkbox"
-            aria-label={t("settings.semantic")}
+            aria-label={t(isMac ? "settings.localSearchSwitchMac" : "settings.localSearchSwitch")}
             checked={searchSource === "pc"}
             onChange={(e) => pickSearchSource(e.currentTarget.checked ? "pc" : "off")}
           />
@@ -2668,14 +2836,14 @@ function SearchPane({
             </span>
             <div className="st-text">
               <div className="st-label">{t("settings.localSearchReset")}</div>
-              <div className="st-desc">{t("settings.localSearchResetDesc")}</div>
+              <div className="st-desc">{t(isMac ? "settings.localSearchResetDescMac" : "settings.localSearchResetDesc")}</div>
             </div>
             <button className="st-row-btn" onClick={() => setConfirmRestart(true)}>
               {t("settings.localSearchResetAction")}
             </button>
           </div>
         )}
-        {settings.semanticSearch && model?.state === "failed" && (
+        {searchWanted && model?.state === "failed" && (
           <div className="st-row off">
             <div className="st-text">
               <div className="st-desc">{t("settings.semanticFailed")}</div>
@@ -2685,7 +2853,7 @@ function SearchPane({
             </button>
           </div>
         )}
-        {!settings.semanticSearch && model?.state === "ready" && (
+        {!searchWanted && model?.state === "ready" && (
           <div className="st-row off">
             <span className="st-row-ico" aria-hidden>
               <TrashIcon size={18} />
@@ -2703,7 +2871,7 @@ function SearchPane({
       {confirmRestart && (
         <Confirm
           title={t("settings.localSearchReset")}
-          message={t("settings.localSearchResetDesc")}
+          message={t(isMac ? "settings.localSearchResetDescMac" : "settings.localSearchResetDesc")}
           confirmLabel={t("settings.localSearchResetAction")}
           onCancel={() => setConfirmRestart(false)}
           onConfirm={() => {
@@ -2714,7 +2882,7 @@ function SearchPane({
       )}
       {askDeleteIndex && (
         <Confirm
-          title={t("settings.localSearchDeleteTitle")}
+          title={t(isMac ? "settings.localSearchDeleteTitleMac" : "settings.localSearchDeleteTitle")}
           message={t("settings.localSearchDeleteMessage")}
           confirmLabel={t("settings.localSearchDeleteAction")}
           danger
@@ -2730,10 +2898,10 @@ function SearchPane({
 }
 
 /**
- * Backup to Proton Drive, as the phone has it: one switch for the automatic backup, "Back up now"
- * and "Load from Drive", and what the other devices last saved there. Each round reads every other
- * device's copy first, puts what is new together with what is here, and only then saves this
- * computer's own.
+ * Backup to Proton Drive, as the phone has it: one switch, and what the other devices last saved
+ * there. Once on it runs by itself both ways: each round reads every other device's copy first,
+ * puts what is new together with what is here, and only then saves this computer's own. The
+ * refresh button on the status line runs a round now.
  */
 function BackupPane({
   settings,
@@ -2746,7 +2914,7 @@ function BackupPane({
 }) {
   const t = useT();
   const { lang } = useLang();
-  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   // What a phone needs to take part, behind the info button rather than on the row itself.
   const [phoneNote, setPhoneNote] = useState(false);
   // Turning it on first says which version a phone needs, so an older one is not taken for broken.
@@ -2764,7 +2932,7 @@ function BackupPane({
         : backup.lastAt
           ? t("settings.sharedBackupSynced", { date: date.format(new Date(backup.lastAt)) })
           : null;
-  const deviceName = (b: DriveBackup) => (b.own ? t("settings.driveCopiesThis") : (b.name ?? t("settings.driveCopiesOther")));
+  const deviceName = (b: DriveBackup) => (b.own ? t(isMac ? "settings.driveCopiesThisMac" : "settings.driveCopiesThis") : (b.name ?? t("settings.driveCopiesOther")));
   const copiesLine =
     copies.state === "loading" && copies.list.length === 0
       ? t("settings.driveCopiesLoading")
@@ -2776,14 +2944,14 @@ function BackupPane({
             ? t("settings.driveCopiesEmpty")
             : null;
 
-  async function load() {
-    setLoading(true);
+  async function syncNow() {
+    setSyncing(true);
     try {
-      await rpc("sharedBackupLoad");
+      await rpc("sharedBackupNow");
     } catch {
-      /* the lines below keep what was last read */
+      /* the status line shows how the round went */
     } finally {
-      setLoading(false);
+      setSyncing(false);
       onRefresh?.();
     }
   }
@@ -2814,9 +2982,28 @@ function BackupPane({
                 <InfoIcon size={14} />
               </button>
             </div>
-            <div className="st-desc">{t("settings.sharedBackupDesc")}</div>
-            {phoneNote && <div className="st-desc st-status">{t("settings.sharedBackupPhoneNote")}</div>}
-            {backupLine && <div className="st-desc st-status">{backupLine}</div>}
+            <div className="st-desc">{t(isMac ? "settings.sharedBackupDescMac" : "settings.sharedBackupDesc")}</div>
+            {phoneNote && <div className="st-desc st-status">{t(isMac ? "settings.sharedBackupPhoneNoteMac" : "settings.sharedBackupPhoneNote")}</div>}
+            {settings.sharedBackup && (
+              <div className="st-desc st-status st-sync">
+                {backupLine && <span>{backupLine}</span>}
+                <button
+                  type="button"
+                  className="st-info"
+                  aria-label={t("settings.sharedBackupNow")}
+                  title={t("settings.sharedBackupNow")}
+                  disabled={!!backup?.running || syncing}
+                  onClick={(e) => {
+                    // Inside the switch's label: a round runs, the switch stays as it is.
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void syncNow();
+                  }}
+                >
+                  <RefreshIcon size={14} />
+                </button>
+              </div>
+            )}
           </div>
           <input
             className="st-switch"
@@ -2831,7 +3018,7 @@ function BackupPane({
         {askTurnOn && (
           <Confirm
             title={t("settings.sharedBackupTurnOnTitle")}
-            message={t("settings.sharedBackupPhoneNote")}
+            message={t(isMac ? "settings.sharedBackupPhoneNoteMac" : "settings.sharedBackupPhoneNote")}
             confirmLabel={t("settings.sharedBackupTurnOn")}
             onConfirm={() => {
               setAskTurnOn(false);
@@ -2840,37 +3027,9 @@ function BackupPane({
             onCancel={() => setAskTurnOn(false)}
           />
         )}
-        <div className="st-row">
-          <span className="st-row-ico" aria-hidden>
-            <RefreshIcon size={18} />
-          </span>
-          <div className="st-text">
-            <div className="st-label">{t("settings.sharedBackupNow")}</div>
-            <div className="st-desc">{t("settings.sharedBackupNowDesc")}</div>
-          </div>
-          <button
-            className="st-row-btn"
-            disabled={!!backup?.running || loading}
-            onClick={() => void rpc("sharedBackupNow").catch(() => {})}
-          >
-            {t("settings.sharedBackupNow")}
-          </button>
-        </div>
-        <div className="st-row">
-          <span className="st-row-ico" aria-hidden>
-            <DownloadIcon size={18} />
-          </span>
-          <div className="st-text">
-            <div className="st-label">{t("settings.loadFromDrive")}</div>
-            <div className="st-desc">{t("settings.loadFromDriveDesc")}</div>
-          </div>
-          <button className="st-row-btn" disabled={loading || !!backup?.running} onClick={() => void load()}>
-            {loading ? t("common.loading") : t("settings.loadFromDrive")}
-          </button>
-        </div>
       </div>
 
-      {/* The devices that saved, a list of their own under a heading, apart from the actions above. */}
+      {/* The devices that saved, a list of their own under a heading, apart from the switch above. */}
       <h4 className="st-subhead st-subhead-gap">{t("settings.driveCopies")}</h4>
       <p className="st-note">{t("settings.driveCopiesDesc")}</p>
       {copiesLine && <p className={`st-note${copies.state.endsWith("ailed") ? " bad" : ""}`}>{copiesLine}</p>}
@@ -2913,6 +3072,8 @@ function BackupPane({
 
 const TIER_KEYS: CompressionTier[] = ["high", "balanced", "small"];
 const CODEC_KEYS: VideoCodecChoice[] = ["auto", "avc", "hevc", "av1", "keep"];
+/** The codec hints that name the computer, so a Mac reads its own wording. */
+const MAC_CODEC_HINTS = new Set<VideoCodecChoice>(["auto", "keep"]);
 const CODEC_LABELS: Record<VideoCodecChoice, string> = { auto: "", avc: "H.264", hevc: "H.265", av1: "AV1", keep: "" };
 
 /**
@@ -2922,6 +3083,7 @@ const CODEC_LABELS: Record<VideoCodecChoice, string> = { auto: "", avc: "H.264",
 function UploadQualityPane({ settings, onChange }: { settings: AppSettings; onChange: (next: AppSettings) => void }) {
   const t = useT();
   const [encoders, setEncoders] = useState<VideoEncoders | null>(null);
+  const [hdrNote, setHdrNote] = useState(false);
   useEffect(() => {
     void invoke<VideoEncoders>("video_encoders").then(setEncoders, () => {});
   }, []);
@@ -2932,7 +3094,7 @@ function UploadQualityPane({ settings, onChange }: { settings: AppSettings; onCh
   const resolved = resolveCodecShown(settings.compressCodec, encoders);
   const fallback =
     encoders && settings.compressCodec !== "auto" && settings.compressCodec !== "keep" && !can(settings.compressCodec)
-      ? t("upload.codecFallback", { codec: codecName(settings.compressCodec), used: CODEC_LABELS[resolved] })
+      ? t(isMac ? "upload.codecFallbackMac" : "upload.codecFallback", { codec: codecName(settings.compressCodec), used: CODEC_LABELS[resolved] })
       : null;
   const reference = settings.compressVideoTier === "small" ? 720 : 1080;
   const perMinute = formatBytes(estimatePerMinute(resolved, settings.compressVideoTier));
@@ -2953,7 +3115,7 @@ function UploadQualityPane({ settings, onChange }: { settings: AppSettings; onCh
 
   return (
     <>
-      <p className="st-intro">{t("upload.compressIntro")}</p>
+      <p className="st-intro">{t(isMac ? "upload.compressIntroMac" : "upload.compressIntro")}</p>
       <div className="st-rows">
         <label className="st-row">
           <span className="st-row-ico" aria-hidden>
@@ -3006,8 +3168,26 @@ function UploadQualityPane({ settings, onChange }: { settings: AppSettings; onCh
             <PlayArrowIcon size={18} />
           </span>
           <div className="st-text">
-            <div className="st-label">{t("upload.compressVideos")}</div>
+            <div className="st-label">
+              {t("upload.compressVideos")}
+              <button
+                type="button"
+                className="st-info"
+                aria-expanded={hdrNote}
+                aria-label={t("upload.videoHdrInfo")}
+                title={t("upload.videoHdrInfo")}
+                onClick={(e) => {
+                  // Inside the switch's label: the note opens, the switch stays as it is.
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setHdrNote((open) => !open);
+                }}
+              >
+                <InfoIcon size={14} />
+              </button>
+            </div>
             <div className="st-desc">{t("upload.compressVideosDesc")}</div>
+            {hdrNote && <div className="st-desc st-status">{t("upload.videoHdrNote")}</div>}
           </div>
           <input
             className="st-switch"
@@ -3035,7 +3215,7 @@ function UploadQualityPane({ settings, onChange }: { settings: AppSettings; onCh
               </span>
               <div className="st-text">
                 <div className="st-label">{t("upload.codec")}</div>
-                <div className="st-desc">{t(`upload.codecHint.${settings.compressCodec}`)}</div>
+                <div className="st-desc">{t(`upload.codecHint.${settings.compressCodec}${isMac && MAC_CODEC_HINTS.has(settings.compressCodec) ? "Mac" : ""}`)}</div>
                 {fallback && <div className="st-desc bad">{fallback}</div>}
                 <div className="st-seg st-seg-under" role="group" aria-label={t("upload.codec")}>
                   {CODEC_KEYS.map((codec) => (
@@ -3044,7 +3224,7 @@ function UploadQualityPane({ settings, onChange }: { settings: AppSettings; onCh
                       className={`st-seg-btn${settings.compressCodec === codec ? " on" : ""}`}
                       aria-pressed={settings.compressCodec === codec}
                       disabled={!can(codec)}
-                      title={can(codec) ? undefined : t("upload.codecNotHere")}
+                      title={can(codec) ? undefined : t(isMac ? "upload.codecNotHereMac" : "upload.codecNotHere")}
                       onClick={() => onChange({ ...settings, compressCodec: codec })}
                     >
                       {codecName(codec)}
@@ -3056,6 +3236,25 @@ function UploadQualityPane({ settings, onChange }: { settings: AppSettings; onCh
           </>
         )}
       </div>
+      {!isMac && (settings.compressPhotos || settings.compressVideos) && (
+        <div className="st-rows st-rows-gap">
+          <label className="st-row">
+            <span className="st-row-ico" aria-hidden>
+              <ComputerIcon size={18} />
+            </span>
+            <div className="st-text">
+              <div className="st-label">{t("upload.compressLocal")}</div>
+              <div className="st-desc">{t(isWindows ? "upload.compressLocalDesc" : "upload.compressLocalDescLinux")}</div>
+            </div>
+            <input
+              className="st-switch"
+              type="checkbox"
+              checked={settings.compressLocal}
+              onChange={(e) => onChange({ ...settings, compressLocal: e.currentTarget.checked })}
+            />
+          </label>
+        </div>
+      )}
       <p className="st-note">{t("upload.compressWhere")}</p>
     </>
   );
@@ -3286,7 +3485,7 @@ function LabelsPane({
       {deleting && (
         <Confirm
           title={t("labels.deleteTitle", { name: deleting })}
-          message={t(settings.sharedBackup ? "labels.deleteMessageShared" : "labels.deleteMessage")}
+          message={t(settings.sharedBackup ? (isMac ? "labels.deleteMessageSharedMac" : "labels.deleteMessageShared") : isMac ? "labels.deleteMessageMac" : "labels.deleteMessage")}
           confirmLabel={t("labels.delete")}
           danger
           onCancel={() => setDeleting(null)}
@@ -3368,7 +3567,7 @@ function diagnosticsHeader(settings: AppSettings, version: string): string[] {
   const on = (v: boolean) => (v ? "on" : "off");
   return [
     `App ${version || "-"}, language ${settings.lang}, theme ${settings.theme}`,
-    `Settings: faces=${source(settings.localFaces, settings.driveFaces)}, search=${source(settings.semanticSearch && settings.localSearch, settings.semanticSearch)}, ` +
+    `Settings: faces=${source(settings.localFaces, settings.sharedBackup)}, search=${source(settings.localSearch, settings.sharedBackup)}, ` +
       `labels=${on(settings.driveLabels)}, shared backup=${on(settings.sharedBackup)}, my files=${on(settings.myFilesAccess)}, ` +
       `auto merge=${on(settings.faceAutoMerge)}, find more=${on(settings.faceFindMore)}, scan speed=${settings.scanSpeed ?? "auto"}, ` +
       `detailed logging=${on(settings.diagDetailed)}`,

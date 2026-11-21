@@ -77,6 +77,65 @@ describe("buildColorMatrix", () => {
   });
 });
 
+describe("highlights", () => {
+  it("brightens a bright pixel at +100", () => {
+    const m = buildColorMatrix(adj({ highlights: 100 }))!;
+    expect(pixel(m, 200, 200, 200)).toEqual([250, 250, 250]);
+  });
+
+  it("darkens a bright pixel at -100", () => {
+    const m = buildColorMatrix(adj({ highlights: -100 }))!;
+    expect(pixel(m, 200, 200, 200)).toEqual([150, 150, 150]);
+  });
+
+  it("keeps black black in both directions", () => {
+    expect(pixel(buildColorMatrix(adj({ highlights: 100 }))!, 0, 0, 0)).toEqual([0, 0, 0]);
+    expect(pixel(buildColorMatrix(adj({ highlights: -100 }))!, 0, 0, 0)).toEqual([0, 0, 0]);
+  });
+
+  it("moves a dark pixel less than a bright one", () => {
+    const m = buildColorMatrix(adj({ highlights: 100 }))!;
+    expect(pixel(m, 40, 40, 40)).toEqual([50, 50, 50]);
+  });
+
+  it("pulls a near-white pixel down at the auto-fix value of -14", () => {
+    const m = buildColorMatrix(adj({ highlights: -14 }))!;
+    expect(pixel(m, 240, 240, 240)).toEqual([232, 232, 232]);
+  });
+});
+
+describe("slider directions", () => {
+  it("exposure brightens when positive and darkens when negative", () => {
+    expect(pixel(buildColorMatrix(adj({ exposure: 50 }))!, 100, 100, 100)).toEqual([150, 150, 150]);
+    expect(pixel(buildColorMatrix(adj({ exposure: -50 }))!, 100, 100, 100)).toEqual([50, 50, 50]);
+  });
+
+  it("shadows lift the dark end when positive and sink it when negative", () => {
+    expect(pixel(buildColorMatrix(adj({ shadows: 100 }))!, 40, 40, 40)).toEqual([90, 90, 90]);
+    expect(pixel(buildColorMatrix(adj({ shadows: -100 }))!, 100, 100, 100)).toEqual([20, 20, 20]);
+  });
+
+  it("saturation spreads the channels when positive and draws them together when negative", () => {
+    expect(pixel(buildColorMatrix(adj({ saturation: 50 }))!, 150, 100, 100)).toEqual([170, 95, 95]);
+    expect(pixel(buildColorMatrix(adj({ saturation: -50 }))!, 150, 100, 100)).toEqual([130, 105, 105]);
+  });
+
+  it("temperature warms when positive and cools when negative", () => {
+    expect(pixel(buildColorMatrix(adj({ temperature: 100 }))!, 100, 100, 100)).toEqual([150, 100, 50]);
+    expect(pixel(buildColorMatrix(adj({ temperature: -100 }))!, 100, 100, 100)).toEqual([50, 100, 150]);
+  });
+
+  it("tone shifts toward green when positive and magenta when negative", () => {
+    expect(pixel(buildColorMatrix(adj({ tone: 100 }))!, 100, 100, 100)).toEqual([100, 150, 100]);
+    expect(pixel(buildColorMatrix(adj({ tone: -100 }))!, 100, 100, 100)).toEqual([100, 50, 100]);
+  });
+
+  it("contrast lowers a dark pixel when positive and raises it when negative", () => {
+    expect(pixel(buildColorMatrix(adj({ contrast: 50 }))!, 64, 64, 64)).toEqual([32, 32, 32]);
+    expect(pixel(buildColorMatrix(adj({ contrast: -50 }))!, 64, 64, 64)).toEqual([96, 96, 96]);
+  });
+});
+
 describe("filters", () => {
   it("has no matrix for none", () => {
     expect(filterMatrix("none")).toBeNull();

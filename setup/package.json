@@ -10,28 +10,27 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
-    "@tauri-apps/plugin-opener": "^2",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-dialog": "^2.8.4",
+    "@tauri-apps/plugin-opener": "^2.7.3",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^4.6.0",
-    "typescript": "~5.8.3",
-    "vite": "^7.3.7"
+    "@tauri-apps/cli": "^2.12.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
   },
   "overrides": {
-    "postcss": "8.5.29",
-    "rollup": "4.62.2",
-    "@types/estree": "1.0.9",
-    "browserslist": "4.29.3",
-    "baseline-browser-mapping": "2.11.29",
-    "caniuse-lite": "1.0.30001803",
-    "electron-to-chromium": "1.5.389",
-    "node-releases": "2.0.51"
+    "postcss": "8.5.33",
+    "@types/estree": "1.0.10",
+    "browserslist": "4.29.5",
+    "baseline-browser-mapping": "2.11.37",
+    "caniuse-lite": "1.0.30001826",
+    "electron-to-chromium": "1.5.485",
+    "node-releases": "2.0.64"
   }
 }

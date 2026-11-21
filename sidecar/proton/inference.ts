@@ -24,7 +24,10 @@
 // any DirectX 12 card offers, built in or separate, from any maker; the runtime loads the copy
 // Windows itself carries, so nothing of it ships with the app. Where that is missing, too old,
 // or fails, the processor runs them instead, on a few threads when the work is background
-// work, so the computer stays usable while a library is scanned.
+// work, so the computer stays usable while a library is scanned. Either way the model is opened
+// and run on the model thread (`ortSession.ts`), so the sidecar keeps answering meanwhile.
+
+import { ModelWorkerGone, OrtSession } from "./ortSession.ts";
 
 export type Accel = "gpu" | "cpu";
 
@@ -46,7 +49,7 @@ export function markGpuFailed(reason: string): void {
   process.stderr.write(`[inference] the graphics card is not used: ${reason}\n`);
 }
 
-export type ModelSession = { session: any; accel: Accel };
+export type ModelSession = { session: OrtSession; accel: Accel };
 
 /**
  * Opens `path` on the graphics card when one is usable, else on the processor. `background`
@@ -58,10 +61,9 @@ export async function openModel(
   background: boolean,
   optimization: "all" | "basic" = "all",
 ): Promise<ModelSession> {
-  const ort = await import("onnxruntime-node");
   if (gpuUsable()) {
     try {
-      const session = await ort.InferenceSession.create(path, {
+      const session = await OrtSession.open(path, {
         executionProviders: [{ name: "dml" }],
         graphOptimizationLevel: optimization,
         // DirectML needs both: it neither reuses memory patterns nor runs nodes in parallel.
@@ -71,10 +73,12 @@ export async function openModel(
       });
       return { session, accel: "gpu" };
     } catch (e) {
+      // A lost model thread says nothing about the card.
+      if (e instanceof ModelWorkerGone) throw e;
       markGpuFailed((e as Error)?.name ?? "open failed");
     }
   }
-  const session = await ort.InferenceSession.create(path, {
+  const session = await OrtSession.open(path, {
     executionProviders: ["cpu"],
     graphOptimizationLevel: optimization,
     ...(background ? { intraOpNumThreads: BACKGROUND_THREADS, interOpNumThreads: 1 } : {}),

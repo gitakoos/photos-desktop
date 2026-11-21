@@ -47,10 +47,10 @@ import {
   scryptSync,
   timingSafeEqual,
 } from "node:crypto";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-import { clearDataKey, dataKeyCopy, setDataKey, storeDir } from "./store";
+import { clearDataKey, dataKeyCopy, setDataKey, storeDir, writeFileAtomic } from "./store";
 
 // ~64 MiB of work per derivation: strong for an interactive unlock, still snappy.
 const SCRYPT: import("node:crypto").ScryptOptions = {
@@ -163,7 +163,7 @@ export function createVault(password: string): void {
     salt: salt.toString("base64"),
     verifier: verifierFor(key).toString("base64"),
   };
-  writeFileSync(metaPath(), sealMeta(meta));
+  writeFileAtomic(metaPath(), sealMeta(meta));
   setDataKey(key);
 }
 
@@ -174,7 +174,7 @@ export function createVault(password: string): void {
 export function createDeviceVault(): void {
   const key = randomBytes(KEY_LEN);
   const meta: DeviceMeta = { v: 1, mode: "device", key: key.toString("base64") };
-  writeFileSync(metaPath(), sealMeta(meta));
+  writeFileAtomic(metaPath(), sealMeta(meta));
   setDataKey(key);
 }
 
@@ -188,7 +188,7 @@ export function convertToDeviceVault(): boolean {
   const key = dataKeyCopy();
   if (!key || key.length !== KEY_LEN) return false;
   const meta: DeviceMeta = { v: 1, mode: "device", key: key.toString("base64") };
-  writeFileSync(metaPath(), sealMeta(meta));
+  writeFileAtomic(metaPath(), sealMeta(meta));
   key.fill(0);
   return true;
 }
@@ -227,7 +227,7 @@ export function unlockVault(password: string): boolean {
   // does not cost the user an unlock that otherwise succeeded.
   if (!stored.sealed) {
     try {
-      writeFileSync(metaPath(), sealMeta(stored.meta));
+      writeFileAtomic(metaPath(), sealMeta(stored.meta));
     } catch {
       /* still readable, but the session continues */
     }
@@ -313,7 +313,7 @@ export function setLocalLock(password: string, current?: string): boolean {
   const key = derive(password, salt);
   const meta: LocalLockMeta = { v: 1, salt: salt.toString("base64"), verifier: localVerifier(key).toString("base64") };
   key.fill(0);
-  writeFileSync(localLockPath(), sealMeta(meta));
+  writeFileAtomic(localLockPath(), sealMeta(meta));
   return true;
 }
 

@@ -265,7 +265,7 @@ export function frameBlurSize(pictureW: number, pictureH: number, canvasW: numbe
  * RGBA bytes after `passes` box blurs of `radius`, across then down, each channel on its
  * own; a pixel past an edge reads as the edge, so the border keeps its colour.
  */
-export function soften(data: Uint8ClampedArray, w: number, h: number, radius: number, passes: number): Uint8ClampedArray {
+export function soften(data: Uint8ClampedArray, w: number, h: number, radius: number, passes: number): Uint8ClampedArray<ArrayBuffer> {
   const out = new Uint8ClampedArray(data);
   if (w <= 0 || h <= 0 || radius <= 0 || passes <= 0) return out;
   const tmp = new Uint8ClampedArray(out.length);

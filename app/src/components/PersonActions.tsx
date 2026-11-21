@@ -23,9 +23,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Confirm } from "./Confirm";
 import { FaceCover, type LibraryEntry } from "./Library";
-import { CallMergeIcon, CloseIcon, FaceIcon, PencilIcon, SearchIcon } from "./icons";
+import { CallMergeIcon, CloseIcon, FaceIcon, PencilIcon, SearchIcon, VisibilityOffIcon } from "./icons";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { useT } from "../lib/i18n";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/Confirm.css";
 import "../styles/AlbumDialogs.css";
 import { personNameKey } from "../lib/personName";
@@ -45,6 +46,7 @@ export function PersonActions({
   onRename,
   onMerge,
   onReject,
+  onHide,
   onFind,
   findOpen,
 }: {
@@ -57,6 +59,8 @@ export function PersonActions({
   onRename: (name: string) => Promise<void>;
   onMerge: (other: LibraryEntry) => Promise<void>;
   onReject: () => Promise<void>;
+  /** Hides the person from People and the suggestions, keeping their photos. */
+  onHide: () => Promise<void>;
   /** Opens or closes the side panel of photos that might be them; named people only. */
   onFind?: () => void;
   findOpen?: boolean;
@@ -67,6 +71,7 @@ export function PersonActions({
   const [picked, setPicked] = useState(-1);
   const [busy, setBusy] = useState(false);
   const [confirmReject, setConfirmReject] = useState(false);
+  const [confirmHide, setConfirmHide] = useState(false);
   const [merging, setMerging] = useState(false);
   const field = useRef<HTMLInputElement>(null);
 
@@ -178,6 +183,10 @@ export function PersonActions({
           <span>{t("faces.merge")}</span>
         </button>
       )}
+      <button className="g-tool g-tooltext" onClick={() => setConfirmHide(true)}>
+        <VisibilityOffIcon size={15} />
+        <span>{t("faces.hide")}</span>
+      </button>
       <button className="g-tool g-tooltext" onClick={() => setConfirmReject(true)}>
         <span>{t("faces.notPerson")}</span>
       </button>
@@ -188,6 +197,18 @@ export function PersonActions({
           onPick={async (other) => {
             await onMerge(other);
             setMerging(false);
+          }}
+        />
+      )}
+      {confirmHide && (
+        <Confirm
+          title={t("faces.hideTitle")}
+          message={t("faces.hideMessage")}
+          confirmLabel={t("faces.hideAction")}
+          onCancel={() => setConfirmHide(false)}
+          onConfirm={() => {
+            setConfirmHide(false);
+            void onHide().catch(() => {});
           }}
         />
       )}
@@ -256,10 +277,7 @@ export function PersonPicker({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onCancel();
-      }}
+      {...backdropClose(onCancel)}
     >
       <div className="cf-panel ad-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">

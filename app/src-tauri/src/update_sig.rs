@@ -28,12 +28,15 @@
 //! maintainer's machine (`setup/sign-update.mjs`), in the minisign format, over the
 //! file's BLAKE2b-512 hash. The version sits in the signed comment, so an older signed
 //! installer cannot be replayed as an update either: it has to be newer than this app.
+//!
+//! The check reads the installer through a handle that also pins it in place
+//! (`file_hold::hold`), so the file that was checked is the file that runs.
 
 // The updater runs on Windows; elsewhere only the tests use the check.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use minisign_verify::{PublicKey, Signature};
@@ -45,13 +48,14 @@ const UPDATE_KEY: &str = "RWSwAiqujmDd0nLz1I4pZntgpQAwmiU7zLI37NrHQ76aG2aYH8Chtk
 /// A minisign signature is four short lines; anything much longer is not one.
 const MAX_SIGNATURE_BYTES: u64 = 4096;
 
-/// Checks `installer` against its signature file and returns the version it was signed
-/// as, which must be newer than `current`. Any failure is a refusal.
-pub fn verify_installer(installer: &Path, signature: &Path, current: &Version) -> Result<Version, String> {
+/// Checks the installer behind `installer` against its signature file and returns the
+/// version it was signed as, which must be newer than `current`. Any failure is a refusal.
+/// The bytes are read from the start of the handle, wherever it was left.
+pub fn verify_installer(installer: &File, signature: &Path, current: &Version) -> Result<Version, String> {
     verify_with(UPDATE_KEY, installer, signature, current)
 }
 
-fn verify_with(key: &str, installer: &Path, signature: &Path, current: &Version) -> Result<Version, String> {
+fn verify_with(key: &str, installer: &File, signature: &Path, current: &Version) -> Result<Version, String> {
     let key = PublicKey::from_base64(key).map_err(|e| format!("update key: {e}"))?;
     let mut text = String::new();
     File::open(signature)
@@ -61,7 +65,8 @@ fn verify_with(key: &str, installer: &Path, signature: &Path, current: &Version)
     let mut verifier = key
         .verify_stream(&sig)
         .map_err(|_| "the installer is not signed with the update key".to_string())?;
-    let mut file = File::open(installer).map_err(|e| format!("installer: {e}"))?;
+    let mut file = installer;
+    file.seek(SeekFrom::Start(0)).map_err(|e| format!("installer: {e}"))?;
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = file.read(&mut buf).map_err(|e| format!("installer: {e}"))?;
@@ -123,6 +128,12 @@ OA3egpVQxsizklSPjXDxLp22rYJja6Bj1rzLkY1a4NLuTAduYgt6x4RRCSC2uVPew0TxyPfAr63jeqi7
         sig: std::path::PathBuf,
     }
 
+    impl Staged {
+        fn open(&self) -> File {
+            File::open(&self.exe).unwrap()
+        }
+    }
+
     impl Drop for Staged {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
@@ -152,42 +163,59 @@ OA3egpVQxsizklSPjXDxLp22rYJja6Bj1rzLkY1a4NLuTAduYgt6x4RRCSC2uVPew0TxyPfAr63jeqi7
     #[test]
     fn a_signed_newer_installer_is_accepted() {
         let t = staged(SIGNED, SIGNATURE);
-        assert_eq!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.1.0")), Ok(v("1.2.0")));
+        assert_eq!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.1.0")), Ok(v("1.2.0")));
     }
 
     #[test]
     fn a_changed_installer_is_refused() {
         let t = staged(b"installer bytes for the test!\n", SIGNATURE);
-        assert!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.1.0")).is_err());
+        assert!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.1.0")).is_err());
     }
 
     #[test]
     fn a_changed_version_is_refused() {
         let t = staged(SIGNED, &SIGNATURE.replace("version:1.2.0", "version:9.9.9"));
-        assert!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.1.0")).is_err());
+        assert!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.1.0")).is_err());
     }
 
     #[test]
     fn the_same_or_an_older_version_is_refused() {
         let t = staged(SIGNED, SIGNATURE);
-        assert!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.2.0")).is_err());
-        assert!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.3.0")).is_err());
+        assert!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.2.0")).is_err());
+        assert!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.3.0")).is_err());
     }
 
     #[test]
     fn another_key_and_no_signature_are_refused() {
         let t = staged(SIGNED, SIGNATURE);
-        assert!(verify_installer(&t.exe, &t.sig, &v("1.1.0")).is_err());
+        assert!(verify_installer(&t.open(), &t.sig, &v("1.1.0")).is_err());
         std::fs::remove_file(&t.sig).unwrap();
-        assert!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.1.0")).is_err());
+        assert!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.1.0")).is_err());
     }
 
     #[test]
     fn an_update_installer_runs_only_over_its_own_version() {
         let t = staged(SIGNED, PATCH_SIGNATURE);
-        assert_eq!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.1.0")), Ok(v("1.2.0")));
-        assert!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.0.0")).is_err());
-        assert!(verify_with(TEST_KEY, &t.exe, &t.sig, &v("1.1.1")).is_err());
+        assert_eq!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.1.0")), Ok(v("1.2.0")));
+        assert!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.0.0")).is_err());
+        assert!(verify_with(TEST_KEY, &t.open(), &t.sig, &v("1.1.1")).is_err());
+    }
+
+    #[test]
+    fn the_check_reads_from_the_start_of_a_used_handle() {
+        let t = staged(SIGNED, SIGNATURE);
+        let mut file = t.open();
+        let mut head = [0u8; 4];
+        file.read_exact(&mut head).unwrap();
+        assert_eq!(verify_with(TEST_KEY, &file, &t.sig, &v("1.1.0")), Ok(v("1.2.0")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_check_reads_through_a_hold() {
+        let t = staged(SIGNED, SIGNATURE);
+        let held = crate::file_hold::hold(&t.exe).unwrap();
+        assert_eq!(verify_with(TEST_KEY, &held, &t.sig, &v("1.1.0")), Ok(v("1.2.0")));
     }
 
     #[test]

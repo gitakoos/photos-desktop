@@ -35,14 +35,17 @@ import {
   type WrittenFace,
 } from "./driveData.ts";
 import { sidewaysMeasure } from "./faceAlign.ts";
-import { FACE_EMBEDDING_DIM, dot } from "./faceCluster.ts";
+import { FACE_EMBEDDING_DIM, dot, runPausable, runPausableSliced, type Pausable } from "./faceCluster.ts";
 import {
   curationKey,
+  dropHidden,
   foldPersonName,
   keepNameChange,
   mergeInPlace,
   moveCuration,
+  moveHidden,
   otherPerson,
+  takeTokenOff,
   portableFaceId,
   pruneCuration,
   renameInPlace,
@@ -52,21 +55,93 @@ import {
   MAX_FACE_INDEX,
   SAME_FACE_IOU,
   boxOverlap as iou,
+  type Curation,
   type FaceRecord,
   type FaceStore,
   type Person,
 } from "./faceStore.ts";
+import { isHiddenToken } from "./personName.ts";
 
 export { SAME_FACE_IOU };
 
 /** A phone's face and the face found here that is the same one. */
 export type FacePair = { phone: SnapshotFace; local: FaceRecord; overlap: number };
 
+/** Below this box overlap two faces are the same only when their numbers say so as well. */
+export const SAME_FACE_LOOSE_IOU = 0.3;
+/** How alike the numbers of two loosely overlapping faces must be to be taken as the same face. */
+export const SAME_FACE_MIN_COSINE = 0.7;
+/** How far apart two box edges may be and still be the same box after a copy's 32-bit floats. */
+const SAME_BOX_TOLERANCE = 1e-4;
+
+type Placed = { box: readonly number[]; embedding: Float32Array };
+
+function alike(a: Placed, b: Placed): number {
+  return a.embedding.length === FACE_EMBEDDING_DIM && b.embedding.length === FACE_EMBEDDING_DIM ? dot(a.embedding, b.embedding) : NaN;
+}
+
+/** Whether two faces on one photo are the same face: boxes overlapping by half, or loosely
+ *  overlapping boxes whose numbers agree. The phone decides by the same rule. */
+export function sameFace(a: Placed, b: Placed): boolean {
+  const overlap = iou(a.box, b.box);
+  return overlap >= SAME_FACE_IOU || (overlap >= SAME_FACE_LOOSE_IOU && alike(a, b) >= SAME_FACE_MIN_COSINE);
+}
+
 /**
- * Each phone face on a photo also looked at here, with the face here that sits in the same
- * place; one local face is taken by one phone face at most, the closest overlap first.
+ * The phone faces of one photo paired with the faces found on it here, each face once: first the
+ * boxes that overlap by half, the closest overlap first, then, when the numbers compare (`loose`),
+ * the loosely overlapping ones whose numbers agree, the most alike first. Ties go to the lower
+ * index. The phone pairs by the very same steps (`pairSameFaces`), so both pick the same twins.
+ */
+function pairOnPhoto(phoneFaces: SnapshotFace[], local: FaceRecord[], loose = true): FacePair[] {
+  const takenPhone = new Set<SnapshotFace>();
+  const takenLocal = new Set<string>();
+  const pairs: FacePair[] = [];
+  const take = (options: { pair: FacePair; rank: number }[]) => {
+    options.sort(
+      (a, b) =>
+        b.rank - a.rank || a.pair.phone.index - b.pair.phone.index || indexOf(a.pair.local.id) - indexOf(b.pair.local.id),
+    );
+    for (const { pair } of options) {
+      if (takenPhone.has(pair.phone) || takenLocal.has(pair.local.id)) continue;
+      takenPhone.add(pair.phone);
+      takenLocal.add(pair.local.id);
+      pairs.push(pair);
+    }
+  };
+  const close: { pair: FacePair; rank: number }[] = [];
+  for (const phone of phoneFaces) {
+    for (const here of local) {
+      const overlap = iou(phone.box, here.box);
+      if (overlap >= SAME_FACE_IOU) close.push({ pair: { phone, local: here, overlap }, rank: overlap });
+    }
+  }
+  take(close);
+  if (!loose) return pairs;
+  const near: { pair: FacePair; rank: number }[] = [];
+  for (const phone of phoneFaces) {
+    if (takenPhone.has(phone)) continue;
+    for (const here of local) {
+      if (takenLocal.has(here.id)) continue;
+      const overlap = iou(phone.box, here.box);
+      if (overlap < SAME_FACE_LOOSE_IOU) continue;
+      const similarity = alike(phone, here);
+      if (similarity >= SAME_FACE_MIN_COSINE) near.push({ pair: { phone, local: here, overlap }, rank: similarity });
+    }
+  }
+  take(near);
+  return pairs;
+}
+
+/**
+ * Each phone face on a photo also looked at here, with the face here that is the same face
+ * (`pairOnPhoto`); one local face is taken by one phone face at most.
  */
 export function pairFaces(store: FaceStore, copies: FaceCopy[]): FacePair[] {
+  return runPausable(pairFacesSteps(store, copies));
+}
+
+function* pairFacesSteps(store: FaceStore, copies: FaceCopy[]): Pausable<FacePair[]> {
   const uidByLink = new Map<string, string>();
   for (const uid of store.scanned()) uidByLink.set(uid.slice(uid.indexOf("~") + 1), uid);
   const pairs: FacePair[] = [];
@@ -79,26 +154,199 @@ export function pairFaces(store: FaceStore, copies: FaceCopy[]): FacePair[] {
       list.push(face);
     }
     for (const [key, phoneFaces] of byKey) {
-      const local = store.facesOf(uidByLink.get(key)!);
-      const options: FacePair[] = [];
-      for (const phone of phoneFaces) {
-        for (const here of local) {
-          const overlap = iou(phone.box, here.box);
-          if (overlap >= SAME_FACE_IOU) options.push({ phone, local: here, overlap });
-        }
-      }
-      options.sort((a, b) => b.overlap - a.overlap);
-      const takenPhone = new Set<SnapshotFace>();
-      const takenLocal = new Set<string>();
-      for (const option of options) {
-        if (takenPhone.has(option.phone) || takenLocal.has(option.local.id)) continue;
-        takenPhone.add(option.phone);
-        takenLocal.add(option.local.id);
-        pairs.push(option);
-      }
+      yield;
+      pairs.push(...pairOnPhoto(phoneFaces, store.facesOf(uidByLink.get(key)!)));
     }
   }
   return pairs;
+}
+
+/**
+ * Whether the other device's copy holds the set of faces this computer takes in place of its own
+ * where both looked at a photo: the device whose id sorts first keeps its set. Never for an unknown
+ * id or this computer's own copy. The phone decides by the same rule, so the two agree.
+ */
+export function incomingSetWins(copyDeviceId: string, ownDeviceId: string | null): boolean {
+  return !!copyDeviceId && !!ownDeviceId && copyDeviceId < ownDeviceId;
+}
+
+/** Whether every face of the copy for a photo is held here as it is, under its index and in its
+ *  box: the two sets were brought together before. Faces of its own beside them are allowed. */
+export function holdsIncomingSet(faces: SnapshotFace[], here: FaceRecord[]): boolean {
+  const byIndex = new Map(here.map((f) => [indexOf(f.id), f]));
+  return faces.every((face) => {
+    const held = byIndex.get(face.index);
+    return !!held && held.box.every((v, i) => Math.abs(v - face.box[i]) <= SAME_BOX_TOLERANCE);
+  });
+}
+
+/**
+ * Free indexes for faces moving onto a photo, none of them in `used`: every face's own index when
+ * that is free, then the lowest free ones, in index order. The phone assigns by the same rule
+ * (`freeFaceIds`). Returns own index to new index.
+ */
+function freeIndexes(used: Set<number>, own: number[]): Map<number, number> {
+  const taken = new Set(used);
+  const out = new Map<number, number>();
+  const ordered = [...new Set(own)].sort((a, b) => a - b);
+  for (const index of ordered) {
+    if (taken.has(index)) continue;
+    taken.add(index);
+    out.set(index, index);
+  }
+  let next = 0;
+  for (const index of ordered) {
+    if (out.has(index)) continue;
+    while (taken.has(next)) next++;
+    taken.add(next);
+    out.set(index, next);
+  }
+  return out;
+}
+
+function recordOf(uid: string, face: SnapshotFace, index: number): FaceRecord {
+  return {
+    id: `${uid}#${index}`,
+    uid,
+    box: face.box,
+    points: face.points.length >= 10 ? face.points.slice(0, 10) : [],
+    score: face.score,
+    blur: face.blur ?? 100,
+    sideways: sidewaysMeasure(face.points) ?? 0,
+    embedding: face.embedding,
+  };
+}
+
+/** The ids of each photo's faces in the people's records, in the order each record holds them, so a photo's decisions are found without reading every face's. */
+type PhotoIndex = {
+  confirmed: Map<string, string[]>;
+  assign: Map<string, string[]>;
+  blocked: Map<string, string[]>;
+  rejected: Map<string, string[]>;
+  /** The keys of the "not this person" times, by the photo's link id. */
+  curation: Map<string, string[]>;
+};
+
+const photoOfFace = (faceId: string) => faceId.slice(0, faceId.lastIndexOf("#"));
+
+function indexByPhoto(keys: Iterable<string>, photo: (key: string) => string | null): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const key of keys) {
+    const at = photo(key);
+    if (at === null) continue;
+    const list = out.get(at);
+    if (list) list.push(key);
+    else out.set(at, [key]);
+  }
+  return out;
+}
+
+function photoIndex(p: FaceStore["people"], rejected: Set<string>): PhotoIndex {
+  return {
+    confirmed: indexByPhoto(Object.keys(p.confirmed), photoOfFace),
+    assign: indexByPhoto(Object.keys(p.assign), photoOfFace),
+    blocked: indexByPhoto(Object.keys(p.blocked), photoOfFace),
+    rejected: indexByPhoto(rejected, photoOfFace),
+    curation: indexByPhoto(Object.keys(p.curation), (key) => {
+      const c = p.curation[key];
+      return c.kind === CURATION_NOT_PERSON ? photoOfFace(c.ref) : null;
+    }),
+  };
+}
+
+/**
+ * Points what the user decided about a photo's faces at the ids `newIdOf` gives them: the
+ * confirmed names, the groupings, the "not this person" marks and their times, and the faces left
+ * out. A face with no new id takes its decisions with it. `index` finds the photo's entries; each
+ * photo is pointed once per index.
+ */
+function repointFaces(
+  p: FaceStore["people"],
+  rejected: Set<string>,
+  uid: string,
+  newIdOf: Map<string, string>,
+  index: PhotoIndex,
+): void {
+  const move = <T>(record: Record<string, T>, ids: string[] | undefined) => {
+    const moved: [string, T][] = [];
+    for (const id of ids ?? []) {
+      if (!Object.hasOwn(record, id)) continue;
+      const value = record[id];
+      delete record[id];
+      const to = newIdOf.get(id);
+      if (to) moved.push([to, value]);
+    }
+    for (const [to, value] of moved) record[to] = value;
+  };
+  move(p.confirmed, index.confirmed.get(uid));
+  move(p.assign, index.assign.get(uid));
+  move(p.blocked, index.blocked.get(uid));
+  const left = (index.rejected.get(uid) ?? []).filter((id) => rejected.has(id));
+  for (const id of left) rejected.delete(id);
+  for (const id of left) {
+    const to = newIdOf.get(id);
+    if (to) rejected.add(to);
+  }
+  const link = linkOf(uid);
+  const portable = new Map([...newIdOf].map(([from, to]) => [portableFaceId(from), portableFaceId(to)]));
+  const times: Curation[] = [];
+  for (const key of index.curation.get(link) ?? []) {
+    const c = p.curation[key];
+    if (!c || c.kind !== CURATION_NOT_PERSON || photoOfFace(c.ref) !== link) continue;
+    delete p.curation[key];
+    const to = portable.get(c.ref);
+    if (to) times.push({ ...c, ref: to });
+  }
+  for (const c of times) {
+    const key = curationKey(c.kind, c.name, c.ref);
+    if ((p.curation[key]?.at ?? -1) < c.at) p.curation[key] = c;
+  }
+}
+
+/**
+ * Takes the other device's set of faces for a photo in place of the one found here: each face
+ * takes over what the user decided about the face here that is the same one, and every face here
+ * with no twin there stays under a free index. A face left out there is left out here too, unless
+ * it was confirmed here. The names the copy brings follow as for any pair, since the faces now sit
+ * in the very same boxes.
+ */
+function adoptSet(
+  store: FaceStore,
+  rejected: Set<string>,
+  uid: string,
+  faces: SnapshotFace[],
+  here: FaceRecord[],
+  index: PhotoIndex,
+): void {
+  const p = store.people;
+  const pairs = pairOnPhoto(faces, here);
+  const twinOf = new Map(pairs.map((x) => [x.phone, x.local]));
+  const newIdOf = new Map<string, string>();
+  const records: FaceRecord[] = [];
+  const used = new Set(faces.map((f) => f.index));
+  for (const face of faces) {
+    const record = recordOf(uid, face, face.index);
+    records.push(record);
+    const twin = twinOf.get(face);
+    if (twin) newIdOf.set(twin.id, record.id);
+  }
+  const paired = new Set(pairs.map((x) => x.local.id));
+  const alone = here.filter((face) => !paired.has(face.id));
+  const moved = freeIndexes(used, alone.map((face) => indexOf(face.id)));
+  for (const face of alone) {
+    const record = { ...face, id: `${uid}#${moved.get(indexOf(face.id))!}` };
+    records.push(record);
+    newIdOf.set(face.id, record.id);
+  }
+  repointFaces(p, rejected, uid, newIdOf, index);
+  for (const face of faces) {
+    const id = `${uid}#${face.index}`;
+    if (face.rejected && p.confirmed[id] === undefined && !rejected.has(id)) {
+      rejected.add(id);
+      delete p.assign[id];
+    }
+  }
+  store.put(uid, records);
 }
 
 export type Comparison = {
@@ -120,10 +368,19 @@ function quantile(sorted: number[], q: number): number {
 }
 
 export function compareWithPhone(store: FaceStore, copies: FaceCopy[]): Comparison {
+  return runPausable(compareSteps(store, copies));
+}
+
+/** `compareWithPhone`, giving the rest of the process its turn as it pairs the faces. */
+export function compareWithPhoneAsync(store: FaceStore, copies: FaceCopy[]): Promise<Comparison> {
+  return runPausableSliced(compareSteps(store, copies));
+}
+
+function* compareSteps(store: FaceStore, copies: FaceCopy[]): Pausable<Comparison> {
   const uids = new Set(store.scanned().map((uid) => uid.slice(uid.indexOf("~") + 1)));
   let phoneFaces = 0;
   for (const copy of copies) for (const f of copy.faces) if (!f.rejected && uids.has(f.key)) phoneFaces++;
-  const pairs = pairFaces(store, copies).filter((p) => p.phone.embedding.length === p.local.embedding.length);
+  const pairs = (yield* pairFacesSteps(store, copies)).filter((p) => p.phone.embedding.length === p.local.embedding.length);
   const cos = pairs.map((p) => dot(p.phone.embedding, p.local.embedding)).sort((a, b) => a - b);
   const overlaps = pairs.map((p) => p.overlap).sort((a, b) => a - b);
   return {
@@ -276,6 +533,10 @@ export function copyForDrive(
     removals,
     namedAt: (name) => p.namedAt[foldPersonName(name)] ?? 0,
     nameChanges: p.nameChanges,
+    // Every row, a person shown again too, so the show crosses devices; in a fixed order.
+    hiddenPeople: Object.keys(p.hidden)
+      .sort()
+      .map((k) => ({ name: p.hidden[k].name, hidden: p.hidden[k].hidden, at: p.hidden[k].at })),
     // Never marked as read at full resolution: this computer reads the large preview, tiles and
     // all, and the phone's own full-resolution "Find more photos" should still read these.
     markers: store
@@ -334,6 +595,8 @@ export function takeInNameChanges(store: FaceStore, copy: FaceCopy, ownToo = fal
     if (!to) {
       // The name taken off there, after it was given here: the person stays, unnamed.
       if (person && fromHere && timeOf(fromHere) < change.at) {
+        // A hidden group shown again keeps its row: the show is the later row of that name.
+        if (!isHiddenToken(fromHere)) dropHidden(p, fromHere);
         renameInPlace(p, person, null);
         carried++;
         changed = true;
@@ -357,6 +620,7 @@ export function takeInNameChanges(store: FaceStore, copy: FaceCopy, ownToo = fal
       // "Not this person" marks follow the name too, with the times of what was set by hand.
       const target = holder(to)!.name!;
       moveCuration(p, fromHere, target);
+      moveHidden(p, fromHere, target);
       for (const [faceId, names] of Object.entries(p.blocked)) {
         if (!names.some((n) => foldPersonName(n) === foldPersonName(fromHere))) continue;
         const next = names.map((n) => (foldPersonName(n) === foldPersonName(fromHere) ? target : n));
@@ -394,19 +658,47 @@ export type Applied = {
   attached: number;
   /** Faces both sides name, differently: left as they are here. */
   conflicts: number;
+  /** Photos whose faces here gave way to the set the other device found. */
+  adopted: number;
+  /** People hidden or shown again there after the setting held here. */
+  hiddenChanged: number;
 };
 
-/** A face here overlapping a phone face this much is taken for it, and no second one is added. */
-const OVERLAPPING = 0.3;
-
-function personNamed(p: FaceStore["people"], name: string): Person {
-  const fold = foldPersonName(name);
-  let person = p.people.find((x) => x.name && foldPersonName(x.name) === fold);
-  if (!person) {
-    person = { id: `p${p.nextId++}`, name, isOther: false };
-    p.people.push(person);
+/**
+ * Finds people by name, the first holder of a name in the people's order as a search through them
+ * would, and makes one when nobody holds it. Read once from the people: only good while no one is
+ * renamed meanwhile, and while people are added only through `named`.
+ */
+function peopleByName(p: FaceStore["people"]) {
+  const byFold = new Map<string, Person>();
+  for (const person of p.people) {
+    if (!person.name) continue;
+    const fold = foldPersonName(person.name);
+    if (!byFold.has(fold)) byFold.set(fold, person);
   }
-  return person;
+  return {
+    holder: (name: string): Person | undefined => byFold.get(foldPersonName(name)),
+    named: (name: string): Person => {
+      const fold = foldPersonName(name);
+      let person = byFold.get(fold);
+      if (!person) {
+        person = { id: `p${p.nextId++}`, name, isOther: false };
+        p.people.push(person);
+        byFold.set(fold, person);
+      }
+      return person;
+    },
+  };
+}
+
+/** `nameTakenOffSince` at `at`, worked out once per name: the renames do not change while a copy is taken in. */
+function takenOffSince(p: FaceStore["people"], at: number): (name: string) => boolean {
+  const known = new Map<string, boolean>();
+  return (name) => {
+    let off = known.get(name);
+    if (off === undefined) known.set(name, (off = nameTakenOffSince(p, name, at)));
+    return off;
+  };
 }
 
 /**
@@ -418,6 +710,25 @@ function personNamed(p: FaceStore["people"], name: string): Person {
  * `takeInNameChanges`.
  */
 export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): Applied | null {
+  return runPausable(applyCopySteps(store, copy, ownToo));
+}
+
+/**
+ * `applyCopy`, giving the rest of the process its turn as it goes. Between turns it holds nothing
+ * back: what it changed is in the people, and it reads them again after each turn, so a change made
+ * meanwhile is built on, not written over. A store emptied or let go meanwhile ends it with null,
+ * the copy not noted as taken in.
+ */
+export function applyCopyAsync(
+  store: FaceStore,
+  copy: FaceCopy,
+  ownToo = false,
+  slice?: () => Promise<void> | undefined,
+): Promise<Applied | null> {
+  return runPausableSliced(applyCopySteps(store, copy, ownToo), slice);
+}
+
+function* applyCopySteps(store: FaceStore, copy: FaceCopy, ownToo: boolean): Pausable<Applied | null> {
   const p = store.people;
   if (copy.deviceId === p.deviceId && !ownToo) return null;
   if ((p.applied[copy.deviceId] ?? -1) >= copy.createdAt) return null;
@@ -429,55 +740,132 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
     marked: 0,
     attached: 0,
     conflicts: 0,
+    adopted: 0,
+    hiddenChanged: 0,
   };
-  const rejected = new Set(p.rejected);
-  const nameOf = new Map<string, string>();
-  for (const person of p.people) if (person.name) nameOf.set(person.id, person.name);
-
-  const pairs = pairFaces(store, [copy]);
-  const localOf = new Map<SnapshotFace, FaceRecord>();
-  for (const pair of pairs) localOf.set(pair.phone, pair.local);
+  let rejected = new Set(p.rejected);
+  const namesOf = () => {
+    const out = new Map<string, string>();
+    for (const person of p.people) if (person.name) out.set(person.id, person.name);
+    return out;
+  };
+  let nameOf = namesOf();
+  let people = peopleByName(p);
+  let takenOff = takenOffSince(p, copy.createdAt);
+  let index: PhotoIndex | null = null;
   const whole = copyFits(copy);
-
-  // Faces the other device found and this one did not: kept here as found there, when its numbers
-  // are this computer's kind.
   const uidByLink = new Map<string, string>();
   for (const uid of store.scanned()) uidByLink.set(linkOf(uid), uid);
+  // A face paired earlier that a change made meanwhile replaced or dropped is passed over.
+  const current = (face: FaceRecord) => store.facesOf(face.uid).includes(face);
+
+  // A turn for the rest of the process: what is held goes into the people first, and is read back after.
+  let marks = 0;
+  let assignHeld = p.assign;
+  let peopleHeld = p.people;
+  const handBack = () => {
+    p.rejected = [...rejected];
+    store.markPeople();
+    store.edits++;
+    marks = store.peopleMarks;
+    assignHeld = p.assign;
+    peopleHeld = p.people;
+  };
+  const takeBack = (): boolean => {
+    if (store.people !== p || !store.isLoaded()) return false;
+    rejected = new Set(p.rejected);
+    nameOf = namesOf();
+    people = peopleByName(p);
+    takenOff = takenOffSince(p, copy.createdAt);
+    if (store.peopleMarks !== marks || p.assign !== assignHeld || p.people !== peopleHeld) index = null;
+    return true;
+  };
+  function* turn(): Generator<void, boolean, boolean> {
+    handBack();
+    yield;
+    return takeBack();
+  }
+
+  // A photo both devices looked at holds two sets of the same faces. The device whose id sorts
+  // first keeps its set; the other takes it in place of its own, once, so both end up with one set
+  // under one set of ids and what is set by hand afterwards crosses face by face.
+  if (whole && incomingSetWins(copy.deviceId, deviceIdOf(store))) {
+    const facesByKey = new Map<string, SnapshotFace[]>();
+    for (const face of copy.faces) {
+      const list = facesByKey.get(face.key);
+      if (list) list.push(face);
+      else facesByKey.set(face.key, [face]);
+    }
+    for (const [key, faces] of facesByKey) {
+      if ((yield) && !(yield* turn())) return null;
+      const uid = uidByLink.get(key);
+      if (!uid) continue;
+      const here = store.facesOf(uid);
+      if (here.length === 0 || holdsIncomingSet(faces, here)) continue;
+      if (faces.some((f) => f.embedding.length !== FACE_EMBEDDING_DIM || f.index > MAX_FACE_INDEX)) continue;
+      index ??= photoIndex(p, rejected);
+      adoptSet(store, rejected, uid, faces, here, index);
+      result.adopted++;
+    }
+  }
+
+  const copyByKey = new Map<string, SnapshotFace[]>();
   for (const face of copy.faces) {
-    if (!whole || localOf.has(face) || face.rejected || face.embedding.length !== FACE_EMBEDDING_DIM) continue;
-    const uid = uidByLink.get(face.key);
-    if (!uid) continue;
-    const here = store.facesOf(uid);
-    if (here.some((f) => overlap(f.box, face.box) >= OVERLAPPING)) continue;
-    const index = here.reduce((m, f) => Math.max(m, indexOf(f.id)), -1) + 1;
-    if (index > MAX_FACE_INDEX) continue;
-    const record: FaceRecord = {
-      id: `${uid}#${index}`,
-      uid,
-      box: face.box,
-      points: face.points.length >= 10 ? face.points.slice(0, 10) : [],
-      score: face.score,
-      blur: face.blur ?? 100,
-      sideways: sidewaysMeasure(face.points) ?? 0,
-      embedding: face.embedding,
-    };
-    store.put(uid, [...here, record]);
-    localOf.set(face, record);
-    result.added++;
+    if (!uidByLink.has(face.key)) continue;
+    const list = copyByKey.get(face.key);
+    if (list) list.push(face);
+    else copyByKey.set(face.key, [face]);
+  }
+  const localOf = new Map<SnapshotFace, FaceRecord>();
+  for (const [key, faces] of copyByKey) {
+    if ((yield) && !(yield* turn())) return null;
+    for (const pair of pairOnPhoto(faces, store.facesOf(uidByLink.get(key)!), whole)) localOf.set(pair.phone, pair.local);
+  }
+
+  // Faces the other device found and this one did not: every face of the copy left unpaired, kept
+  // here as found there, under its own index when it is free here, else the lowest free one, when its
+  // numbers are this computer's kind. Pairing takes every same face it can, so an unpaired face is
+  // none of the faces here, or a second detection that device holds and this one must hold too for the
+  // two sets to be one. One left out there comes left out.
+  if (whole) {
+    for (const [key, faces] of copyByKey) {
+      if ((yield) && !(yield* turn())) return null;
+      const uid = uidByLink.get(key)!;
+      if (!store.has(uid)) continue;
+      const missing = faces.filter((face) => !localOf.has(face) && face.embedding.length === FACE_EMBEDDING_DIM);
+      if (missing.length === 0) continue;
+      const here = store.facesOf(uid);
+      const at = freeIndexes(new Set(here.map((f) => indexOf(f.id))), missing.map((face) => face.index));
+      const added: FaceRecord[] = [];
+      for (const face of missing) {
+        const index = at.get(face.index)!;
+        if (index > MAX_FACE_INDEX || added.some((r) => indexOf(r.id) === index)) continue;
+        const record = recordOf(uid, face, index);
+        added.push(record);
+        localOf.set(face, record);
+        if (face.rejected) rejected.add(record.id);
+        result.added++;
+      }
+      if (added.length) store.put(uid, [...here, ...added]);
+    }
   }
 
   const byKeyIndex = new Map<string, FaceRecord>();
   for (const [phone, local] of localOf) byKeyIndex.set(`${phone.key}#${phone.index}`, local);
-  const holder = (name: string) => p.people.find((x) => x.name && foldPersonName(x.name) === foldPersonName(name));
+  const paired = (key: string, index: number) => {
+    const local = byKeyIndex.get(`${key}#${index}`);
+    return local && current(local) ? local : undefined;
+  };
 
   // What that device took away by hand after it was set here goes here too; the removal is kept
   // either way, so a setting from before it is not brought back and the next copy hands it on.
   for (const removal of copy.removals) {
+    if ((yield) && !(yield* turn())) return null;
     let ref = removal.key;
     let local: FaceRecord | undefined;
     if (removal.kind === CURATION_NOT_PERSON) {
       const uid = uidByLink.get(removal.key);
-      local = byKeyIndex.get(`${removal.key}#${removal.index}`) ?? (uid ? store.facesOf(uid).find((f) => f.id === `${uid}#${removal.index}`) : undefined);
+      local = paired(removal.key, removal.index) ?? (uid ? store.facesOf(uid).find((f) => f.id === `${uid}#${removal.index}`) : undefined);
       ref = local ? portableFaceId(local.id) : `${removal.key}#${removal.index}`;
     } else if (removal.kind === CURATION_COVER) {
       ref = "";
@@ -487,7 +875,7 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
     if ((held?.at ?? 0) >= removal.at) continue;
     if (!held?.removed) {
       if (removal.kind === CURATION_MANUAL_PHOTO) {
-        const name = holder(removal.name)?.name ?? removal.name;
+        const name = people.holder(removal.name)?.name ?? removal.name;
         const rest = (p.manual[name] ?? []).filter((link) => link !== removal.key);
         if (rest.length) p.manual[name] = rest;
         else delete p.manual[name];
@@ -498,7 +886,7 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
         else delete p.blocked[local.id];
       }
       if (removal.kind === CURATION_COVER) {
-        const person = holder(removal.name);
+        const person = people.holder(removal.name);
         if (person) delete p.covers[person.name!];
       }
     }
@@ -507,7 +895,8 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
   pruneCuration(p);
 
   for (const [phone, local] of localOf) {
-    if (rejected.has(local.id)) continue;
+    if ((yield) && !(yield* turn())) return null;
+    if (rejected.has(local.id) || !current(local)) continue;
     const decided = p.confirmed[local.id] !== undefined;
     if (phone.rejected) {
       if (!decided) {
@@ -518,14 +907,14 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
       continue;
     }
     const name = phone.confirmed ?? phone.person;
-    if (!name || nameTakenOffSince(p, name, copy.createdAt)) continue;
+    if (!name || takenOff(name)) continue;
     const ownerName = p.assign[local.id] ? nameOf.get(p.assign[local.id]) : undefined;
     if (ownerName !== undefined) {
       if (foldPersonName(ownerName) !== foldPersonName(name)) result.conflicts++;
       continue;
     }
     if (decided || p.blocked[local.id]?.some((n) => foldPersonName(n) === foldPersonName(name))) continue;
-    const person = personNamed(p, name);
+    const person = people.named(name);
     nameOf.set(person.id, person.name!);
     p.assign[local.id] = person.id;
     // Only a name confirmed there is confirmed here: the other device's grouping is as automatic as this one's.
@@ -535,7 +924,8 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
   p.rejected = [...rejected];
 
   for (const mark of copy.notPerson) {
-    const local = byKeyIndex.get(`${mark.key}#${mark.index}`);
+    if ((yield) && !(yield* turn())) return null;
+    const local = paired(mark.key, mark.index);
     if (!local) continue;
     const key = curationKey(CURATION_NOT_PERSON, mark.name, portableFaceId(local.id));
     const held = p.curation[key];
@@ -561,8 +951,9 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
     result.marked++;
   }
   for (const m of copy.manual) {
-    if (!m.name.trim() || nameTakenOffSince(p, m.name, copy.createdAt)) continue;
-    const name = holder(m.name)?.name ?? m.name;
+    if ((yield) && !(yield* turn())) return null;
+    if (!m.name.trim() || takenOff(m.name)) continue;
+    const name = people.holder(m.name)?.name ?? m.name;
     const key = curationKey(CURATION_MANUAL_PHOTO, name, m.key);
     const held = p.curation[key];
     if (held?.removed && held.at >= m.at) continue;
@@ -574,18 +965,38 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
     if (m.at > (held?.at ?? 0)) p.curation[key] = { kind: CURATION_MANUAL_PHOTO, name, ref: m.key, removed: false, at: m.at };
   }
   for (const [name, key] of copy.covers) {
+    if ((yield) && !(yield* turn())) return null;
     const uid = uidByLink.get(key);
-    const person = holder(name);
+    const person = people.holder(name);
     if (!uid || !person) continue;
     const setAt = copy.coverSetAt.get(name) ?? 0;
     const curation = curationKey(CURATION_COVER, person.name!, "");
     const held = p.curation[curation];
     if (held?.removed && held.at >= setAt) continue;
-    // Of two covers the later one; with none here, the other device's.
+    // Of two covers the later one; with none here, the other device's. A cover picked here always has
+    // its time, so one held without a time came from another device's copy, and that device's current
+    // cover takes its place even when it carries no time either.
     const heldAt = held && !held.removed ? held.at : 0;
-    if (p.covers[person.name!] && setAt <= heldAt) continue;
+    if (p.covers[person.name!] && heldAt > 0 && setAt <= heldAt) continue;
     p.covers[person.name!] = uid;
     if (setAt > heldAt) p.curation[curation] = { kind: CURATION_COVER, name: person.name!, ref: "", removed: false, at: setAt };
+  }
+
+  // Hiding and showing: the later of the two settings of a name wins, here or there. A name taken off
+  // after the setting has nothing left to hide. A group shown again there loses its reserved label here.
+  // Showing a hidden group renames it, so the people are searched as they are now.
+  const holderNow = (name: string) => p.people.find((x) => x.name && foldPersonName(x.name) === foldPersonName(name));
+  for (const h of copy.hiddenPeople) {
+    const name = h.name.trim();
+    if (!name) continue;
+    const token = isHiddenToken(name);
+    if (!token && nameTakenOffSince(p, name, h.at)) continue;
+    const key = foldPersonName(name);
+    if ((p.hidden[key]?.at ?? -1) >= h.at) continue;
+    const person = holderNow(name);
+    p.hidden[key] = { name: person?.name ?? name, hidden: h.hidden, at: h.at };
+    if (!h.hidden && person) takeTokenOff(p, person, h.at);
+    result.hiddenChanged++;
   }
 
   p.applied[copy.deviceId] = copy.createdAt;
@@ -603,6 +1014,24 @@ export function applyCopy(store: FaceStore, copy: FaceCopy, ownToo = false): App
  * computer's own copy only with `ownToo`, as for `takeInNameChanges`.
  */
 export function adoptScanned(store: FaceStore, copy: FaceCopy, uidByLink: Map<string, string>, ownToo = false): number {
+  return runPausable(adoptScannedSteps(store, copy, uidByLink, ownToo));
+}
+
+/**
+ * `adoptScanned`, giving the rest of the process its turn between photos; it reads the people again
+ * after each turn. A store emptied or let go meanwhile ends it with what was taken until then.
+ */
+export function adoptScannedAsync(
+  store: FaceStore,
+  copy: FaceCopy,
+  uidByLink: Map<string, string>,
+  ownToo = false,
+  slice?: () => Promise<void> | undefined,
+): Promise<number> {
+  return runPausableSliced(adoptScannedSteps(store, copy, uidByLink, ownToo), slice);
+}
+
+function* adoptScannedSteps(store: FaceStore, copy: FaceCopy, uidByLink: Map<string, string>, ownToo: boolean): Pausable<number> {
   const p = store.people;
   if (copy.deviceId === p.deviceId && !ownToo) return 0;
   // Faces of another kind compare with nothing found here: their photos are scanned here instead.
@@ -620,8 +1049,22 @@ export function adoptScanned(store: FaceStore, copy: FaceCopy, uidByLink: Map<st
     const id = `${mark.key}#${mark.index}`;
     blocks.set(id, [...(blocks.get(id) ?? []), mark.name]);
   }
+  let people = peopleByName(p);
+  let takenOff = takenOffSince(p, copy.createdAt);
   let adopted = 0;
+  function* turn(): Generator<void, boolean, boolean> {
+    if (adopted > 0) {
+      store.markPeople();
+      store.edits++;
+    }
+    yield;
+    if (store.people !== p || !store.isLoaded()) return false;
+    people = peopleByName(p);
+    takenOff = takenOffSince(p, copy.createdAt);
+    return true;
+  }
   for (const key of copy.scanned) {
+    if ((yield) && !(yield* turn())) return adopted;
     const uid = uidByLink.get(key);
     if (!uid || store.has(uid)) continue;
     const records: FaceRecord[] = [];
@@ -642,8 +1085,8 @@ export function adoptScanned(store: FaceStore, copy: FaceCopy, uidByLink: Map<st
       if (blocked) p.blocked[record.id] = blocked;
       const name = face.confirmed ?? face.person;
       if (!name || blocked?.some((n) => foldPersonName(n) === foldPersonName(name))) continue;
-      if (nameTakenOffSince(p, name, copy.createdAt)) continue;
-      const person = personNamed(p, name);
+      if (takenOff(name)) continue;
+      const person = people.named(name);
       p.assign[record.id] = person.id;
       if (face.confirmed) p.confirmed[record.id] = person.name!;
     }

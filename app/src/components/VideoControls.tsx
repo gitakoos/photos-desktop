@@ -68,6 +68,9 @@ function safeSeconds(n: number): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+/** The least time between two seeks while the slider is dragged. */
+const SCRUB_SEEK_MS = 250;
+
 /**
  * The viewer's own video controls.
  *
@@ -93,6 +96,9 @@ export function VideoControls({ video }: Props) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   // Read from listeners that must not be torn down and rebuilt on every drag frame.
   const scrubbingRef = useRef(false);
+  // When the last seek of a drag went out, and where the drag is since, not yet sought.
+  const lastSeek = useRef(0);
+  const pendingRatio = useRef<number | null>(null);
   const hideTimer = useRef<number | undefined>(undefined);
 
   // Out of the way while a clip plays untouched, and back on the first movement of
@@ -110,8 +116,11 @@ export function VideoControls({ video }: Props) {
     if (!video) return;
     // A play() the browser refuses (no gesture yet, source not ready) rejects, and an
     // unhandled rejection in the console is all that would otherwise come of it.
-    if (video.paused) void video.play().catch(() => {});
-    else video.pause();
+    // Before its metadata is in, a video starts itself (see ViewerShell): a play() this
+    // early would have WebKitGTK save the whole stream to disk.
+    if (video.paused) {
+      if (video.readyState >= HTMLMediaElement.HAVE_METADATA) void video.play().catch(() => {});
+    } else video.pause();
   }, [video]);
 
   const toggleMute = useCallback(() => {
@@ -248,20 +257,31 @@ export function VideoControls({ video }: Props) {
     setScrubbing(true);
     const r = ratioAt(e.clientX);
     setScrubRatio(r);
+    lastSeek.current = performance.now();
     seekTo(r);
   }
 
+  // A drag moves the thumb at once but seeks at most every SCRUB_SEEK_MS, and once more
+  // where it is let go: each seek of a streamed video is a new range, and one per pointer
+  // move queues reads nobody wants ahead of the one that is.
   function moveScrub(e: ReactPointerEvent<HTMLDivElement>): void {
     if (!scrubbingRef.current) return;
     const r = ratioAt(e.clientX);
     setScrubRatio(r);
-    seekTo(r);
+    const now = performance.now();
+    if (now - lastSeek.current >= SCRUB_SEEK_MS) {
+      lastSeek.current = now;
+      pendingRatio.current = null;
+      seekTo(r);
+    } else pendingRatio.current = r;
   }
 
   function endScrub(e: ReactPointerEvent<HTMLDivElement>): void {
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
+    if (scrubbingRef.current && pendingRatio.current !== null) seekTo(pendingRatio.current);
+    pendingRatio.current = null;
     scrubbingRef.current = false;
     setScrubbing(false);
   }

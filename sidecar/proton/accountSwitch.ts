@@ -24,13 +24,40 @@
 // Whether it is that same account is read from the user keys both sessions unlocked: a
 // key keeps its ID through a password change, and no two accounts share one.
 
+import { join } from "node:path";
+
+import { ACCOUNT_FILE, readSealedOrSetAside, storeDir, writeSealedAtomic } from "./store.ts";
+
+export type AccountMatch = "same" | "different" | "unknown";
+
 /**
- * Whether the account that just signed in is the one whose session lapsed. With nothing
- * to compare against it counts as another account: the cost of that mistake is a cache
- * built again, the cost of the other one is one account's data shown to another.
+ * Whether the account that just signed in is the one whose session lapsed. Keys that share
+ * nothing are another account. With nothing to compare against it is not known, and an
+ * unknown never counts as another account: that answer deletes what the vault holds.
  */
-export function sameAccount(previousKeyIds: readonly string[], currentKeyIds: readonly string[]): boolean {
-  if (previousKeyIds.length === 0 || currentKeyIds.length === 0) return false;
+export function accountMatch(previousKeyIds: readonly string[], currentKeyIds: readonly string[]): AccountMatch {
+  if (previousKeyIds.length === 0 || currentKeyIds.length === 0) return "unknown";
   const previous = new Set(previousKeyIds);
-  return currentKeyIds.some((id) => previous.has(id));
+  return currentKeyIds.some((id) => previous.has(id)) ? "same" : "different";
+}
+
+/**
+ * The user key ids of the account the store belongs to, as last recorded; empty when none were.
+ * Throws while the store is locked.
+ */
+export function recordedAccountKeys(): string[] {
+  const raw = readSealedOrSetAside(join(storeDir(), ACCOUNT_FILE));
+  if (!raw) return [];
+  try {
+    const ids = JSON.parse(raw.toString("utf8"))?.keyIds;
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Records the account's user key ids beside the session, so they outlive a lost session file. */
+export function recordAccountKeys(keyIds: readonly string[]): void {
+  if (keyIds.length === 0) return;
+  writeSealedAtomic(join(storeDir(), ACCOUNT_FILE), Buffer.from(JSON.stringify({ keyIds: [...keyIds].sort() }), "utf8"));
 }

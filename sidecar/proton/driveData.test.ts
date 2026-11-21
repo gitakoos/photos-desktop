@@ -30,6 +30,7 @@ import {
   facesFileDevice,
   labelsFileDevice,
   listDriveBackups,
+  listOtherCopies,
   loadDriveData,
   otherFaceCopies,
   mergeCollections,
@@ -228,7 +229,7 @@ describe("the people of a face snapshot", () => {
   it("refuses a file cut short or of another version", () => {
     const whole = facesSnapshot();
     expect(() => readFacesSnapshot(whole.subarray(0, whole.length - 1))).toThrow();
-    for (const version of [3, 7]) {
+    for (const version of [3, 8]) {
       const other = Buffer.from(whole);
       other.writeUInt32LE(version, 8);
       expect(() => readFacesSnapshot(other)).toThrow(`face snapshot version ${version}`);
@@ -283,8 +284,16 @@ FF`;
 
 const hex = (text: string) => Buffer.from(text.replace(/\s+/g, ""), "hex");
 
-describe("the face copy, version 6", () => {
-  it("is written in the phone's golden byte layout, and reads back", () => {
+/** A version-6 golden file as version 7: the version, and a count of no hidden people after the nine counts. */
+const asV7 = (v6: Buffer) => {
+  const at = v6.length - hex(GOLDEN_V5_BODY).length + 36;
+  const out = Buffer.concat([v6.subarray(0, at), Buffer.alloc(4), v6.subarray(at)]);
+  out.writeUInt32LE(7, 8);
+  return out;
+};
+
+describe("the face copy, versions 6 and 7", () => {
+  it("is written in the golden byte layout, and the phone's version 6 file reads back", () => {
     const written = writeFaceCopy({
       deviceId: "d1",
       deviceLabel: "Phone",
@@ -320,7 +329,8 @@ describe("the face copy, version 6", () => {
         { key: "k2", swept: true },
       ],
     });
-    expect(written.toString("hex")).toBe(hex(GOLDEN_V6).toString("hex"));
+    expect(written.toString("hex")).toBe(asV7(hex(GOLDEN_V6)).toString("hex"));
+    expect(readFaceCopy(written).copy.hiddenPeople).toEqual([]);
     const { copy } = readFaceCopy(hex(GOLDEN_V6));
     expect(copy.deviceId).toBe("d1");
     expect(copy.facesWipedAt).toBe(11);
@@ -538,10 +548,18 @@ function fakeDrive(files: { uid: string; name: string; revision: string; bytes: 
   const downloads: string[] = [];
   const children: Record<string, any[]> = {
     root: [node("app", "Photos for Proton", "folder")],
-    app: [node("ml", "ML data", "folder"), node("labels", "Labels", "folder"), node("hidden", "Hidden", "folder")],
-    ml: files.filter((f) => !f.name.startsWith("labels") && !f.name.startsWith("hidden")).map(fileNode),
+    app: [
+      node("ml", "ML data", "folder"),
+      node("labels", "Labels", "folder"),
+      node("hidden", "Hidden", "folder"),
+      node("settings", "Settings", "folder"),
+      node("albumOrder", "Album order", "folder"),
+    ],
+    ml: files.filter((f) => !/^(labels|hidden|settings|album-order)/.test(f.name)).map(fileNode),
     labels: files.filter((f) => f.name.startsWith("labels")).map(fileNode),
     hidden: files.filter((f) => f.name.startsWith("hidden")).map(fileNode),
+    settings: files.filter((f) => f.name.startsWith("settings")).map(fileNode),
+    albumOrder: files.filter((f) => f.name.startsWith("album-order")).map(fileNode),
   };
   const client = {
     getMyFilesRootFolder: async () => ({ uid: "root" }),
@@ -643,6 +661,29 @@ describe("reading the phone's copies", () => {
     expect(part.ownRead).toBe(false);
   }, 30_000);
 
+  it("names the kinds whose file of this install's would not open, and counts another device's apart", async () => {
+    const junk = Buffer.from("not a sealed copy");
+    const files = [
+      { uid: "f1", name: `faces-${id}.pfpml`, revision: "r", bytes: junk },
+      { uid: "l1", name: `labels-${id}.pfplb`, revision: "r", bytes: await seal(labelCopy("Desk"), key) },
+      { uid: "h1", name: `hidden-${id}.pfphd`, revision: "r", bytes: junk },
+      { uid: "t1", name: `settings-${id}.pfpst`, revision: "r", bytes: junk },
+      { uid: "l2", name: `labels-${other}.pfplb`, revision: "r", bytes: junk },
+    ];
+    const kinds = { faces: false, faceData: true, labels: true, search: false, hidden: true, settings: true, ownDeviceId: id };
+    const back = await loadDriveData(fakeDrive(files).client, account(), { ...kinds, readBack: true, settingsReadBack: true }, null, "space-a");
+    expect(back.ownUnreadable.sort()).toEqual(["faces", "hidden", "settings"]);
+    expect(back.ownRead).toBe(false);
+    // Faces, hidden and the other device's labels; this install's settings are counted with the settings.
+    expect(back.unreadable).toBe(3);
+    expect(back.settingsUnreadable).toBe(1);
+    expect(back.labelCopies).toHaveLength(1);
+    // Once taken in, this install's files are not read, so nothing of its own is held.
+    const after = await loadDriveData(fakeDrive(files).client, account(), kinds, null, "space-a");
+    expect(after.ownUnreadable).toEqual([]);
+    expect(after.unreadable).toBe(1);
+  }, 30_000);
+
   it("lists the backups device by device, newest first, named from a small copy", async () => {
     const files = [
       { uid: "f1", name: `faces-${id}.pfpml`, revision: "r", bytes: Buffer.alloc(0), at: 3_000 },
@@ -665,6 +706,111 @@ describe("reading the phone's copies", () => {
     expect(again.downloads).toEqual([]);
     expect(await otherFaceCopies(drive.client, id)).toEqual(["f2"]);
   }, 30_000);
+
+  it("reads the settings of other devices when asked, counts one that will not read, and lists them as a backup", async () => {
+    const copy = (device: string, version = 1) =>
+      Buffer.from(JSON.stringify({ v: version, d: device, p: "android", n: "Pixel 8", c: 5, s: [{ k: "appearance.theme", t: 7, x: "dark" }], l: [] }));
+    const files = [
+      { uid: "t1", name: `settings-${other}.pfpst`, revision: "r", bytes: await seal(copy(other), key), at: 4_000 },
+      { uid: "t2", name: `settings-${id}.pfpst`, revision: "r", bytes: await seal(copy(id), key), at: 2_000 },
+    ];
+    const kinds = { faces: false, labels: false, search: false, settings: true, ownDeviceId: id };
+    const got = await loadDriveData(fakeDrive(files).client, account(), kinds, null, "space-a");
+    expect(got.settingsCopies.map((c) => [c.deviceId, c.platform, c.scalars[0].value])).toEqual([[other, "android", "dark"]]);
+    expect(got.settingsUnreadable).toBe(0);
+    expect(got.deviceNames).toEqual([[other, "Pixel 8"]]);
+    const own = await loadDriveData(fakeDrive(files).client, account(), { ...kinds, readBack: true }, null, "space-a");
+    expect(own.settingsCopies).toHaveLength(1);
+    expect(own.ownRead).toBe(true);
+    const back = await loadDriveData(fakeDrive(files).client, account(), { ...kinds, settingsReadBack: true }, null, "space-a");
+    expect(back.settingsCopies.map((c) => c.deviceId).sort()).toEqual([id, other].sort());
+    const backOff = await loadDriveData(fakeDrive(files).client, account(), { ...kinds, settings: false, settingsReadBack: true }, null, "space-a");
+    expect(backOff.settingsCopies).toEqual([]);
+    const off = await loadDriveData(fakeDrive(files).client, account(), { ...kinds, settings: false }, null, "space-a");
+    expect(off.settingsCopies).toEqual([]);
+    const newer = [{ uid: "t3", name: `settings-${other}.pfpst`, revision: "r", bytes: await seal(copy(other, 2), key) }];
+    const passed = await loadDriveData(fakeDrive(newer).client, account(), kinds, null, "space-a");
+    expect(passed.settingsCopies).toEqual([]);
+    expect(passed.settingsUnreadable).toBe(1);
+    const listed = await listDriveBackups(fakeDrive(files).client, account(), null, id, {});
+    expect(listed.backups).toEqual([
+      { device: other, own: false, name: "Pixel 8", savedAt: 4_000, files: ["t1"] },
+      { device: id, own: true, name: null, savedAt: 2_000, files: ["t2"] },
+    ]);
+  }, 30_000);
+
+  it("reads the album orders of other devices only when asked, this install's own on a read-back, and lists them as a backup", async () => {
+    const copy = (device: string, version = 1) =>
+      Buffer.from(JSON.stringify({ v: version, d: device, p: "android", n: "Pixel 8", c: 5, a: [{ k: "alb", m: "custom", mt: 7, o: ["p2", "p1"], ot: 7 }] }));
+    const files = [
+      { uid: "o1", name: `album-order-${other}.pfpao`, revision: "r", bytes: await seal(copy(other), key), at: 4_000 },
+      { uid: "o2", name: `album-order-${id}.pfpao`, revision: "r", bytes: await seal(copy(id), key), at: 2_000 },
+    ];
+    const kinds = { faces: false, labels: false, search: false, albumOrder: true, ownDeviceId: id };
+    const got = await loadDriveData(fakeDrive(files).client, account(), kinds, null, "space-a");
+    expect(got.albumOrderCopies.map((c) => [c.deviceId, c.albums[0].order])).toEqual([[other, ["p2", "p1"]]]);
+    expect(got.albumOrderUnreadable).toBe(0);
+    expect(got.deviceNames).toEqual([[other, "Pixel 8"]]);
+    const back = await loadDriveData(fakeDrive(files).client, account(), { ...kinds, albumOrderReadBack: true }, null, "space-a");
+    expect(back.albumOrderCopies.map((c) => c.deviceId).sort()).toEqual([id, other].sort());
+    const off = await loadDriveData(fakeDrive(files).client, account(), { ...kinds, albumOrder: false, albumOrderReadBack: true }, null, "space-a");
+    expect(off.albumOrderCopies).toEqual([]);
+    // A newer format is passed over without holding the round; a file that will not open holds it.
+    const newer = [{ uid: "o3", name: `album-order-${other}.pfpao`, revision: "r", bytes: await seal(copy(other, 2), key) }];
+    const passed = await loadDriveData(fakeDrive(newer).client, account(), kinds, null, "space-a");
+    expect(passed.albumOrderCopies).toEqual([]);
+    expect(passed.albumOrderUnreadable).toBe(0);
+    const junk = [{ uid: "o4", name: `album-order-${id}.pfpao`, revision: "r", bytes: Buffer.from("junk") }];
+    const held = await loadDriveData(fakeDrive(junk).client, account(), { ...kinds, albumOrderReadBack: true }, null, "space-a");
+    expect(held.albumOrderUnreadable).toBe(1);
+    expect(held.ownUnreadable).toEqual(["albumOrder"]);
+    const listed = await listDriveBackups(fakeDrive(files).client, account(), null, id, {});
+    expect(listed.backups).toEqual([
+      { device: other, own: false, name: "Pixel 8", savedAt: 4_000, files: ["o1"] },
+      { device: id, own: true, name: null, savedAt: 2_000, files: ["o2"] },
+    ]);
+  }, 30_000);
+
+  it("lists the other devices' copies a read opens, without downloading, and records the revisions a read opened", async () => {
+    const copy = (device: string) =>
+      Buffer.from(JSON.stringify({ v: 1, d: device, p: "android", n: "Pixel 8", c: 5, s: [{ k: "appearance.theme", t: 7, x: "dark" }], l: [] }));
+    const files = [
+      { uid: "t1", name: `settings-${other}.pfpst`, revision: "r1", bytes: await seal(copy(other), key), at: 4_000 },
+      { uid: "t2", name: `settings-${id}.pfpst`, revision: "r1", bytes: await seal(copy(id), key), at: 2_000 },
+      { uid: "h1", name: `hidden-${other}.pfphd`, revision: "r1", bytes: Buffer.from("junk"), at: 3_000 },
+      { uid: "x1", name: "notes.txt", revision: "r1", bytes: Buffer.from("x") },
+    ];
+    const kinds = { faces: false, labels: false, search: false, hidden: true, settings: true, ownDeviceId: id };
+    const drive = fakeDrive(files);
+    const listed = await listOtherCopies(drive.client, kinds, null);
+    expect(listed.appUid).toBe("app");
+    expect(listed.copies.map((c) => c.uid).sort()).toEqual(["h1", "t1"]);
+    expect(listed.copies.find((c) => c.uid === "t1")!.revision).toBe("r1:4000");
+    expect(drive.downloads).toEqual([]);
+    // The read opens the same copies, the unreadable one too, and never this install's own.
+    const read = await loadDriveData(drive.client, account(), kinds, null, "space-a");
+    expect(Object.fromEntries(read.revisions)).toEqual({ t1: "r1:4000", h1: "r1:3000" });
+    // With the settings off, their folder is not listed.
+    const off = await listOtherCopies(drive.client, { ...kinds, settings: false }, "app");
+    expect(off.copies.map((c) => c.uid)).toEqual(["h1"]);
+  }, 30_000);
+
+  it("finds the app's folder again when the one it knew is gone, and answers nothing without one", async () => {
+    const files = [{ uid: "l1", name: `labels-${other}.pfplb`, revision: "r", bytes: Buffer.from("x"), at: 1 }];
+    const drive = fakeDrive(files);
+    const broken = {
+      ...drive.client,
+      async *iterateFolderChildren(uid: string) {
+        if (uid === "stale") throw new Error("NotFound");
+        yield* drive.client.iterateFolderChildren(uid);
+      },
+    };
+    const again = await listOtherCopies(broken, { faces: false, labels: true, search: false }, "stale");
+    expect(again.appUid).toBe("app");
+    expect(again.copies.map((c) => c.uid)).toEqual(["l1"]);
+    const empty = { getMyFilesRootFolder: async () => ({ uid: "root" }), async *iterateFolderChildren() {} };
+    expect(await listOtherCopies(empty, { faces: true, labels: true, search: true }, null)).toEqual({ appUid: null, copies: [] });
+  });
 
   it("drops the cached copies of files no longer on Drive", async () => {
     const cache = memoryCache();

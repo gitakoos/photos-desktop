@@ -37,6 +37,7 @@ import {
   mergePeople,
   placeNew,
   regroupAll,
+  rejectFaces,
   rejectPerson,
   removePhotosFromPerson,
   renamePerson,
@@ -48,13 +49,17 @@ import {
   FACE_CLUSTER_PARAMS_VERSION,
   FACE_MODEL_SHA256,
   adoptScanned,
+  adoptScannedAsync,
   applyCopy,
+  applyCopyAsync,
   compareWithPhone,
   copyForDrive,
+  holdsIncomingSet,
   pairFaces,
 } from "./faceSync.ts";
 import { initStore, setDataKey } from "./store.ts";
 import { direction, faceOf, seeded } from "./testFaces.ts";
+import { library, outcome, storeBefore } from "./testLibrary.ts";
 
 type Box = [number, number, number, number];
 
@@ -66,8 +71,13 @@ function phone(key: string, index: number, box: Box, embedding: Float32Array, re
   return { key, index, box, points: [], score: 0.9, blur: 50, embedding, rejected, person: null, confirmed: null };
 }
 
+/** The copies' device, and ids for this computer that sort before and after it. */
+const PHONE_ID = "00000000-0000-0000-0000-000000000001";
+const EARLIER_ID = "00000000-0000-0000-0000-000000000000";
+const LATER_ID = "f0000000-0000-4000-8000-000000000001";
+
 const copy = (faces: SnapshotFace[]): FaceCopy => ({
-  deviceId: "00000000-0000-0000-0000-000000000001",
+  deviceId: PHONE_ID,
   deviceLabel: "phone",
   createdAt: 0,
   faceModelVersion: FACE_MODEL_VERSION,
@@ -84,6 +94,7 @@ const copy = (faces: SnapshotFace[]): FaceCopy => ({
   namedAt: new Map(),
   nameChanges: [],
   scanned: [...new Set(faces.map((f) => f.key))],
+  hiddenPeople: [],
 });
 
 beforeEach(() => {
@@ -212,6 +223,8 @@ describe("taking in another device's copy", () => {
     const a = direction(rand);
     const store = new FaceStore();
     store.load();
+    // This computer's id sorts first, so it keeps its own set and pairs the copy's faces with it.
+    store.people.deviceId = EARLIER_ID;
     store.put("vol~p1", [local("vol~p1", 0, [0.1, 0.1, 0.3, 0.4], a)]);
     const face = phone("p1", 0, [0.1, 0.1, 0.3, 0.4], faceOf(a, rand, 0.1));
     if (name) {
@@ -241,6 +254,46 @@ describe("taking in another device's copy", () => {
     expect(listPeople(store).named.map((x) => x.name)).toEqual(["Anna"]);
   });
 
+  it("puts a confirmed name on the face whose numbers agree when the boxes overlap in between", async () => {
+    const { store, a, rand } = oneFace(null);
+    const shifted = phone("p1", 0, [0.18, 0.1, 0.38, 0.4], faceOf(a, rand, 0.1));
+    shifted.confirmed = "Anna";
+    const result = applyCopy(store, { ...copy([shifted]), createdAt: 5 })!;
+    expect(result.named).toBe(1);
+    expect(result.added).toBe(0);
+    expect(store.facesOf("vol~p1").map((f) => f.id)).toEqual(["vol~p1#0"]);
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Anna");
+  });
+
+  it("puts a confirmed name on the face whose numbers agree beside another face, and on no other", async () => {
+    const rand = seeded(73);
+    const a = direction(rand);
+    const store = new FaceStore();
+    store.load();
+    store.people.deviceId = EARLIER_ID;
+    store.put("vol~p1", [
+      local("vol~p1", 0, [0.1, 0.1, 0.3, 0.4], a),
+      local("vol~p1", 1, [0.6, 0.1, 0.8, 0.4], direction(rand)),
+    ]);
+    const shifted = phone("p1", 0, [0.18, 0.1, 0.38, 0.4], faceOf(a, rand, 0.1));
+    shifted.confirmed = "Anna";
+    const result = applyCopy(store, { ...copy([shifted]), createdAt: 5 })!;
+    expect(result.named).toBe(1);
+    expect(result.added).toBe(0);
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Anna");
+    expect(store.people.confirmed["vol~p1#1"]).toBeUndefined();
+  });
+
+  it("takes a loosely overlapping face whose numbers do not agree as a face of its own", async () => {
+    const { store, rand } = oneFace(null);
+    const shifted = phone("p1", 0, [0.18, 0.1, 0.38, 0.4], direction(rand));
+    shifted.confirmed = "Anna";
+    const result = applyCopy(store, { ...copy([shifted]), createdAt: 5 })!;
+    expect(result.added).toBe(1);
+    expect(store.people.confirmed["vol~p1#0"]).toBeUndefined();
+    expect(store.people.confirmed["vol~p1#1"]).toBe("Anna");
+  });
+
   it("adds a face the phone found and this computer missed", async () => {
     const { store, rand } = oneFace(null);
     const other = phone("p1", 1, [0.6, 0.2, 0.8, 0.5], direction(rand));
@@ -265,6 +318,112 @@ describe("taking in another device's copy", () => {
     expect(applyCopy(store, own)).toBeNull();
     expect(applyCopy(store, { ...copy([face]), createdAt: 5 })).not.toBeNull();
     expect(applyCopy(store, { ...copy([face]), createdAt: 5 })).toBeNull();
+  });
+});
+
+describe("a photo both devices looked at", () => {
+  /**
+   * p1 scanned here and on the phone. Here: #0 on the right, confirmed as Bea and marked as not
+   * Anna; #1 on the left, in a box that overlaps the phone's by 0.4 with the same numbers; #2, a
+   * face the phone did not find, confirmed as Cid. The phone: #0 on the left, grouped under Anna,
+   * and #1 on the right.
+   */
+  function bothScanned(ownId: string) {
+    const rand = seeded(91);
+    const left = direction(rand);
+    const right = direction(rand);
+    const third = direction(rand);
+    const store = new FaceStore();
+    store.load();
+    store.people.deviceId = ownId;
+    store.put("vol~p1", [
+      local("vol~p1", 0, [0.61, 0.1, 0.81, 0.4], faceOf(right, rand, 0.1)),
+      local("vol~p1", 1, [0.185, 0.1, 0.385, 0.4], faceOf(left, rand, 0.1)),
+      local("vol~p1", 2, [0.4, 0.6, 0.55, 0.85], third),
+    ]);
+    store.people.confirmed["vol~p1#0"] = "Bea";
+    store.people.confirmed["vol~p1#2"] = "Cid";
+    store.people.blocked["vol~p1#0"] = ["Anna"];
+    store.people.curation[curationKey(2, "Anna", "p1#0")] = { kind: 2, name: "Anna", ref: "p1#0", removed: false, at: 5 };
+    const anna = { ...phone("p1", 0, [0.1, 0.1, 0.3, 0.4], left), person: "Anna" };
+    const theirs = copy([anna, phone("p1", 1, [0.6, 0.1, 0.8, 0.4], right)]);
+    return { store, theirs };
+  }
+
+  const boxes = (store: FaceStore) => Object.fromEntries(store.facesOf("vol~p1").map((f) => [f.id, f.box]));
+
+  it("takes the other set in place of its own when its id sorts later, keeping what was decided here", async () => {
+    const { store, theirs } = bothScanned(LATER_ID);
+    const result = applyCopy(store, { ...theirs, createdAt: 5 })!;
+    expect(result.adopted).toBe(1);
+    expect(boxes(store)).toEqual({
+      "vol~p1#0": [0.1, 0.1, 0.3, 0.4],
+      "vol~p1#1": [0.6, 0.1, 0.8, 0.4],
+      "vol~p1#2": [0.4, 0.6, 0.55, 0.85],
+    });
+    // The right face kept the name confirmed here, and the mark and its time moved with it.
+    expect(store.people.confirmed["vol~p1#1"]).toBe("Bea");
+    expect(store.people.blocked["vol~p1#1"]).toEqual(["Anna"]);
+    expect(store.people.blocked["vol~p1#0"]).toBeUndefined();
+    expect(Object.values(store.people.curation).filter((c) => c.kind === 2).map((c) => c.ref)).toEqual(["p1#1"]);
+    // The left face took the phone's grouping; the face only this computer found stays.
+    const anna = store.people.people.find((x) => x.name === "Anna")!;
+    expect(store.people.assign["vol~p1#0"]).toBe(anna.id);
+    expect(store.people.confirmed["vol~p1#0"]).toBeUndefined();
+    expect(store.people.confirmed["vol~p1#2"]).toBe("Cid");
+    // What goes to Drive now carries the phone's indexes, and the same copy again changes nothing.
+    const out = copyForDrive(store, "Desk", 6);
+    expect(out.faces.map((f) => [f.index, f.confirmed ?? f.person]).sort()).toEqual([
+      [0, "Anna"],
+      [1, "Bea"],
+      [2, "Cid"],
+    ]);
+    const before = JSON.stringify(boxes(store));
+    expect(applyCopy(store, { ...theirs, createdAt: 7 })!.adopted).toBe(0);
+    expect(JSON.stringify(boxes(store))).toBe(before);
+  });
+
+  it("takes in a second detection the other device kept, so both hold the same faces", async () => {
+    const rand = seeded(92);
+    const a = direction(rand);
+    const store = new FaceStore();
+    store.load();
+    store.people.deviceId = EARLIER_ID;
+    store.put("vol~p1", [local("vol~p1", 0, [0.1, 0.1, 0.3, 0.4], a)]);
+    // The other device paired its own #0 with this one and kept a second box on the same face as #1.
+    const theirs = copy([phone("p1", 0, [0.1, 0.1, 0.3, 0.4], a), phone("p1", 1, [0.12, 0.1, 0.32, 0.4], faceOf(a, rand, 0.1))]);
+    const result = applyCopy(store, { ...theirs, createdAt: 5 })!;
+    expect(result.added).toBe(1);
+    expect(store.facesOf("vol~p1").map((f) => f.id)).toEqual(["vol~p1#0", "vol~p1#1"]);
+    expect(holdsIncomingSet(theirs.faces, store.facesOf("vol~p1"))).toBe(true);
+    expect(applyCopy(store, { ...theirs, createdAt: 6 })!.added).toBe(0);
+  });
+
+  it("pairs by the strongest overlap, whatever the indexes say", async () => {
+    const rand = seeded(93);
+    const a = direction(rand);
+    const store = new FaceStore();
+    store.load();
+    store.people.deviceId = LATER_ID;
+    store.put("vol~p1", [local("vol~p1", 0, [0.1, 0.1, 0.3, 0.4], a)]);
+    store.people.confirmed["vol~p1#0"] = "Bea";
+    // The copy's #0 is a small box beside the face, its #1 the face itself, with numbers that disagree.
+    const theirs = copy([phone("p1", 0, [0.25, 0.1, 0.32, 0.2], direction(rand)), phone("p1", 1, [0.11, 0.1, 0.31, 0.4], direction(rand))]);
+    applyCopy(store, { ...theirs, createdAt: 5 });
+    expect(store.facesOf("vol~p1").map((f) => f.id).sort()).toEqual(["vol~p1#0", "vol~p1#1"]);
+    expect(store.people.confirmed["vol~p1#1"]).toBe("Bea");
+    expect(store.people.confirmed["vol~p1#0"]).toBeUndefined();
+  });
+
+  it("keeps its own set when its id sorts first, pairing the loose box by its numbers", async () => {
+    const { store, theirs } = bothScanned(EARLIER_ID);
+    const result = applyCopy(store, { ...theirs, createdAt: 5 })!;
+    expect(result.adopted).toBe(0);
+    expect(result.added).toBe(0);
+    expect(boxes(store)["vol~p1#0"]).toEqual([0.61, 0.1, 0.81, 0.4]);
+    expect(store.people.confirmed["vol~p1#0"]).toBe("Bea");
+    const anna = store.people.people.find((x) => x.name === "Anna")!;
+    expect(store.people.assign["vol~p1#1"]).toBe(anna.id);
   });
 });
 
@@ -409,6 +568,30 @@ describe("the rest of the curation made on another device", () => {
     expect(store.people.covers.Ann).toBe("vol~p3");
     const { copy: back } = readFaceCopy(writeFaceCopy(copyForDrive(store, "Desk", 22)));
     expect(back.coverSetAt.get("Ann")).toBe(15);
+  });
+
+  it("takes the other device's cover over one it handed on earlier, when neither has a time", async () => {
+    const { store } = await people("Ann", null, 1);
+    store.put("vol~p3", [local("vol~p3", 0, [0.5, 0.5, 0.6, 0.6], direction(seeded(92)))]);
+    const theirs = (cover: string, createdAt: number) => ({
+      ...copy([]),
+      createdAt,
+      covers: new Map([["Ann", cover]]),
+      coverSetAt: new Map([["Ann", 0]]),
+    });
+    applyCopy(store, theirs("p1", 20));
+    expect(store.people.covers.Ann).toBe("vol~p1");
+    // Changed on the phone before it kept the time of a cover: still the phone's current one.
+    applyCopy(store, theirs("p3", 21));
+    expect(store.people.covers.Ann).toBe("vol~p3");
+  });
+
+  it("keeps a cover picked here over another device's cover that has no time", async () => {
+    const { store, id1 } = await people("Ann", null, 1);
+    store.put("vol~p3", [local("vol~p3", 0, [0.5, 0.5, 0.6, 0.6], direction(seeded(92)))]);
+    setPersonCover(store, id1, "vol~p1", 10);
+    applyCopy(store, { ...copy([]), createdAt: 20, covers: new Map([["Ann", "p3"]]), coverSetAt: new Map([["Ann", 0]]) });
+    expect(store.people.covers.Ann).toBe("vol~p1");
   });
 
   it("takes away a mark taken back there, and a cover dropped there, and hands both on", async () => {
@@ -634,5 +817,80 @@ describe("a hidden photo", () => {
     expect(written.covers).toEqual([]);
     expect(written.notPerson).toEqual([]);
     expect(written.manual).toEqual([]);
+  });
+});
+
+describe("a large copy taken in while the rest of the sidecar gets its turns", () => {
+  /** Every turn asked for, given; `during` runs in the turn it is due in. */
+  function everyStep(during: Map<number, () => void> = new Map()) {
+    let turns = 0;
+    const slice = () =>
+      new Promise<void>((resolve) =>
+        setImmediate(() => {
+          during.get(++turns)?.();
+          resolve();
+        }),
+      );
+    return { slice, turns: () => turns };
+  }
+
+  it("comes out as taken in straight through", async () => {
+    const lib = library(201, 900);
+    const straight = await storeBefore(lib);
+    const adoptedStraight = adoptScanned(straight, lib.copy, lib.uidByLink);
+    const appliedStraight = applyCopy(straight, lib.copy);
+
+    const turned = await storeBefore(lib);
+    const first = everyStep();
+    const adopted = await adoptScannedAsync(turned, lib.copy, lib.uidByLink, false, first.slice);
+    const second = everyStep();
+    const applied = await applyCopyAsync(turned, lib.copy, false, second.slice);
+
+    expect(first.turns()).toBeGreaterThan(100);
+    expect(second.turns()).toBeGreaterThan(100);
+    expect(adopted).toBe(adoptedStraight);
+    expect(applied).toEqual(appliedStraight);
+    expect(appliedStraight!.adopted).toBeGreaterThan(20);
+    expect(appliedStraight!.named).toBeGreaterThan(20);
+    expect(outcome(turned)).toBe(outcome(straight));
+  });
+
+  it("keeps what changed here meanwhile: a face left out, a rename, a photo gone", async () => {
+    const lib = library(202, 900);
+    const store = await storeBefore(lib);
+    adoptScanned(store, lib.copy, lib.uidByLink);
+    const local = [...lib.local.keys()];
+    const dropped = local[local.length - 1];
+    const keptOut = store.facesOf(local[local.length - 2])[0].id;
+    const named = store.people.people.find((x) => x.name === "Person 1")!;
+    const during = new Map<number, () => void>([
+      [3, () => rejectFaces(store, [keptOut])],
+      [5, () => renamePerson(store, named.id, "Zed")],
+      [
+        7,
+        () => {
+          store.keepOnly(new Set(store.scanned().filter((uid) => uid !== dropped)));
+        },
+      ],
+    ]);
+    const turns = everyStep(during);
+    const applied = await applyCopyAsync(store, lib.copy, false, turns.slice);
+    expect(turns.turns()).toBeGreaterThan(7);
+    expect(applied).not.toBeNull();
+    expect(store.people.applied[lib.copy.deviceId]).toBe(lib.copy.createdAt);
+    expect(store.people.rejected).toContain(keptOut);
+    expect(store.people.assign[keptOut]).toBeUndefined();
+    expect(store.people.people.find((x) => x.id === named.id)?.name).toBe("Zed");
+    expect(store.has(dropped)).toBe(false);
+    expect(Object.keys(store.people.assign).some((id) => id.startsWith(`${dropped}#`))).toBe(false);
+  });
+
+  it("stops with the copy not taken in when the face data is deleted meanwhile", async () => {
+    const lib = library(203, 600);
+    const store = await storeBefore(lib);
+    const turns = everyStep(new Map([[4, () => store.clear()]]));
+    expect(await applyCopyAsync(store, lib.copy, false, turns.slice)).toBeNull();
+    expect(store.people.applied).toEqual({});
+    expect(store.scanned()).toEqual([]);
   });
 });

@@ -34,7 +34,7 @@ import {
   DEVICE_ID_FILE,
   FACES_DIR,
   PEOPLE_FILE,
-  readSealedOrDiscard,
+  readSealedOrSetAside,
   storeDir,
   unseal,
   writeSealedAtomic,
@@ -43,7 +43,7 @@ import {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function read(): string | null {
-  const raw = readSealedOrDiscard(join(storeDir(), DEVICE_ID_FILE))?.toString("utf8").trim() ?? "";
+  const raw = readSealedOrSetAside(join(storeDir(), DEVICE_ID_FILE))?.toString("utf8").trim() ?? "";
   return UUID.test(raw) ? raw : null;
 }
 

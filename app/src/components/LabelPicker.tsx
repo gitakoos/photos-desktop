@@ -26,6 +26,7 @@ import { rpc } from "../lib/rpc";
 import { labelState, matchingLabels, sameLabel } from "../lib/labels";
 import type { LocalLabel } from "../hooks/useLocalLabels";
 import { CheckIcon, CloseIcon, LabelIcon, PlusIcon, SearchIcon } from "./icons";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/AlbumDialogs.css";
 import "../styles/LabelPicker.css";
 
@@ -129,10 +130,7 @@ export function LabelPicker({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
+      {...backdropClose(onClose)}
     >
       <div className="cf-panel ad-picker lp-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">

@@ -27,10 +27,11 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { direction, faceOf, seeded } from "./testFaces.ts";
-import { dot } from "./faceCluster.ts";
+import { SLICE_MS, dot, runPausable, setSliceMs } from "./faceCluster.ts";
 import {
   addFacesToPerson,
   autoMerge,
+  autoMergeAsync,
   curationKey,
   declineCandidates,
   dismissSuggestion,
@@ -56,7 +57,7 @@ import {
   takeHeldOver,
 } from "./facePeople.ts";
 import { FACE_EMBEDDING_DIM } from "./faceCluster.ts";
-import { FACE_MODEL_VERSION, FaceStore, decodeShard, encodeShard, rekeyNames, type FaceRecord } from "./faceStore.ts";
+import { FACE_MODEL_VERSION, FaceStore, decodeShard, encodeShard, peopleJsonSteps, rekeyNames, type FaceRecord } from "./faceStore.ts";
 import { foldPersonName, legacyFoldPersonName } from "./personName.ts";
 import { FACES_DIR, PEOPLE_FILE, initStore, setDataKey, wipeCache, writeSealedAtomic } from "./store.ts";
 
@@ -547,7 +548,7 @@ describe("people", () => {
     await placeNew(store);
     const annaId = listPeople(store).unnamed[0].id;
     renamePerson(store, annaId, "Anna");
-    expect(reconsiderLeftovers(store)).toBe(1);
+    expect(await reconsiderLeftovers(store)).toBe(1);
     expect(listPeople(store).named[0].uids).toContain("w0");
   });
 
@@ -563,7 +564,7 @@ describe("people", () => {
     const annaId = listPeople(store).unnamed[0].id;
     renamePerson(store, annaId, "Anna");
     declineCandidates(store, annaId, ["w0#0"]);
-    expect(reconsiderLeftovers(store)).toBe(0);
+    expect(await reconsiderLeftovers(store)).toBe(0);
   });
 
   it("list the loose faces, and name them into a new person or an existing one", async () => {
@@ -692,6 +693,46 @@ describe("folding split groups", () => {
     expect(store.people.assign["b0#0"]).toBe("p2");
   });
 
+  it("fold a face placed with a folded group while the fold gave a turn", async () => {
+    const make = () => {
+      const store = splitStore([null, null]);
+      const rand = seeded(32);
+      store.people.people.push({ id: "p9", name: null, isOther: true });
+      for (let i = 0; i < 3000; i++) {
+        store.put(`o${i}`, [face(`o${i}`, 0, direction(rand))]);
+        store.people.assign[`o${i}#0`] = "p9";
+      }
+      return store;
+    };
+    // The last ask is the one after the folded faces were found; the one before starts that search.
+    let asks = 0;
+    await mergeSplitGroups(make(), () => {
+      asks++;
+      return true;
+    });
+    const store = make();
+    let asked = 0;
+    setSliceMs(0);
+    try {
+      expect(
+        await mergeSplitGroups(store, () => {
+          if (++asked === asks - 1) {
+            setImmediate(() => {
+              store.put("b9", [face("b9", 0, store.facesOf("b0")[0].embedding)]);
+              store.people.assign["b9#0"] = "p2";
+              store.markPeople();
+            });
+          }
+          return true;
+        }),
+      ).toBe(1);
+    } finally {
+      setSliceMs(SLICE_MS);
+    }
+    expect(store.people.assign["b0#0"]).toBe("p1");
+    expect(store.people.assign["b9#0"]).toBe("p1");
+  });
+
   it("owe the fold only past the regroup's own merge limit", () => {
     const store = new FaceStore();
     store.load();
@@ -724,5 +765,151 @@ describe("telling names apart", () => {
     expect(Object.keys(p.curation).sort()).toEqual(
       [`2\u0000${foldPersonName("Adam")}\u0000l2#0`, `2\u0000${foldPersonName("Ádám")}\u0000l1#0`].sort(),
     );
+  });
+});
+
+describe("placing a large library", () => {
+  /** `people` identities in `each` photos apiece, one face a photo, and strays. */
+  function crowd(store: FaceStore, seed: number, people: number, each: number, strays: number): void {
+    const rand = seeded(seed);
+    for (let p = 0; p < people; p++) {
+      const base = direction(rand);
+      for (let i = 0; i < each; i++) store.put(`p${p}-${i}`, [face(`p${p}-${i}`, 0, faceOf(base, rand, 0.5))]);
+    }
+    for (let i = 0; i < strays; i++) store.put(`s${i}`, [face(`s${i}`, 0, direction(rand), 0.6)]);
+  }
+
+  it("gives the rest of the process its turn and places every face once", async () => {
+    const store = new FaceStore();
+    store.load();
+    crowd(store, 70, 40, 30, 800);
+    let turns = 0;
+    let live = true;
+    const tick = () => {
+      if (!live) return;
+      turns++;
+      setImmediate(tick);
+    };
+    setImmediate(tick);
+    await placeNew(store);
+    live = false;
+    expect(turns).toBeGreaterThan(5);
+    const placed = store.allFaces().filter((f) => store.people.assign[f.id]);
+    expect(placed.length).toBe(store.allFaces().length);
+    expect(listPeople(store).unnamed.length).toBe(40);
+  });
+
+  it("places alike when asked twice at once, with no empty person left", async () => {
+    const one = new FaceStore();
+    one.load();
+    crowd(one, 71, 10, 8, 50);
+    await placeNew(one);
+    const expected = { assign: { ...one.people.assign }, people: one.people.people.map((x) => x.id) };
+    one.clear();
+
+    const both = new FaceStore();
+    both.load();
+    crowd(both, 71, 10, 8, 50);
+    await Promise.all([placeNew(both), placeNew(both)]);
+    expect(both.people.assign).toEqual(expected.assign);
+    expect(both.people.people.map((x) => x.id)).toEqual(expected.people);
+  });
+
+  it("leaves the faces for the next call when a change comes in while it places", async () => {
+    const store = new FaceStore();
+    store.load();
+    crowd(store, 72, 30, 20, 400);
+    const run = placeNew(store);
+    await new Promise<void>((r) => setImmediate(r));
+    store.edits++;
+    await run;
+    expect(Object.keys(store.people.assign)).toHaveLength(0);
+    await placeNew(store);
+    expect(Object.keys(store.people.assign)).toHaveLength(store.allFaces().length);
+  });
+
+  it("places no face of a photo scanned again while it gave a turn, and places the new face next time", async () => {
+    const store = new FaceStore();
+    store.load();
+    crowd(store, 73, 30, 20, 3000);
+    let again: string | null = null;
+    const lookUp = store.facesOf.bind(store);
+    store.facesOf = (uid: string) => {
+      if (again === null) {
+        again = uid;
+        // The photo is scanned again in the next turn, after its face was looked up.
+        setImmediate(() => store.put(uid, lookUp(uid).map((f) => ({ ...f }))));
+      }
+      return lookUp(uid);
+    };
+    setSliceMs(0);
+    try {
+      await placeNew(store);
+    } finally {
+      setSliceMs(SLICE_MS);
+    }
+    expect(again).not.toBeNull();
+    expect(store.people.assign[`${again}#0`]).toBeUndefined();
+    expect(Object.keys(store.people.assign)).toHaveLength(store.allFaces().length - 1);
+    await placeNew(store);
+    expect(store.people.assign[`${again}#0`]).toBeDefined();
+  });
+});
+
+describe("writing a large library's people", () => {
+  it("puts them in words as JSON does, and reads them back after a write that gave turns", async () => {
+    const store = new FaceStore();
+    store.load();
+    const rand = seeded(88);
+    for (let p = 0; p < 30; p++) {
+      const base = direction(rand);
+      for (let i = 0; i < 300; i++) store.put(`vol~p${p}-${i}`, [face(`vol~p${p}-${i}`, 0, faceOf(base, rand, 0.5))]);
+    }
+    await placeNew(store);
+    renamePerson(store, listPeople(store).unnamed[0].id, "Anna", 5);
+    notThisPerson(store, store.allFaces()[3].id, 6);
+    (store.people.covers as Record<string, string | undefined>).Nobody = undefined;
+    expect(runPausable(peopleJsonSteps(store.people))).toBe(JSON.stringify(store.people));
+    let turns = 0;
+    await store.flushSliced(() => {
+      turns++;
+      return new Promise<void>((resolve) => setImmediate(resolve));
+    });
+    expect(turns).toBeGreaterThan(5);
+    const again = new FaceStore();
+    again.load();
+    expect(JSON.stringify(again.people)).toBe(JSON.stringify(store.people));
+    expect(again.allFaces().length).toBe(9000);
+  }, 60_000);
+
+  it("merges the likely groups alike while giving turns", async () => {
+    const make = async () => {
+      const store = new FaceStore();
+      store.load();
+      const rand = seeded(89);
+      // Each identity split in two: a named person and an unnamed group of the same faces.
+      for (let k = 0; k < 8; k++) {
+        const base = direction(rand);
+        const named = { id: `n${k}`, name: `Name ${k}`, isOther: false };
+        const unnamed = { id: `u${k}`, name: null, isOther: false };
+        store.people.people.push(named, unnamed);
+        for (let i = 0; i < 12; i++) {
+          const uid = `vol~m${k}-${i}`;
+          store.put(uid, [face(uid, 0, faceOf(base, rand, 0.4))]);
+          store.people.assign[`${uid}#0`] = i < 6 ? named.id : unnamed.id;
+        }
+      }
+      store.markPeople();
+      return store;
+    };
+    const straight = await make();
+    const count = autoMerge(straight);
+    expect(count).toBe(8);
+    expect(Object.values(straight.people.assign).every((id) => id.startsWith("n"))).toBe(true);
+    expect(straight.people.people.map((x) => x.id)).toEqual(["n0", "n1", "n2", "n3", "n4", "n5", "n6", "n7"]);
+    const turned = await make();
+    expect(await autoMergeAsync(turned)).toBe(count);
+    expect(turned.people.assign).toEqual(straight.people.assign);
+    expect(turned.people.people).toEqual(straight.people.people);
   });
 });

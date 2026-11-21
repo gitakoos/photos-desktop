@@ -42,6 +42,10 @@ git -C "$root" ls-files -z --cached --others --exclude-standard \
   | tar -C "$src" -xf -
 
 
+echo "==> Fetching the pinned ffmpeg sources"
+# The app's own ffmpeg (ffmpeg/build.sh) is compiled inside the build, which has no network.
+PFP_FFMPEG_WORK="$src/.ffmpeg-work" bash "$root/ffmpeg/build.sh" fetch
+
 echo "==> Installing npm dependencies"
 npm --prefix "$src/app" ci --no-audit --no-fund
 npm --prefix "$src/sidecar" ci --no-audit --no-fund

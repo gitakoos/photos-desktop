@@ -20,9 +20,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { describe, it, expect, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,6 +30,7 @@ import sharp from "sharp";
 import { ThumbnailType } from "@protontech/drive-sdk";
 
 import {
+  albumGroups,
   clearFinishedUploads,
   displayDimensions,
   failureText,
@@ -37,6 +38,7 @@ import {
   framesForFiles,
   getUploadStatus,
   deviceName,
+  exifFactsOf,
   isStagedDrop,
   isStagedFrame,
   mediaAttributes,
@@ -52,6 +54,7 @@ import {
 import { hydrateDir } from "./download.ts";
 import { NO_COMPRESSION, setCompression } from "./compression.ts";
 import { reportSlowUpload } from "./api.ts";
+import { setHostWriter, takeHostLine } from "./hostCall.ts";
 
 const work = mkdtempSync(join(tmpdir(), "pfp-upload-test-"));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
@@ -203,6 +206,87 @@ describe("a drop with nothing to upload", () => {
 
     expect(getUploadStatus().emptyDrops).toBe(before + 1);
     expect(getUploadStatus().total).toBe(total);
+  });
+
+  it("leaves out a hidden folder and what is in it", async () => {
+    const tree = join(work, "hidden-only");
+    mkdirSync(join(tree, ".thumbnails"), { recursive: true });
+    writeFileSync(join(tree, ".thumbnails", "a.jpg"), Buffer.alloc(16, 1));
+    const { photos } = recordingPhotos();
+    const before = getUploadStatus().emptyDrops ?? 0;
+
+    startUpload(photos, [tree]);
+    for (let i = 0; i < 50 && (getUploadStatus().emptyDrops ?? 0) === before; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    expect(getUploadStatus().emptyDrops).toBe(before + 1);
+  });
+});
+
+describe("the albums a dropped folder makes", () => {
+  const p = (...parts: string[]) => join("drop", ...parts);
+
+  it("puts each folder's own photos into an album named after that folder", () => {
+    const groups = albumGroups([
+      {
+        path: p("Trip"),
+        files: [p("Trip", "a.jpg"), p("Trip", "Day 1", "b.jpg"), p("Trip", "Day 1", "Beach", "c.jpg")],
+      },
+    ]);
+
+    expect(groups).toEqual([
+      { album: "Trip", files: [p("Trip", "a.jpg")] },
+      { album: "Day 1", files: [p("Trip", "Day 1", "b.jpg")] },
+      { album: "Beach", files: [p("Trip", "Day 1", "Beach", "c.jpg")] },
+    ]);
+  });
+
+  it("gives folders of the same name one album, case and padding aside", () => {
+    const groups = albumGroups([
+      { path: p("2023"), files: [p("2023", "Jan", "a.jpg"), p("2023", "jan ", "b.jpg")] },
+      { path: p("2024"), files: [p("2024", "JAN", "c.jpg")] },
+    ]);
+
+    expect(groups).toEqual([
+      { album: "Jan", files: [p("2023", "Jan", "a.jpg"), p("2023", "jan ", "b.jpg"), p("2024", "JAN", "c.jpg")] },
+    ]);
+  });
+
+  it("sends a file dropped on its own to the timeline, after the albums", () => {
+    const groups = albumGroups([
+      { path: p("Loose", "x.jpg"), files: [p("Loose", "x.jpg")] },
+      { path: p("Trip"), files: [p("Trip", "a.jpg")] },
+    ]);
+
+    expect(groups).toEqual([
+      { album: "Trip", files: [p("Trip", "a.jpg")] },
+      { album: null, files: [p("Loose", "x.jpg")] },
+    ]);
+  });
+
+  it("makes no album of a timeline bucket folder", () => {
+    const groups = albumGroups([{ path: p("Takeout"), files: [p("Takeout", "Photos from 2019", "a.jpg")] }]);
+
+    expect(groups).toEqual([{ album: null, files: [p("Takeout", "Photos from 2019", "a.jpg")] }]);
+  });
+
+  it("makes an album per folder of a real dropped tree", async () => {
+    const tree = join(work, "Nested");
+    mkdirSync(join(tree, "Day 1", "Beach"), { recursive: true });
+    await writeJpeg(join("Nested", "top.jpg"), 30);
+    await writeJpeg(join("Nested", "Day 1", "day.jpg"), 60);
+    await writeJpeg(join("Nested", "Day 1", "Beach", "beach.jpg"), 90);
+    const { photos } = recordingPhotos();
+
+    startUpload(photos, [tree]);
+    const status = await settle();
+
+    expect(status.items.map((i) => [i.name, i.album]).sort()).toEqual([
+      ["beach.jpg", "Beach"],
+      ["day.jpg", "Day 1"],
+      ["top.jpg", "Nested"],
+    ]);
   });
 });
 
@@ -624,6 +708,18 @@ describe("the tags a file is uploaded with", () => {
     expect(photoTagsFor("image/jpeg", "holiday.jpg")).not.toContain(1);
     // A video is never a screenshot, whatever it is called.
     expect(photoTagsFor("video/mp4", "screenshot-recording.mp4")).not.toContain(1);
+    // A picture in a folder named for screenshots, as the phone's gallery bucket.
+    expect(photoTagsFor("image/png", "IMG_1.png", "Screenshots")).toContain(1);
+  });
+
+  it("marks a burst by the Android client's rule: its folder says burst, or its name starts so", () => {
+    expect(photoTagsFor("image/jpeg", "BURST20240601_120000.jpg")).toContain(7);
+    expect(photoTagsFor("image/jpeg", "burst_001.jpg")).toContain(7);
+    expect(photoTagsFor("image/jpeg", "IMG_0001.jpg", "Bursts")).toContain(7);
+    expect(photoTagsFor("image/jpeg", "IMG_0001.jpg", "My BURST shots")).toContain(7);
+    expect(photoTagsFor("video/mp4", "clip.mp4", "burst")).toEqual([2, 7]);
+    // Only at the start of the name, as on the phone; and a plain folder says nothing.
+    expect(photoTagsFor("image/jpeg", "IMG_burst.jpg", "Camera")).not.toContain(7);
   });
 
   it("sends only ids the server accepts", () => {
@@ -676,6 +772,16 @@ describe("the dimensions and length a file is uploaded with", () => {
     expect(mediaAttributes({ durationSec: 0 })).toBeUndefined();
     expect(mediaAttributes({ width: 0, height: 0 })).toBeUndefined();
     expect(mediaAttributes({ durationSec: null, width: null, height: null })).toBeUndefined();
+  });
+
+  it("gives a photo with no place none, rather than 0, 0", () => {
+    // The editor passes null for each half of a photo that has no location.
+    expect(mediaAttributes({ latitude: null, longitude: null })).toBeUndefined();
+    expect(mediaAttributes({ width: 1800, height: 2400, latitude: null, longitude: null })).toEqual({
+      Media: { Width: 1800, Height: 2400 },
+    });
+    expect(mediaAttributes({ latitude: 0, longitude: 0 })).toEqual({ Location: { Latitude: 0, Longitude: 0 } });
+    expect(mediaAttributes({ latitude: 47.5, longitude: null })).toBeUndefined();
   });
 
   it("refuses half a dimension", () => {
@@ -1066,7 +1172,7 @@ describe("an upload with compression on", () => {
   }
 
   it.runIf(process.platform === "win32")("names a folder drop that went up lighter, once, for the host to replace", async () => {
-    setCompression({ ...NO_COMPRESSION, photos: true });
+    setCompression({ ...NO_COMPRESSION, photos: true, local: true });
     takeDropReplaced();
     const path = await stagedDrop("folder.png");
     const { photos, sent } = askingPhotos();
@@ -1079,7 +1185,7 @@ describe("an upload with compression on", () => {
   });
 
   it.runIf(process.platform === "win32")("names a folder drop whose lighter copy the library already has", async () => {
-    setCompression({ ...NO_COMPRESSION, photos: true });
+    setCompression({ ...NO_COMPRESSION, photos: true, local: true });
     takeDropReplaced();
     const path = await stagedDrop("before.png");
     const { photos, sent } = askingPhotos({ "before.jpg": "uploaded-before" });
@@ -1088,6 +1194,114 @@ describe("an upload with compression on", () => {
     expect(status.skipped).toBe(1);
     expect(sent).toHaveLength(0);
     expect(takeDropReplaced()).toEqual([path]);
+  });
+
+  describe("from the Linux file manager", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    /** What the host was asked to keep, and whether it could. */
+    let kept: string[] = [];
+    function host(canKeep: boolean) {
+      kept = [];
+      setHostWriter((line) => {
+        const ask = JSON.parse(line);
+        if (ask.call !== "keepDropOriginal") return;
+        kept.push(ask.params.path);
+        setTimeout(() =>
+          takeHostLine(
+            canKeep
+              ? { hostReply: ask.callId, ok: true, result: null }
+              : { hostReply: ask.callId, ok: false, error: "no trash here" },
+          ),
+        );
+      });
+    }
+    beforeEach(() => Object.defineProperty(process, "platform", { ...platform, value: "linux" }));
+    afterEach(() => {
+      Object.defineProperty(process, "platform", platform);
+      setHostWriter(null);
+    });
+
+    it("puts the original in the trash before the lighter copy goes up", async () => {
+      setCompression({ ...NO_COMPRESSION, photos: true, local: true });
+      host(true);
+      const path = await stagedDrop("linux.png");
+      const { photos, sent } = askingPhotos();
+      startDropUpload(photos, [path]);
+      const status = await settle();
+      expect(status.done).toBe(1);
+      expect(kept).toEqual([path]);
+      expect(sent[0]).toMatchObject({ name: "linux.jpg", mediaType: "image/jpeg" });
+    });
+
+    it("sends the original as it is when it cannot be put in the trash", async () => {
+      setCompression({ ...NO_COMPRESSION, photos: true, local: true });
+      host(false);
+      const path = await stagedDrop("notrash.png");
+      const size = readFileSync(path).length;
+      const { photos, sent } = askingPhotos();
+      startDropUpload(photos, [path]);
+      const status = await settle();
+      expect(status.done).toBe(1);
+      expect(kept).toEqual([path]);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ name: "notrash.png", mediaType: "image/png", size });
+    });
+
+    it("keeps the original of a drop whose lighter copy the library already has", async () => {
+      setCompression({ ...NO_COMPRESSION, photos: true, local: true });
+      host(true);
+      const path = await stagedDrop("hadit.png");
+      const { photos, sent } = askingPhotos({ "hadit.jpg": "uploaded-before" });
+      startDropUpload(photos, [path]);
+      const status = await settle();
+      expect(status.skipped).toBe(1);
+      expect(sent).toHaveLength(0);
+      expect(kept).toEqual([path]);
+    });
+
+    it("asks nothing for a drop the library has as it is, or one with no lighter copy", async () => {
+      setCompression({ ...NO_COMPRESSION, photos: true, local: true });
+      host(true);
+      const there = await stagedDrop("same.png");
+      startDropUpload(askingPhotos({ "same.png": "existing" }).photos, [there]);
+      await settle();
+      setCompression({ ...NO_COMPRESSION, photos: true, local: false });
+      const plain = await stagedDrop("plain-drop.png");
+      startDropUpload(askingPhotos().photos, [plain]);
+      await settle();
+      expect(kept).toEqual([]);
+    });
+
+    it("never asks for a file picked from the computer", async () => {
+      setCompression({ ...NO_COMPRESSION, photos: true, local: true });
+      host(true);
+      const photo = await writeDetailedPhoto("picked-linux.png");
+      const { photos, sent } = askingPhotos();
+      startUpload(photos, [photo]);
+      await settle();
+      expect(sent[0]).toMatchObject({ name: "picked-linux.jpg" });
+      expect(kept).toEqual([]);
+    });
+  });
+
+  it("sends a folder drop as it is while the folder's own compression is off", async () => {
+    setCompression({ ...NO_COMPRESSION, photos: true, local: false });
+    takeDropReplaced();
+    const path = await stagedDrop("asis.png");
+    const { photos, sent } = askingPhotos();
+    startDropUpload(photos, [path]);
+    await settle();
+    expect(sent[0]).toMatchObject({ name: "asis.png", mediaType: "image/png" });
+    expect(takeDropReplaced()).toEqual([]);
+  });
+
+  it("compresses a picked file by the upload settings alone", async () => {
+    setCompression({ ...NO_COMPRESSION, photos: true, local: false });
+    const photo = await writeDetailedPhoto("picked.png");
+    const { photos, sent } = askingPhotos();
+    startUpload(photos, [photo]);
+    await settle();
+    expect(sent[0]).toMatchObject({ name: "picked.jpg", mediaType: "image/jpeg" });
   });
 
   it("leaves a folder drop alone when the original went up", async () => {
@@ -1108,5 +1322,129 @@ describe("an upload with compression on", () => {
     startUpload(photos, [photo]);
     await settle();
     expect(sent[0]).toMatchObject({ name: "plain.png", mediaType: "image/png", size: readFileSync(photo).length });
+  });
+});
+
+describe("where and on what a video was filmed", () => {
+  function box(type: string, ...body: Buffer[]): Buffer {
+    const content = Buffer.concat(body);
+    const header = Buffer.alloc(8);
+    header.writeUInt32BE(8 + content.length, 0);
+    header.write(type, 4, "latin1");
+    return Buffer.concat([header, content]);
+  }
+  const u32 = (n: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n, 0);
+    return b;
+  };
+
+  /** A .mov with an iPhone's QuickTime keys in `moov > meta`, and nothing decodable. */
+  function writeIphoneVideo(name: string): string {
+    const entries = [
+      ["com.apple.quicktime.location.ISO6709", "+47.4979+019.0402+120.000/"],
+      ["com.apple.quicktime.make", "Apple"],
+      ["com.apple.quicktime.model", "iPhone 15 Pro"],
+    ];
+    const hdlr = box("hdlr", u32(0), u32(0), Buffer.from("mdta", "latin1"), Buffer.alloc(13));
+    const keys = box("keys", u32(0), u32(entries.length), ...entries.map(([k]) => box("mdta", Buffer.from(k))));
+    const items = entries.map(([, v], i) => box(String.fromCharCode(0, 0, 0, i + 1), box("data", u32(1), u32(0), Buffer.from(v))));
+    const moov = box("moov", box("mvhd", Buffer.alloc(100)), box("meta", hdlr, keys, box("ilst", ...items)));
+    const path = join(work, name);
+    writeFileSync(path, Buffer.concat([box("ftyp", Buffer.from("qt  ", "latin1"), u32(0)), moov, box("mdat", Buffer.alloc(4096, 7))]));
+    return path;
+  }
+
+  const filmed = {
+    Location: { Latitude: 47.4979, Longitude: 19.0402 },
+    Camera: { Device: "Apple iPhone 15 Pro" },
+  };
+
+  afterAll(() => {
+    setHostWriter(null);
+    setCompression(NO_COMPRESSION);
+  });
+
+  it("sends a video's place and camera from its own tags", async () => {
+    setCompression(NO_COMPRESSION);
+    const video = writeIphoneVideo("filmed.mov");
+    const { photos, metadata } = recordingPhotos();
+    startUpload(photos, [video]);
+    await settle();
+    expect(metadata[0].additionalMetadata).toEqual(filmed);
+  });
+
+  it("sends the original's place and camera with its lighter MP4 copy", async () => {
+    const video = writeIphoneVideo("compressed.mov");
+    const source = {
+      width: 1920, height: 1080, fps: 30, durationMs: 4000, videoBitrate: 30_000_000, audioBitrate: 0,
+      hasAudio: false, codec: "avc", hdr: false, transfer: "sdr", primaries: "", bitDepth: 8,
+      dolbyVisionOnly: false, rotation: 0, size: 15_000_000,
+    };
+    const transcoded: string[] = [];
+    // The host's side: the copy it writes carries no tags at all, so whatever reaches Drive
+    // comes from the original.
+    setHostWriter((line) => {
+      const ask = JSON.parse(line);
+      if (!ask.call || ask.call === "cancel") return;
+      setTimeout(() => {
+        let result: unknown = null;
+        if (ask.call === "videoEncoders") result = { avc: true, hevc: false, av1: false, hevcHdr: false, av1Hdr: false };
+        else if (ask.call === "videoProbe") {
+          result = ask.params.path === video ? source : { ...source, size: statSync(ask.params.path).size };
+        } else if (ask.call === "videoTranscode") {
+          writeFileSync(ask.params.dst, Buffer.alloc(2048, 3));
+          transcoded.push(ask.params.dst);
+        }
+        takeHostLine({ hostReply: ask.callId, ok: true, result });
+      });
+    });
+    setCompression({ ...NO_COMPRESSION, videos: true });
+    const names: string[] = [];
+    const { photos, metadata } = recordingPhotos();
+    const uploader = photos.getFileUploader;
+    photos.getFileUploader = async (name: string, meta: UploadMetadata) => {
+      names.push(name);
+      return uploader(name, meta);
+    };
+    startUpload(photos, [video]);
+    const status = await settle();
+    expect(status.done).toBe(1);
+    expect(transcoded).toHaveLength(1);
+    expect(names).toEqual(["compressed.mp4"]);
+    expect(metadata[0].additionalMetadata).toEqual(filmed);
+  });
+});
+
+describe("exifFactsOf", () => {
+  it("reads the place a photo was taken, south and west of zero included", async () => {
+    const path = join(work, "gps.jpg");
+    await sharp({ create: { width: 16, height: 16, channels: 3, background: "#468" } })
+      .withExif({
+        IFD0: { Make: "TestCam", Model: "Model X1" },
+        IFD3: {
+          GPSLatitudeRef: "S",
+          GPSLatitude: "33/1 52/1 4/1",
+          GPSLongitudeRef: "W",
+          GPSLongitude: "70/1 40/1 12/1",
+        },
+      })
+      .jpeg()
+      .toFile(path);
+    const facts = await exifFactsOf(path);
+    expect(facts.latitude).toBeCloseTo(-33.8678, 3);
+    expect(facts.longitude).toBeCloseTo(-70.67, 3);
+    expect(facts.device).toBe("TestCam Model X1");
+  });
+
+  it("leaves the place out of a photo that has none", async () => {
+    const path = join(work, "nogps.jpg");
+    await sharp({ create: { width: 16, height: 16, channels: 3, background: "#468" } })
+      .withExif({ IFD0: { Make: "TestCam", Model: "Model X1" } })
+      .jpeg()
+      .toFile(path);
+    const facts = await exifFactsOf(path);
+    expect(facts.latitude).toBeUndefined();
+    expect(facts.longitude).toBeUndefined();
   });
 });

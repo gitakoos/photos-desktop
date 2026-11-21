@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "1.3.0"
+version = "1.4.0"
 description = "Photos for Proton, desktop"
 authors = ["Akoos"]
 edition = "2021"
@@ -33,7 +33,12 @@ tauri-build = { version = "2", features = [] }
 #                   viewer shows a full-resolution original without sending the whole
 #                   file over the JSON-RPC channel. Its reach is the `assetProtocol`
 #                   scope in tauri.conf.json, and nothing else.
-tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset"] }
+# `macos-private-api` - the window is transparent and draws its rounded frame itself
+#                   (`framed` in lib.rs), which on macOS takes the private window API.
+#                   It changes nothing on Windows or Linux. It is listed here rather than
+#                   under a macOS target because the build checks this entry against
+#                   `macOSPrivateApi` in tauri.conf.json and refuses one without the other.
+tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset", "macos-private-api"] }
 tauri-plugin-opener = "2"
 # Single-instance: a second launch focuses the running window instead of starting
 # a duplicate copy.
@@ -56,7 +61,7 @@ serde_json = "1"
 # (JPEG, PNG, WebP, TIFF, HEIF). The `image` crate would do both, but it pulls a large
 # decoder tree to answer a question that lives in the first few kilobytes. Pure Rust,
 # so they cross to every platform even though the local-file paths are Windows-only.
-imagesize = "0.13"
+imagesize = "0.15"
 kamadak-exif = "0.6"
 # The write side of the same philosophy, for the photo editor's save. `little_exif` is
 # pure, safe Rust that manipulates the EXIF/APP1 segment without ever decoding a pixel.
@@ -67,8 +72,8 @@ kamadak-exif = "0.6"
 little_exif = { path = "vendor/little_exif" }
 # In-app encrypted store: an AES-256-GCM data key, itself sealed at rest with a
 # per-platform keystore (user-scope DPAPI on Windows, the Secret Service on Linux).
-aes-gcm = "0.10"
-base64 = "0.22"
+aes-gcm = "0.11"
+base64 = "0.23"
 # The updater checks the installer's Ed25519 signature (minisign format) before running
 # it. No dependencies of its own.
 minisign-verify = "=0.3.0"
@@ -83,7 +88,7 @@ semver = "1"
 # Windows' foreground lock when the app is not already active, so we use
 # SetForegroundWindow with the AttachThreadInput trick.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Input_KeyboardAndMouse",
@@ -117,6 +122,9 @@ windows = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
   # Whether the PC runs on battery, which holds the pass that keeps every photo on this PC.
   "Win32_System_Power",
+  # The system's SHA-1 (BCrypt), to check a copy in the Explorer folder against the digest
+  # its cloud revision records before it is marked in sync or freed.
+  "Win32_Security_Cryptography",
   # SHChangeNotify, so a file association switched on or off in Settings reaches
   # Explorer's "Open with" straight away instead of after a sign-out, and
   # ShellExecuteW to hand the default-apps page to the shell. Also
@@ -148,16 +156,6 @@ windows = { version = "0.61", features = [
   # to the app's window.
   "Security_Credentials_UI",
   "Win32_System_WinRT",
-  # Videos compressed for upload with Windows' own encoders (video_compress.rs): the transcoder,
-  # its encoding profiles, the files it reads and writes and their length and turn, and the
-  # Media Foundation list of encoders, which tells which codecs this PC can write in hardware.
-  "Media_Transcoding",
-  "Media_MediaProperties",
-  "Storage",
-  "Storage_FileProperties",
-  "Storage_Streams",
-  "Foundation_Collections",
-  "Win32_Media_MediaFoundation",
 ] }
 # Registers the "Proton Photos" folder as a Windows Cloud Filter sync root so it
 # shows in the Explorer navigation pane (files-on-demand comes later).
@@ -181,25 +179,25 @@ windows058 = { package = "windows", version = "=0.58.0", features = [
 # holding ~200 MB of renderer memory in the background (state is kept; it resumes on
 # show). Tauri's `with_webview` hands us the controller; TrySuspend needs the raw
 # WebView2 COM interface. Pinned to Tauri's own version so the interface types unify.
-webview2-com = "0.38"
+webview2-com = "0.39"
 # The `#[implement]` macro used for the TrySuspend completion handler expands to bare
 # `windows_core::` paths, so windows-core must be a direct dependency by that name. Same
 # version webview2-com-sys binds against, so the COM interface traits unify.
-windows-core = "0.61"
+windows-core = "0.62"
 # The asynchronous answer Windows Hello's prompt gives. Already in the build through the
 # windows crate, which moved its async types here; named directly to wait on that answer.
-windows-future = "0.2"
+windows-future = "0.3"
 # The "show in File Explorer" preference (HKCU), shared with the installer checkbox.
-winreg = "0.52"
+winreg = "0.56"
 # Seals the store's AES-256-GCM data key at rest with user-scope DPAPI. No entry is
 # created anywhere the system can enumerate (no credential store, no registry).
 windows-dpapi = "0.2"
 
-# Non-Windows (Linux): seal the same store key through the OS keyring, which on a Linux
-# desktop is the Secret Service (gnome-keyring / kwallet) over D-Bus. Under Flatpak this
-# needs the org.freedesktop.secrets talk permission. Pure-Rust crypto so no system
-# crypto library is linked into the sandbox.
-[target.'cfg(not(windows))'.dependencies]
+# Linux: seal the same store key through the OS keyring, which on a Linux desktop is the
+# Secret Service (gnome-keyring / kwallet) over D-Bus. Under Flatpak this needs the
+# org.freedesktop.secrets talk permission. Pure-Rust crypto so no system crypto library
+# is linked into the sandbox.
+[target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 # A video's frame and length for its upload, asked of GStreamer: the media framework a
 # Linux desktop already plays these files with (upload_frame.rs). 0.21 is the line built
@@ -222,3 +220,25 @@ httpdate = "1"
 # Starting at sign-in through the XDG Background portal (autostart.rs). The crate the
 # keyring's Secret Service support already builds, so it adds nothing new.
 dbus = "0.9"
+# Sending a file to the trash (local_file.rs): GIO, which the GTK stack already builds, puts
+# it in the freedesktop trash, or asks the trash portal from inside the sandbox.
+gio = "=0.18.4"
+
+# macOS: the same store key sealed in the login Keychain. Without `apple-native` the
+# keyring crate has no store for this platform and silently falls back to a mock one that
+# forgets the key on exit.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+# Touch ID, or the Mac's own password where there is none, for the app lock and Hidden
+# (hello.rs). The LocalAuthentication bindings are the only new crate: objc2, its Foundation
+# bindings and block2 are the versions Tauri already builds with on this platform.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError", "NSFileManager", "NSURL"] }
+objc2-local-authentication = { version = "=0.3.2", default-features = false, features = ["std", "block2", "LAContext"] }
+block2 = "0.6"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
+# panic stays "unwind": a panic in a worker thread must not end the app.

@@ -1,0 +1,186 @@
+/*
+ * Photos for Proton
+ * Copyright (C) 2026 Akoos <https://akoos.eu>
+ *
+ * Source:  https://github.com/gitakoos/photos-desktop
+ * Website: https://www.photosforproton.eu
+ *
+ * This file is part of Photos for Proton.
+ *
+ * Photos for Proton is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 3 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
+/* The collage maker reuses the photo editor's shell (Editor.css); these are its own parts. */
+.cl-title {
+  flex: 1 1 auto;
+  margin: 0 12px;
+  color: var(--fg-primary);
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.cl-frame {
+  position: relative;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.cl-canvas {
+  display: block;
+}
+.cl-overlay {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+  touch-action: none;
+}
+.cl-overlay:active {
+  cursor: grabbing;
+}
+.cl-overlay.picking {
+  cursor: crosshair;
+}
+.cl-cell {
+  position: absolute;
+  outline: none;
+}
+.cl-cell.sel {
+  box-shadow: inset 0 0 0 3px var(--accent);
+}
+.cl-cell:focus-visible {
+  box-shadow: inset 0 0 0 3px var(--accent), inset 0 0 0 5px var(--bg0);
+}
+.cl-cell.swapsrc {
+  box-shadow: inset 0 0 0 3px var(--accent);
+  background: rgba(var(--accent-rgb), 0.18);
+}
+.cl-cell.drop {
+  box-shadow: inset 0 0 0 4px var(--accent);
+  background: rgba(var(--accent-rgb), 0.28);
+}
+.cl-pill {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  background: var(--pill-bg-opaque);
+  cursor: default;
+}
+.cl-pill-btn {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-primary);
+  cursor: pointer;
+}
+.cl-pill-btn:first-child {
+  cursor: grab;
+}
+.cl-pill-btn:hover {
+  background: var(--pill-bg);
+}
+.cl-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+/* Layout tab: one small drawing per layout. */
+.cl-templates {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  padding: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.cl-tpl {
+  position: relative;
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border: 0.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--pill-bg);
+  cursor: pointer;
+}
+.cl-tpl i {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid var(--bg0);
+  background: var(--fg-mute);
+  border-radius: 2px;
+}
+.cl-tpl:hover:not(.sel) i {
+  background: var(--fg-dim);
+}
+.cl-tpl.sel {
+  box-shadow: 0 0 0 2px var(--bg0), 0 0 0 4px var(--accent);
+}
+.cl-tpl.sel i {
+  background: var(--accent);
+}
+
+/* Border tab: the sliders and the background colours. */
+.cl-border {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+.cl-label {
+  flex: 0 0 96px;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+.cl-swatches {
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cl-swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0.5px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.cl-swatch.sel {
+  box-shadow: 0 0 0 2px var(--bg0), 0 0 0 4px var(--accent);
+}
+
+/* A narrow window: the labels give way a little. */
+@media (max-width: 720px) {
+  .cl-label {
+    flex-basis: 72px;
+  }
+}

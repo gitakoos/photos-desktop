@@ -38,7 +38,6 @@
 // single channel that the rest of the app is waiting on.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WritableStream } from "node:stream/web";
 
@@ -53,10 +52,11 @@ import {
   originalHas,
   originalStoredAt,
   originalUsage,
+  readSealedOrSetAside,
   storeDir,
-  unseal,
   writeSealedAtomic,
 } from "./store.ts";
+import { openDownloader, type OpenedDownloader } from "./downloadSlots.ts";
 
 /** What the UI polls while a batch runs, and reads to size the Settings panel. */
 export type OfflineStatus = {
@@ -96,9 +96,10 @@ function pins(): Set<string> {
   if (pinned) return pinned;
   if (!isReady()) return new Set();
   try {
-    const path = listPath();
-    if (existsSync(path)) {
-      const parsed = JSON.parse(unseal(readFileSync(path)).toString("utf8")) as OfflineList;
+    // A list that will not open under the key is set aside rather than written over.
+    const raw = readSealedOrSetAside(listPath());
+    if (raw) {
+      const parsed = JSON.parse(raw.toString("utf8")) as OfflineList;
       pinned = new Set(Array.isArray(parsed?.uids) ? parsed.uids : []);
       albumPins = new Map(
         Object.entries(parsed?.albums ?? {})
@@ -197,6 +198,7 @@ export function offlineStatus(): OfflineStatus {
 async function fetchOne(photos: any, uid: string): Promise<boolean> {
   if (originalHas(uid)) return true;
   let sealer: OriginalSealer | null = null;
+  let opened: OpenedDownloader | null = null;
   try {
     const node = await photos.getNode(uid);
     // Recorded now so opening this photo later needs no node lookup, which is what
@@ -214,8 +216,12 @@ async function fetchOne(photos: any, uid: string): Promise<boolean> {
       ...(size > 0 ? { size } : {}),
     });
 
-    const downloader = await photos.getFileDownloader(uid);
-    if (!held(uid)) return false;
+    opened = await openDownloader(photos, uid);
+    const { downloader } = opened;
+    if (!held(uid)) {
+      opened.unused(); // unpinned while it was set up
+      return false;
+    }
     sealer = new OriginalSealer(uid);
     const writer = sealer;
     const stream = new WritableStream<Uint8Array>({
@@ -235,6 +241,7 @@ async function fetchOne(photos: any, uid: string): Promise<boolean> {
     await sealer.finish();
     return true;
   } catch {
+    opened?.unused();
     if (sealer) await sealer.abort();
     return false;
   }

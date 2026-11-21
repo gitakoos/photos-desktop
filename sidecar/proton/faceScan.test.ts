@@ -29,8 +29,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { FACE_EMBEDDING_DIM } from "./faceCluster.ts";
 import { FaceScanner, analyzeImage, modelDownloadProgress, tilesFor, type ScanSource } from "./faceScan.ts";
+import type { FaceCopyToWrite } from "./driveData.ts";
 import type { FaceRecord } from "./faceStore.ts";
+import { ModelWorkerGone } from "./ortSession.ts";
 import { PowerWatch } from "./scanPipeline.ts";
+import { missFor, type ScanMiss } from "./scanMisses.ts";
 import { initStore, setDataKey } from "./store.ts";
 import { direction, faceOf, seeded } from "./testFaces.ts";
 
@@ -171,8 +174,9 @@ function scanner(): FaceScanner {
   return s;
 }
 
+/** Waits for the run and the save after it, so nothing is written into the next test's store. */
 async function settle(s: FaceScanner): Promise<void> {
-  while ((s as any).running) await (s as any).running;
+  while ((s as any).running || (s as any).saving) await ((s as any).running ?? (s as any).saving);
 }
 
 const face = (uid: string): FaceRecord => ({
@@ -234,6 +238,217 @@ describe("the scan of the library", () => {
     await second.wasListed;
     await settle(s);
     expect(second.asked).toEqual(["vol~a"]);
+    s.stop(false);
+  });
+
+  it("indexes right after a run that began before the search was turned on", async () => {
+    const s = scanner();
+    const lib = library(["vol~a"]);
+    lib.holdListing();
+    s.setSource(lib.source);
+    await lib.wasListed;
+    // The search turned on while the faces' run waits on its listing.
+    s.setEnabled(true, false, false, false, true);
+    lib.release();
+    await settle(s);
+    expect((s as any).ran).toEqual({ faces: true, index: true });
+    expect(s.getStatus().search).not.toBeNull();
+    s.stop(false);
+  });
+});
+
+/**
+ * A library of one photo that always gives `miss` instead of a picture, its file's revision
+ * `stamp.now`; every ask for the photo and for its revision is noted.
+ */
+function missingLibrary(uid: string, miss: ScanMiss, stamp = { now: "rev1" }) {
+  const asked: string[] = [];
+  const stamped: string[][] = [];
+  const source: ScanSource = {
+    listUids: async () => [uid],
+    async *pictures(batch) {
+      for (const one of batch) {
+        asked.push(one);
+        yield { uid: one, bytes: null, miss };
+      }
+    },
+    listTrashed: async () => new Set(),
+    stamps: async (uids) => {
+      stamped.push(uids);
+      return new Map(uids.map((one) => [one, stamp.now]));
+    },
+    hiddenTest: () => () => false,
+  };
+  return { source, asked, stamped, stamp };
+}
+
+describe("a photo the scan cannot read", () => {
+  const timeout = missFor("timeout");
+
+  beforeEach(() => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-miss-")));
+    setDataKey(randomBytes(32));
+  });
+
+  it("is skipped at once when it will never read, for the faces and the search, with its cause", async () => {
+    const s = scanner();
+    s.setEnabled(true, false, false, false, true);
+    const lib = missingLibrary("vol~a", missFor("undecodable"));
+    s.setSource(lib.source);
+    await settle(s);
+    expect(s.store.has("vol~a")).toBe(true);
+    expect(s.search.get("vol~a")).toBeNull();
+    expect(s.missSummary()).toEqual({ waiting: 0, skipped: 1, waitingBy: {}, skippedBy: { undecodable: 1 } });
+    s.stop(false);
+  });
+
+  it("is left unscanned when it failed for now, and out of the next pass until its wait is over", async () => {
+    const s = scanner();
+    const lib = missingLibrary("vol~a", timeout);
+    s.setSource(lib.source);
+    await settle(s);
+    expect(s.store.has("vol~a")).toBe(false);
+    expect(s.misses.attempts("vol~a")).toBe(1);
+    s.setSource(lib.source);
+    await settle(s);
+    expect(lib.asked).toEqual(["vol~a"]);
+    expect(s.missSummary()?.waitingBy).toEqual({ timeout: 1 });
+    s.stop(false);
+  });
+
+  it("is given up on and counted as looked at on its eighth counted failure in a row", async () => {
+    const s = scanner();
+    s.misses.load();
+    // Seven failures long past, the last wait over.
+    for (let i = 0; i < 7; i++) s.misses.miss("vol~a", timeout, 0);
+    const lib = missingLibrary("vol~a", timeout);
+    s.setSource(lib.source);
+    await settle(s);
+    expect(lib.asked).toEqual(["vol~a"]);
+    expect(s.store.has("vol~a")).toBe(true);
+    expect(s.getStatus().done).toBe(1);
+    expect(s.missSummary()?.skippedBy).toEqual({ "gaveUp:timeout": 1 });
+    s.stop(false);
+  });
+
+  it("is read again, faces and search, once its file changes", async () => {
+    const s = scanner();
+    s.setEnabled(true, false, false, false, true);
+    const lib = missingLibrary("vol~a", missFor("undecodable"));
+    s.setSource(lib.source);
+    await settle(s);
+    expect(lib.stamped).toEqual([["vol~a"]]);
+    lib.stamp.now = "rev2";
+    // The comparison with Drive is due again.
+    (s as any).stampsCheckedAt = 0;
+    s.setSource(lib.source);
+    await settle(s);
+    expect(lib.asked).toEqual(["vol~a", "vol~a"]);
+    s.stop(false);
+  });
+
+  it("is read again once its file changes also while face recognition is off", async () => {
+    const s = scanner();
+    const lib = missingLibrary("vol~a", missFor("undecodable"));
+    s.setSource(lib.source);
+    await settle(s);
+    s.stop(true);
+    lib.stamp.now = "rev2";
+    s.setEnabled(false, false, false, false, true);
+    await settle(s);
+    expect(lib.asked).toEqual(["vol~a", "vol~a"]);
+    expect(s.store.isLoaded()).toBe(false);
+    s.store.load();
+    expect(s.store.has("vol~a")).toBe(false);
+    s.stop(false);
+  });
+
+  it("is not read again while its file stays the same", async () => {
+    const s = scanner();
+    const lib = missingLibrary("vol~a", missFor("undecodable"));
+    s.setSource(lib.source);
+    await settle(s);
+    (s as any).stampsCheckedAt = 0;
+    s.setSource(lib.source);
+    await settle(s);
+    expect(lib.asked).toEqual(["vol~a"]);
+    s.stop(false);
+  });
+
+  it("waits for another try, rather than counting as looked at, when the face model throws on it", async () => {
+    const s = scanner();
+    (s as any).analyze = async () => {
+      throw new Error("model run failed");
+    };
+    const picture = await noisyJpeg(7);
+    const source: ScanSource = {
+      listUids: async () => ["vol~a"],
+      async *pictures(batch) {
+        for (const uid of batch) yield { uid, bytes: picture };
+      },
+      listTrashed: async () => new Set(),
+      hiddenTest: () => () => false,
+    };
+    s.setSource(source);
+    await settle(s);
+    expect(s.store.has("vol~a")).toBe(false);
+    expect(s.missSummary()?.waitingBy).toEqual({ model: 1 });
+    s.stop(false);
+  });
+
+  it("is given up on after taking the model thread down twice in a row, and kept for one loss", () => {
+    const s = scanner();
+    s.misses.load();
+    (s as any).workerLost("vol~a", true, false);
+    expect(s.misses.attempts("vol~a")).toBe(0);
+    (s as any).workerLost("vol~a", true, false);
+    expect(s.misses.attempts("vol~a")).toBe(1);
+    expect(s.missSummary()?.waitingBy).toEqual({ model: 1 });
+    s.stop(false);
+  });
+
+  it("comes back after five minutes when the library could not be read", async () => {
+    const s = scanner();
+    const source: ScanSource = {
+      listUids: async () => {
+        throw new Error("offline");
+      },
+      async *pictures() {},
+      listTrashed: async () => new Set(),
+      hiddenTest: () => () => false,
+    };
+    s.setSource(source);
+    await settle(s);
+    expect(s.getStatus().state).toBe("failed");
+    expect((s as any).recheckDelay()).toBe(5 * 60_000);
+    s.stop(false);
+  });
+
+  it("is left out of this computer's face copy for the other devices once skipped", async () => {
+    const s = scanner();
+    let written: FaceCopyToWrite | null = null;
+    s.setDriveWriter(async (copy) => {
+      written = copy;
+      return true;
+    });
+    const lib = missingLibrary("vol~a", missFor("undecodable"));
+    s.setSource(lib.source);
+    await settle(s);
+    await s.shareOnce(() => s.saveFaces(true));
+    expect(s.store.scanned()).toEqual(["vol~a"]);
+    expect(written!.markers).toEqual([]);
+    s.stop(false);
+  });
+
+  it("brings the next run forward to when its wait ends", () => {
+    const s = scanner();
+    s.misses.load();
+    expect((s as any).recheckDelay(1000)).toBe(15 * 60_000);
+    s.misses.miss("vol~a", timeout, 1000);
+    s.misses.miss("vol~a", timeout, 1000);
+    expect((s as any).recheckDelay(1000)).toBe(15 * 60_000);
+    s.misses.miss("vol~b", timeout, 1000);
+    expect((s as any).recheckDelay(1000)).toBe(5 * 60_000);
     s.stop(false);
   });
 });
@@ -402,5 +617,62 @@ describe("photos read side by side", () => {
       expect(many.vectors).toEqual(one.vectors);
       expect(many.faceCount).toBe(one.faceCount);
     }
+  });
+});
+
+describe("a model thread lost in the middle of a pass", () => {
+  it("stops the pass with the photo unrecorded, and the next pass reads it", { timeout: 60_000 }, async () => {
+    initStore(mkdtempSync(join(tmpdir(), "pfp-lost-")));
+    setDataKey(Buffer.alloc(32, 9));
+    const pictures = new Map<string, Buffer>();
+    for (let i = 0; i < 12; i++) pictures.set(`vol~q${String(i).padStart(2, "0")}`, await noisyJpeg(i + 500));
+    const { models, clip } = pictureModels();
+    // The thread is lost at the sixth photo's detection, and again on the run tried once more.
+    const yielded: string[] = [];
+    let calls = 0;
+    let lose = true;
+    const detect = models.detector.run;
+    models.detector.run = async (feeds: any) => {
+      calls++;
+      if (lose && calls >= 6) throw new ModelWorkerGone();
+      return detect(feeds);
+    };
+    const s = new FaceScanner(new PowerWatch(async () => ({ saving: false, metered: false })));
+    (s as any).ensureModels = async () => true;
+    (s as any).openModels = async () => models;
+    (s as any).openClip = async () => clip;
+    (s as any).speed = () => ({
+      chosen: null,
+      machine: "balanced",
+      running: "balanced",
+      level: { photos: 1, downloads: 1, prefetch: false, pauseMs: 0 },
+    });
+    s.store.load();
+    s.setEnabled(true, false, false, false, true);
+    s.setSource({
+      listUids: async () => [...pictures.keys()],
+      async *pictures(batch) {
+        for (const uid of batch) {
+          yielded.push(uid);
+          yield { uid, bytes: pictures.get(uid) ?? null };
+        }
+      },
+      listTrashed: async () => new Set(),
+      hiddenTest: () => () => false,
+    });
+    await settle(s);
+    const lost = yielded[5];
+    expect(s.getStatus().state).toBe("failed");
+    expect(s.store.has(lost)).toBe(false);
+    expect(s.search.get(lost)).toBeFalsy();
+    for (const uid of yielded.slice(0, 5)) expect(s.store.has(uid)).toBe(true);
+    // A pass with the thread back reads it, and the rest.
+    lose = false;
+    (s as any).kick();
+    await settle(s);
+    expect(s.getStatus().state).toBe("done");
+    for (const uid of pictures.keys()) expect(s.store.has(uid)).toBe(true);
+    expect(s.search.get(lost)).toBeTruthy();
+    s.stop(true);
   });
 });

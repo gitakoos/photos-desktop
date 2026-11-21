@@ -25,7 +25,8 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("./rpc", () => ({ rpc: vi.fn() }));
 vi.mock("./lightboxSignal", () => ({ isLightboxOpen: () => false }));
 
-import { cachedThumbnail, putThumbnail, thumbCacheSize } from "./thumbStore";
+import { rpc } from "./rpc";
+import { afterStreamFailed, cachedThumbnail, putThumbnail, thumbCacheSize } from "./thumbStore";
 
 describe("the grid's thumbnail cache", () => {
   it("keeps thousands of small thumbnails, which a count cap of 500 threw away", () => {
@@ -43,5 +44,23 @@ describe("the grid's thumbnail cache", () => {
     expect(cachedThumbnail("small-0")).toBeUndefined();
     expect(cachedThumbnail("large-0")).toBeUndefined();
     expect(thumbCacheSize()).toBeLessThanOrEqual(49);
+  });
+});
+
+describe("a streamed video that failed", () => {
+  it("goes straight to the whole file when the sidecar refused it for good", async () => {
+    vi.mocked(rpc).mockResolvedValueOnce(true);
+    expect(await afterStreamFailed("u", 0, 2)).toBe("whole");
+    expect(rpc).toHaveBeenLastCalledWith("videoNotStreamable", { uid: "u" });
+  });
+
+  it("is opened again after a passing failure, until the retries run out", async () => {
+    vi.mocked(rpc).mockClear();
+    vi.mocked(rpc).mockResolvedValueOnce(false);
+    expect(await afterStreamFailed("u", 1, 2)).toBe("again");
+    vi.mocked(rpc).mockRejectedValueOnce(new Error("channel"));
+    expect(await afterStreamFailed("u", 1, 2)).toBe("again");
+    expect(await afterStreamFailed("u", 2, 2)).toBe("whole");
+    expect(rpc).toHaveBeenCalledTimes(2);
   });
 });

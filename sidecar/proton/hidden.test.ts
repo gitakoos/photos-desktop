@@ -21,18 +21,20 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { readHiddenCopy, writeHiddenCopy, hiddenFileDevice, hiddenFileName } from "./driveData.ts";
 import { HiddenStore, linkOf } from "./hidden.ts";
-import { initStore, setDataKey, wipeCache } from "./store.ts";
+import { clearDataKey, HIDDEN_FILE, initStore, setDataKey, storeDir, StoreLockedError, wipeCache } from "./store.ts";
+
+const KEY = randomBytes(32);
 
 beforeAll(() => {
   initStore(mkdtempSync(join(tmpdir(), "pfp-hidden-")));
-  setDataKey(randomBytes(32));
+  setDataKey(Buffer.from(KEY));
 });
 
 describe("hidden photos and albums", () => {
@@ -174,5 +176,54 @@ describe("the hidden list on Drive", () => {
     expect(sorted(phone)).toEqual(sorted(pc));
     expect(sorted(pc).photos).toEqual(["a", "c"]);
     expect(pc.isHiddenAlbum("v~x")).toBe(false);
+  });
+});
+
+// The app locked with the window in the tray while the window still asked for the list every ten
+// seconds: the locked read took the file for a torn one, deleted it, and kept an empty list.
+describe("the hidden list across a lock", () => {
+  const path = () => join(storeDir(), HIDDEN_FILE);
+
+  it("answers locked while the store is, keeps the file, and reads it whole after the unlock", () => {
+    const store = new HiddenStore();
+    store.set("photos", ["vol~p1", "vol~p2"], true, 5);
+    store.set("albums", ["vol~a1"], true, 6, new Map([["vol~a1", ["vol~x"]]]));
+    const sealed = readFileSync(path());
+
+    store.unload();
+    clearDataKey();
+    expect(() => store.snapshot()).toThrow(StoreLockedError);
+    expect(() => store.hiddenPhotoTest()).toThrow(StoreLockedError);
+    expect(existsSync(path())).toBe(true);
+    expect(readFileSync(path()).equals(sealed)).toBe(true);
+
+    setDataKey(Buffer.from(KEY));
+    expect(store.snapshot()).toMatchObject({ photos: ["p1", "p2"], albums: ["vol~a1"], albumPhotos: ["vol~x"] });
+  });
+
+  it("refuses a change while locked rather than writing a shorter list", () => {
+    const store = new HiddenStore();
+    store.set("photos", ["vol~q1"], true, 5);
+    const sealed = readFileSync(path());
+
+    store.unload();
+    clearDataKey();
+    expect(() => store.set("photos", ["vol~q2"], true, 6)).toThrow(StoreLockedError);
+    expect(() => store.takeIn({ deviceId: "d", deviceLabel: "phone", createdAt: 1, photos: [{ key: "q3", hidden: true, changedAt: 7 }], albums: [] })).toThrow(StoreLockedError);
+    expect(() => store.forDrive("id", "pc", 1)).toThrow(StoreLockedError);
+    expect(readFileSync(path()).equals(sealed)).toBe(true);
+
+    setDataKey(Buffer.from(KEY));
+    expect(store.snapshot().photos).toContain("q1");
+  });
+
+  it("starts over only from a file the right key does not open, which it keeps aside", async () => {
+    const { readdirSync, writeFileSync } = await import("node:fs");
+    const store = new HiddenStore();
+    store.set("photos", ["vol~r1"], true, 5);
+    writeFileSync(path(), randomBytes(80));
+    store.unload();
+    expect(store.snapshot().photos).toEqual([]);
+    expect(readdirSync(storeDir()).some((n) => n.startsWith(`${HIDDEN_FILE}.unreadable-`))).toBe(true);
   });
 });

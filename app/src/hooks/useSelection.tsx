@@ -33,6 +33,10 @@ import {
 } from "react";
 import {
   CalendarIcon,
+  CompressIcon,
+  CollageIcon,
+  GifIcon,
+  PlaceIcon,
   CallMergeIcon,
   CloseIcon,
   DeleteForeverIcon,
@@ -414,6 +418,10 @@ export function SelectionBar({
   onAddToAlbum,
   onLabels,
   onEditDate,
+  onEditPlace,
+  onCompress,
+  onMakeGif,
+  onMakeCollage,
   onRemoveFromAlbum,
   onRemoveFromPerson,
   onMergePeople,
@@ -444,6 +452,14 @@ export function SelectionBar({
   onLabels?: () => void;
   /** Opens the date editor for the selection. */
   onEditDate?: () => void;
+  /** Opens the place editor for the selection. */
+  onEditPlace?: () => void;
+  /** Makes the selection smaller on Drive, each replaced by its lighter copy. */
+  onCompress?: () => void;
+  /** Turns the one selected video into a GIF. */
+  onMakeGif?: () => void;
+  /** Puts the two to nine selected photos into a collage. */
+  onMakeCollage?: () => void;
   onRemoveFromAlbum?: () => void;
   /** Takes the selection away from the person whose photos these are. */
   onRemoveFromPerson?: () => void;
@@ -484,6 +500,10 @@ export function SelectionBar({
     add(onAddToAlbum, "addToAlbum", <LibraryAddIcon size={18} />);
     add(onLabels, "labels", <LabelIcon size={18} />);
     add(onEditDate, "editDate", <CalendarIcon size={18} />);
+    add(onEditPlace, "editPlace", <PlaceIcon size={18} />);
+    add(onMakeGif, "makeGif", <GifIcon size={18} />);
+    add(onMakeCollage, "makeCollage", <CollageIcon size={18} />);
+    add(onCompress, "compress", <CompressIcon size={18} />);
     add(onSetCover, "setCover", <ImageIcon size={18} />);
     add(onDownload, "download", <DownloadIcon size={18} />);
     add(onFreeUp, "freeUp", <SweepIcon size={18} />);
@@ -503,6 +523,10 @@ export function SelectionBar({
     onAddToAlbum,
     onLabels,
     onEditDate,
+    onEditPlace,
+    onMakeGif,
+    onMakeCollage,
+    onCompress,
     onSetCover,
     onDownload,
     onFreeUp,

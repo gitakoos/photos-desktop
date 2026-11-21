@@ -27,7 +27,8 @@ import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { diag } from "./diag.ts";
-import { diagnosticsReport, saveDiagnostics, withoutNames } from "./diagReport.ts";
+import { keptCounts, noteKept, resetKeptCounts } from "./compression.ts";
+import { diagnosticsReport, keptLine, missLine, saveDiagnostics, withoutNames } from "./diagReport.ts";
 import { initStore, setDataKey } from "./store.ts";
 
 let dir: string;
@@ -54,6 +55,32 @@ describe("the diagnostics report", () => {
     expect(text).not.toContain("[diag] 10:00:00.000 app start");
     expect(text).not.toContain("Anna");
     expect(text).not.toContain("x.jpg");
+  });
+
+  it("says how many files compression left as they were, and why", () => {
+    resetKeptCounts();
+    expect(diagnosticsReport([]).text).toContain("Compression kept as they were: none");
+    noteKept("video", "hdr");
+    noteKept("video", "hdr");
+    noteKept("photo", "not-smaller");
+    expect(keptCounts()).toEqual({ "photo not-smaller": 1, "video hdr": 2 });
+    expect(diagnosticsReport([]).text).toContain("Compression kept as they were: photo not-smaller 1, video hdr 2");
+    expect(keptLine({})).toBe("Compression kept as they were: none");
+    resetKeptCounts();
+  });
+
+  it("says how many photos the scan skipped and how many wait, by the kind of error", () => {
+    const line = missLine({
+      waiting: 1,
+      skipped: 3,
+      waitingBy: { offline: 1 },
+      skippedBy: { undecodable: 1, "gaveUp:network": 2 },
+    });
+    expect(line).toBe("Scan misses: permanentSkipped=3 transientWaiting=1 skipCauses=gaveUp:network:2,undecodable:1 waitCauses=offline:1");
+  });
+
+  it("says plainly when the scan has no photo it could not read", () => {
+    expect(missLine({ waiting: 0, skipped: 0, waitingBy: {}, skippedBy: {} })).toBe("Scan misses: permanentSkipped=0 transientWaiting=0");
   });
 
   it("takes paths and file names out of the log lines it carries", () => {

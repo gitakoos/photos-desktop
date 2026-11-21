@@ -31,3 +31,7 @@ import { afterAll } from "vitest";
 const viewDir = join(tmpdir(), `pfp-view-test-${process.pid}`);
 process.env.PFP_VIEW_DIR = viewDir;
 afterAll(() => rmSync(viewDir, { recursive: true, force: true }));
+// The same for the lighter copies' folder, which a lock or a start sweeps.
+const compressRoot = join(tmpdir(), `pfp-compress-test-${process.pid}`);
+process.env.PFP_COMPRESS_DIR = join(compressRoot, "pfp-compress");
+afterAll(() => rmSync(compressRoot, { recursive: true, force: true }));

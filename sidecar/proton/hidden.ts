@@ -31,7 +31,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import type { HiddenCopy, HiddenEntry } from "./driveData.ts";
-import { HIDDEN_FILE, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
+import { HIDDEN_FILE, readSealedOrSetAside, storeDir, writeSealedAtomic } from "./store.ts";
 
 export type HiddenKind = "photos" | "albums";
 
@@ -75,7 +75,7 @@ export class HiddenStore {
   private get(): Saved {
     if (this.state) return this.state;
     let state = empty();
-    const raw = this.persist ? readSealedOrDiscard(this.path()) : null;
+    const raw = this.persist ? readSealedOrSetAside(this.path()) : null;
     if (raw) {
       try {
         const parsed = JSON.parse(raw.toString("utf8")) as Partial<Saved> & { albumUids?: Record<string, string> };

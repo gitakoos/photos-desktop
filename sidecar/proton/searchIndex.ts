@@ -28,10 +28,11 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
+import { timeSlicer } from "./faceCluster.ts";
 import { coverSquare, type Decoded } from "./phoneDecode.ts";
 import { pinnedModel } from "./pinnedModel.ts";
 import { EMBEDDING_DIM, SEARCH_MODEL_ID, halfToFloatTable, type SearchCopy } from "./semantic.ts";
-import { SEARCH_DIR, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
+import { SEARCH_DIR, readSealedOrSetAside, storeDir, writeSealedAtomic } from "./store.ts";
 
 /** The phone's CLIP image encoder, pinned to the release's bytes. */
 export const IMAGE_MODEL = {
@@ -135,6 +136,14 @@ export function encodeShard(shard: Shard): Buffer {
 }
 
 export function decodeShard(buf: Buffer): Shard {
+  for (const steps = decodeShardSteps(buf); ; ) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+/** `decodeShard` a photo at a time: a step after every photo. */
+function* decodeShardSteps(buf: Buffer): Generator<void, Shard> {
   if (buf.length < 12 || buf.readUInt32LE(0) !== MAGIC || buf.readUInt32LE(4) !== FORMAT) {
     throw new Error("not a search shard");
   }
@@ -149,12 +158,14 @@ export function decodeShard(buf: Buffer): Shard {
     const flags = buf.readUInt8(o++);
     if (flags & TOMBSTONE) {
       shard.set(uid, null);
+      yield;
       continue;
     }
     const vector = new Uint16Array(EMBEDDING_DIM);
     for (let k = 0; k < EMBEDDING_DIM; k++) vector[k] = buf.readUInt16LE(o + k * 2);
     o += EMBEDDING_DIM * 2;
     shard.set(uid, vector);
+    yield;
   }
   return shard;
 }
@@ -167,6 +178,8 @@ export class SearchStore {
   private shards: Shard[] = [];
   private dirty = new Set<number>();
   private loaded = false;
+  /** Counts each load, emptying and letting go, so a sliced load can tell the store changed meanwhile. */
+  private holding = 0;
   /** Bumped by every change, so the copy the search reads is made again only when needed. */
   version = 0;
   private copyCache: { version: number; copy: SearchCopy } | null = null;
@@ -181,24 +194,60 @@ export class SearchStore {
 
   load(): void {
     if (this.loaded) return;
-    this.shards = Array.from({ length: SHARDS }, () => new Map());
+    for (const steps = this.loadSteps(); ; ) {
+      const step = steps.next();
+      if (step.done) return this.take(step.value);
+    }
+  }
+
+  /**
+   * `load`, giving the rest of the process its turn between photos as `slice` says: a large
+   * library's vectors take a second or more to read. What it read is taken only if the store is
+   * still as it was at the start: one loaded, emptied or let go meanwhile keeps that.
+   */
+  async loadSliced(slice: () => Promise<void> | undefined = timeSlicer()): Promise<void> {
+    if (this.loaded) return;
+    const holding = this.holding;
+    const steps = this.loadSteps();
+    for (;;) {
+      const step = steps.next();
+      // Taken straight after the last step, with no turn between: that step may have deleted
+      // another model's vectors.
+      if (step.done) return void (this.loaded || this.holding !== holding || this.take(step.value));
+      const turn = slice();
+      if (!turn) continue;
+      await turn;
+      if (this.loaded || this.holding !== holding) return;
+    }
+  }
+
+  /** What is on disk, read a step at a time; nothing is held until `take`. */
+  private *loadSteps(): Generator<void, Shard[]> {
+    const shards: Shard[] = Array.from({ length: SHARDS }, () => new Map());
     mkdirSync(this.dir(), { recursive: true });
-    const model = readSealedOrDiscard(join(this.dir(), MODEL_FILE))?.toString("utf8");
+    const model = readSealedOrSetAside(join(this.dir(), MODEL_FILE))?.toString("utf8");
     if (model === INDEX_KIND) {
       for (let n = 0; n < SHARDS; n++) {
-        const blob = readSealedOrDiscard(this.shardPath(n));
+        const blob = readSealedOrSetAside(this.shardPath(n));
         if (!blob) continue;
+        yield;
         try {
-          this.shards[n] = decodeShard(blob);
+          shards[n] = yield* decodeShardSteps(blob);
         } catch {
-          this.shards[n] = new Map();
+          shards[n] = new Map();
         }
       }
     } else {
       for (let n = 0; n < SHARDS; n++) rmSync(this.shardPath(n), { force: true });
       writeSealedAtomic(join(this.dir(), MODEL_FILE), Buffer.from(INDEX_KIND, "utf8"));
     }
+    return shards;
+  }
+
+  private take(shards: Shard[]): void {
+    this.shards = shards;
     this.loaded = true;
+    this.holding++;
     this.version++;
   }
 
@@ -219,6 +268,15 @@ export class SearchStore {
     if (!this.loaded) return;
     const n = shardOf(uid);
     this.shards[n].set(uid, vector);
+    this.dirty.add(n);
+    this.version++;
+  }
+
+  /** Drops a photo's record, so the next pass indexes it again. */
+  forget(uid: string): void {
+    if (!this.loaded) return;
+    const n = shardOf(uid);
+    if (!this.shards[n].delete(uid)) return;
     this.dirty.add(n);
     this.version++;
   }
@@ -294,6 +352,7 @@ export class SearchStore {
     this.dirty.clear();
     for (let n = 0; n < SHARDS; n++) rmSync(this.shardPath(n), { force: true });
     this.loaded = true;
+    this.holding++;
     this.version++;
   }
 
@@ -301,6 +360,7 @@ export class SearchStore {
     this.shards = [];
     this.dirty.clear();
     this.loaded = false;
+    this.holding++;
     this.copyCache = null;
   }
 }

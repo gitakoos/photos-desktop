@@ -39,6 +39,7 @@ import { useT, type TFunc } from "../lib/i18n";
 import { locale } from "../lib/format";
 import { Confirm } from "./Confirm";
 import { CloseIcon, PersonAddIcon, ShareIcon } from "./icons";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/Confirm.css";
 import "../styles/ShareDialog.css";
 
@@ -293,10 +294,7 @@ export function ShareDialog({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
+      {...backdropClose(onClose)}
     >
       <div className="cf-panel sh-panel" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="sh-head">

@@ -79,9 +79,9 @@ export function useWarmViews(ready: boolean, onTimeline: boolean, reloadKey: num
     const fresh = () => !cancelled && generation.current === mine;
 
     (async () => {
-      // One at a time, in the order they are most likely to be opened. The sidecar
-      // serves one request anyway, and the pauses keep the timeline's own warmer
-      // and any on-screen thumbnail ahead of this.
+      // One at a time, in the order they are most likely to be opened. The host runs
+      // one call per lane, and the pauses keep the timeline's own warmer and any
+      // on-screen thumbnail ahead of this.
       try {
         const rows = await rpc<Album[]>("getAlbums");
         if (fresh()) setAlbums(rows);
@@ -91,7 +91,9 @@ export function useWarmViews(ready: boolean, onTimeline: boolean, reloadKey: num
       await new Promise((r) => setTimeout(r, 400));
       if (!fresh()) return;
       try {
-        const rows = await rpc<TrashItem[]>("listTrashed");
+        // Read ahead in the background lane: on a large trash this is a long walk, and
+        // the window's own calls must not queue behind it.
+        const rows = await rpc<TrashItem[]>("listTrashedAhead");
         if (fresh()) setTrash(rows);
       } catch {
         /* as above */

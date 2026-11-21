@@ -67,8 +67,23 @@ const listeners = new Set<(s: OfflineStatus) => void>();
 let timer: ReturnType<typeof setTimeout> | undefined;
 
 function publish(status: OfflineStatus): void {
+  // Most polls change nothing; skip them so watchers do not re-render every few seconds.
+  if (latest && sameStatus(latest, status)) return;
   latest = status;
   for (const listener of listeners) listener(status);
+}
+
+function sameStatus(a: OfflineStatus, b: OfflineStatus): boolean {
+  return (
+    a.ready === b.ready &&
+    a.bytes === b.bytes &&
+    a.running === b.running &&
+    a.done === b.done &&
+    a.total === b.total &&
+    a.failed === b.failed &&
+    a.pinned.length === b.pinned.length &&
+    a.pinned.every((uid, i) => uid === b.pinned[i])
+  );
 }
 
 async function poll(): Promise<void> {

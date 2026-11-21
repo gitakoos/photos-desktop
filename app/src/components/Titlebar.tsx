@@ -23,9 +23,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useT } from "../lib/i18n";
 import { coverApp } from "../lib/appCover";
+import { isMac } from "../lib/platform";
 import logo from "../assets/applogo.png";
 
 const appWindow = getCurrentWindow();
+
+// A Mac's main window has the system's own traffic lights instead.
+const nativeButtons = isMac && appWindow.label === "main";
 
 /**
  * The window's own controls.
@@ -38,6 +42,7 @@ const appWindow = getCurrentWindow();
  */
 export function WindowButtons() {
   const t = useT();
+  if (nativeButtons) return null;
   return (
     <div className="titlebar-buttons">
       <button className="win-btn" title={t("titlebar.minimize")} onClick={() => void coverApp("minimize").finally(() => appWindow.minimize())}>

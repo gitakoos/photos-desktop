@@ -762,7 +762,9 @@
   background: var(--pill-bg-opaque);
   user-select: text;
   scrollbar-width: thin;
-  animation: lbx-aside-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  /* Held before it starts, not after it ends: an animation held at its end keeps the panel
+     "transformed", which makes anything fixed inside it fixed to the panel, not the window. */
+  animation: lbx-aside-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) backwards;
 }
 .lbx-aside.closing {
   animation: lbx-aside-out 0.2s ease-in both;

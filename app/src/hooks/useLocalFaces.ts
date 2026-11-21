@@ -22,12 +22,13 @@
 
 // Keeps the window in step with the scan on this computer: tells the sidecar what is wanted (face
 // recognition, the search index, or both), follows what the scan is doing, and reads the people
-// again whenever they change.
+// again whenever they change: the whole list once, then only the people that changed.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { rpc } from "../lib/rpc";
 import { sameStatus } from "../lib/sameStatus";
 import { scanBusy, type FaceScanStatus, type LocalPeople, type ScanSpeed } from "../lib/localFaces";
+import { applyPeopleAnswer, tokenOf, type HeldPeople, type PeopleAnswer } from "../../../sidecar/proton/peopleFeed.ts";
 
 /** How often the status is read while the scan works, and while it rests. */
 const BUSY_POLL_MS = 2_000;
@@ -52,13 +53,28 @@ export function useLocalFaces(
   const [status, setStatus] = useState<FaceScanStatus | null>(null);
   const [people, setPeople] = useState<LocalPeople | null>(null);
   const peopleVersion = useRef(-1);
+  const held = useRef<HeldPeople | null>(null);
+  const reading = useRef<Promise<void>>(Promise.resolve());
 
-  const readPeople = useCallback(async () => {
-    try {
-      setPeople(await rpc<LocalPeople>("facePeople"));
-    } catch {
-      /* kept as last read */
-    }
+  /** Reads what changed in the people since the last read; one read at a time, each on top of the one before. */
+  const readPeople = useCallback(() => {
+    const once = async () => {
+      try {
+        for (let tries = 0; tries < 2; tries++) {
+          const answer = await rpc<PeopleAnswer>("facePeople", { since: tokenOf(held.current) });
+          const next = applyPeopleAnswer(held.current, answer);
+          // An answer that does not follow on from what is held: read in full.
+          held.current = next;
+          if (!next) continue;
+          setPeople((before) => (before === next.list ? before : next.list));
+          return;
+        }
+      } catch {
+        /* kept as last read */
+      }
+    };
+    reading.current = reading.current.then(once);
+    return reading.current;
   }, []);
 
   useEffect(() => {
@@ -69,6 +85,7 @@ export function useLocalFaces(
     );
     if (!enabled) {
       peopleVersion.current = -1;
+      held.current = null;
       setPeople(null);
     }
   }, [enabled, ready, autoMerge, findMore, sync, index, speed]);

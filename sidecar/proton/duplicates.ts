@@ -35,7 +35,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { ALGO_VERSION, COLOR_BYTES, HASH_WORDS, clusterSimilarAsync, fingerprintFromPixels, isUsable, type Fingerprint } from "./pdq.ts";
-import { DUPLICATES_FILE, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
+import { DUPLICATES_FILE, readSealedOrSetAside, storeDir, writeSealedAtomic } from "./store.ts";
 
 export type DuplicateKind = "identical" | "similar";
 /** A group's copies, oldest first, with each one's capture time in milliseconds. */
@@ -59,6 +59,10 @@ export type DuplicateSource = {
   list(): Promise<{ uid: string; captureTime: number }[]>;
   /** The small thumbnails of these photos; null for one that has none. A photo left out is asked for again. */
   thumbnails(uids: string[]): AsyncIterable<{ uid: string; bytes: Buffer | null }>;
+  /** Whether a photo is hidden now: a hidden photo is in no group, also one hidden after the scan. */
+  hiddenTest?: () => (uid: string) => boolean;
+  /** A number that grows whenever a photo is hidden or shown again, here or on another device. */
+  hiddenVersion?: () => number;
 };
 
 export type TrashOutcome = { uid: string; ok: boolean };
@@ -67,8 +71,14 @@ export type TrashOutcome = { uid: string; ok: boolean };
 const BATCH = 24;
 /** The scan rests this long between rounds, so the grid's own thumbnails go first. */
 const REST_MS = 150;
-/** Fingerprints made between two saves. */
+/** Fingerprints made between two saves, at the least. */
 const SAVE_EVERY = 240;
+/**
+ * The least time between two saves while the scan runs. Each save writes every fingerprint, which
+ * is tens of megabytes on a large library, so it happens about once a minute; a crash costs at most
+ * that minute's fingerprints, made again at the next scan.
+ */
+const SAVE_EVERY_MS = 60_000;
 const RECORD_BYTES = HASH_WORDS * 4 + 1 + COLOR_BYTES;
 
 /** The key a group is remembered by: its copies, sorted, so the order shown does not matter. */
@@ -179,6 +189,10 @@ export class DuplicateFinder {
   private source: DuplicateSource | null = null;
   /** Each photo's content hash, as the last timeline listing gave it. */
   private readonly contentHashes = new Map<string, string>();
+  /** The content hash of each Live Photo's video, by its photo: the listing's related photos. */
+  private readonly relatedHashes = new Map<string, string[]>();
+  /** Every photo the timeline listing went through since sign-in, with a content hash or without. */
+  private readonly listed = new Set<string>();
   private prints = new Map<string, Fingerprint>();
   /** Photos with no thumbnail to read, or one that would not decode: not asked for again. */
   private unreadable = new Set<string>();
@@ -203,17 +217,22 @@ export class DuplicateFinder {
   private computing: Promise<void> | null = null;
   private regroupTimer: ReturnType<typeof setTimeout> | null = null;
   private regroupDue = 0;
-  private shown: { version: number; groups: ShownGroups } | null = null;
+  private shown: { version: number; hidden: number; groups: ShownGroups } | null = null;
 
   constructor(
     private readonly fingerprint: (bytes: Buffer) => Promise<Fingerprint | null> = fingerprintOf,
     private readonly persist = true,
     private readonly restMs = REST_MS,
     private readonly regroupEveryMs = REGROUP_EVERY_MS,
+    private readonly saveEveryMs = SAVE_EVERY_MS,
+    private readonly now: () => number = Date.now,
   ) {}
 
   getStatus(): DuplicateStatus {
-    return { ...this.status };
+    // A photo hidden or shown again changes the groups too: the window reads them again. Both
+    // numbers only grow, so their sum changes whenever either does.
+    const hidden = this.source?.hiddenVersion?.() ?? 0;
+    return { ...this.status, version: this.status.version + hidden };
   }
 
   /** The library to read, set on sign-in and cleared on sign-out or lock. */
@@ -225,6 +244,8 @@ export class DuplicateFinder {
       if (this.regroupTimer) clearTimeout(this.regroupTimer);
       this.regroupTimer = null;
       this.contentHashes.clear();
+      this.relatedHashes.clear();
+      this.listed.clear();
       this.library.clear();
       this.gone.clear();
       this.prints.clear();
@@ -249,10 +270,29 @@ export class DuplicateFinder {
       const hash = (p as { ContentHash?: unknown })?.ContentHash;
       if (typeof link !== "string") continue;
       const uid = `${volumeId}~${link}`;
+      this.listed.add(uid);
       if (typeof hash === "string" && hash) this.contentHashes.set(uid, hash);
       else this.contentHashes.delete(uid);
+      const related = (p as { RelatedPhotos?: unknown })?.RelatedPhotos;
+      const hashes = Array.isArray(related)
+        ? related.map((r) => (r as { ContentHash?: unknown })?.ContentHash).filter((h): h is string => typeof h === "string" && !!h)
+        : [];
+      if (hashes.length > 0) this.relatedHashes.set(uid, hashes);
+      else this.relatedHashes.delete(uid);
     }
     this.inputsChanged();
+  }
+
+  /** Each library photo's content hash, as the last timeline listing gave it. */
+  contentHashEntries(): [string, string][] {
+    const related = [...this.relatedHashes].flatMap(([uid, hashes]) => hashes.map((h): [string, string] => [uid, h]));
+    // A photo's own hash first, so a Live video's never stands in for a photo's own.
+    return [...this.contentHashes, ...related];
+  }
+
+  /** Every photo the timeline listing went through since sign-in, with a content hash or without. */
+  listedUids(): ReadonlySet<string> {
+    return this.listed;
   }
 
   /** Photos moved to the trash anywhere in the app: no group holds them from now on. */
@@ -362,6 +402,7 @@ export class DuplicateFinder {
     this.status = { ...this.status, total: listed.length, done: listed.length - todo.length };
     this.inputsChanged();
     let sinceSave = 0;
+    let savedAt = this.now();
     for (let at = 0; at < todo.length; at += BATCH) {
       if (at > 0) await sleep(this.restMs);
       if (gen !== this.generation) return;
@@ -375,9 +416,10 @@ export class DuplicateFinder {
         sinceSave++;
       }
       this.inputsChanged();
-      if (sinceSave >= SAVE_EVERY) {
+      if (sinceSave >= SAVE_EVERY && this.now() - savedAt >= this.saveEveryMs) {
         this.save();
         sinceSave = 0;
+        savedAt = this.now();
       }
     }
     // Photos no longer in the library leave the file with this save.
@@ -434,17 +476,19 @@ export class DuplicateFinder {
     return [...identical.sort(order), ...similar.sort(order)];
   }
 
-  /** The groups as they stand, the trashed copies left out. */
+  /** The groups as they stand, the trashed and hidden copies left out. */
   private live(): DuplicateGroup[] {
     if (!this.computed) return [];
-    if (this.gone.size === 0) return this.computed;
+    const hidden = this.source?.hiddenTest?.();
+    if (this.gone.size === 0 && !hidden) return this.computed;
+    const dropped = (u: string) => this.gone.has(u) || !!hidden?.(u);
     const out: DuplicateGroup[] = [];
     for (const g of this.computed) {
-      if (!g.uids.some((u) => this.gone.has(u))) {
+      if (!g.uids.some(dropped)) {
         out.push(g);
         continue;
       }
-      const left = g.uids.map((u, i) => [u, g.times[i]] as const).filter(([u]) => !this.gone.has(u));
+      const left = g.uids.map((u, i) => [u, g.times[i]] as const).filter(([u]) => !dropped(u));
       if (left.length < 2) continue;
       const uids = left.map(([u]) => u);
       out.push({ key: groupKey(uids), kind: g.kind, uids, times: left.map(([, t]) => t) });
@@ -459,14 +503,15 @@ export class DuplicateFinder {
   groups(): ShownGroups {
     this.load();
     const version = this.status.version;
-    if (this.shown?.version === version) return this.shown.groups;
+    const hidden = this.source?.hiddenVersion?.() ?? 0;
+    if (this.shown?.version === version && this.shown.hidden === hidden) return this.shown.groups;
     const ignored = new IgnoredGroups(this.ignored);
     const out: ShownGroups = { identical: [], similar: [], ignored: [], ready: this.computed !== null };
     for (const g of this.live()) {
       if (ignored.covering(g.uids).length) out.ignored.push(g);
       else out[g.kind].push(g);
     }
-    this.shown = { version, groups: out };
+    this.shown = { version, hidden, groups: out };
     return out;
   }
 
@@ -539,9 +584,13 @@ export class DuplicateFinder {
 
   private load(): void {
     if (this.loaded) return;
+    if (!this.persist) {
+      this.loaded = true;
+      return;
+    }
+    // Read before it counts as loaded: a locked store throws, and the next call reads again.
+    const raw = readSealedOrSetAside(this.path());
     this.loaded = true;
-    if (!this.persist) return;
-    const raw = readSealedOrDiscard(this.path());
     if (!raw) return;
     try {
       const saved = JSON.parse(raw.toString("utf8")) as Saved;
@@ -577,6 +626,14 @@ export const duplicateFinder = new DuplicateFinder();
 /** A page of the photos timeline listing, and the volume in its address. */
 const LISTING = /\/drive\/volumes\/([^/?]+)\/photos(?:\?|$)/;
 
+/** Listing pages read but not yet taken in. */
+const tapping = new Set<Promise<void>>();
+
+/** Resolves once every listing page read so far has been taken in. */
+export async function listingSettled(): Promise<void> {
+  while (tapping.size > 0) await Promise.all([...tapping]);
+}
+
 /**
  * The Drive client's HTTP client, with the photos listing's answers also read for their content
  * hashes, which the Drive library leaves out of what it hands on. The library still reads the
@@ -594,11 +651,13 @@ export function withListingTap<T extends { fetchJson(req: { url: string; method:
       const m = req.method.toUpperCase() === "GET" && res.ok ? LISTING.exec(req.url) : null;
       if (m) {
         const volumeId = decodeURIComponent(m[1]);
-        res
+        const taking: Promise<void> = res
           .clone()
           .json()
           .then((json) => onPage(volumeId, json))
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => tapping.delete(taking));
+        tapping.add(taking);
       }
       return res;
     },

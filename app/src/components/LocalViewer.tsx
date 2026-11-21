@@ -25,12 +25,15 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useFolderMedia } from "../hooks/useFolderMedia";
 import { useUploads } from "../hooks/useUploads";
 import { formatBytes, formatDate, dimensionsOf } from "../lib/format";
+import { rpc } from "../lib/rpc";
+import type { ClipPayload } from "../lib/motion";
 import {
   baseName,
   canUpload,
   classifyFailure,
   decodePreview,
   deleteLocalFile,
+  deletePrompt,
   isMissingCodec,
   localEditorSource,
   localFileInfo,
@@ -45,10 +48,13 @@ import {
   type OpenFailure,
 } from "../lib/localFile";
 import { Confirm } from "./Confirm";
+import { MotionClip } from "./MotionClip";
 import { PhotoEditor } from "./PhotoEditor";
+import { VideoEditor } from "./VideoEditor";
 import { ViewerShell, type ViewerStage } from "./ViewerShell";
 import { PencilIcon, TrashIcon, UploadArrowIcon } from "./icons";
 import { useT } from "../lib/i18n";
+import { isMac, isWindows } from "../lib/platform";
 
 const APP_TITLE = "Photos for Proton";
 
@@ -103,6 +109,7 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [editingVideo, setEditingVideo] = useState(false);
   const [error, setError] = useState("");
   // Whether an upload has been asked for at all, so a record left over from
   // earlier in the session is not reported as this file's own result.
@@ -219,6 +226,24 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
     };
   }, [current, isVideo]);
 
+  // The clip inside a motion photo, or the movie a Live Photo was exported beside. Asked for
+  // up front, because a file with none must not offer a play control at all.
+  const [clip, setClip] = useState<{ path: string; clip: ClipPayload } | null>(null);
+  useEffect(() => {
+    setClip(null);
+    if (isVideo) return;
+    let cancelled = false;
+    void rpc<ClipPayload | null>("localMotionClip", { path: current }).then(
+      (found) => {
+        if (!cancelled && found) setClip({ path: current, clip: found });
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [current, isVideo]);
+
   // A drop anywhere on the window uploads too, and that deserves the same line
   // of feedback as the button does.
   useEffect(() => {
@@ -244,6 +269,8 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
 
   const uploadable = canUpload(current);
 
+  const deleteAsk = deletePrompt(info?.canTrash, isWindows ? "windows" : isMac ? "mac" : "linux");
+
   function upload() {
     setSent(true);
     setSignInDismissed(false);
@@ -251,14 +278,15 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
   }
 
   /**
-   * Send the open file to the recycle bin, then move off it.
+   * Send the open file to the recycle bin (the trash on Linux and macOS), then move off it.
    *
    * Stepping to a neighbour rather than closing, because the viewer walks the folder
    * and clearing one file out of the way is a thing done mid-walk. Only the last file
    * in the folder closes it, since by then there is nothing left to be looking at.
    *
    * "cancelled" comes back when the shell warned that the file could not be recycled
-   * and the answer was no. Nothing was deleted, so nothing moves and nothing is said.
+   * and the answer was no. Nothing was deleted, so nothing moves and nothing is said. Where
+   * no trash takes the file, the host leaves it where it is and says so.
    */
   async function remove() {
     setConfirmDelete(false);
@@ -318,14 +346,17 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         detail: failure.kind === "unknown" ? failure.reason : current,
       }
     : isVideo
-      ? { kind: "video", url: videoUrl, note: problemText ?? t("viewer.videoLoading") }
+      ? { kind: "video", url: editingVideo ? null : videoUrl, note: editingVideo ? null : (problemText ?? t("viewer.videoLoading")) }
       : problemText && !src
         ? { kind: "message", text: problemText }
         : { kind: "image", src, loading };
 
-  // Editing is offered only for a still image that has actually drawn: never a video, a
-  // file that would not open, or one still resolving.
-  const canEdit = !failure && !isVideo && stage.kind === "image" && !!src;
+  // A photo is edited only once it has actually drawn: not a file that would not open, or one
+  // still resolving.
+  const canEditPhoto = !failure && !isVideo && stage.kind === "image" && !!src;
+  // A video opens the video editor, which reads the file itself.
+  const canEditVideo = !failure && isVideo && !!info;
+  const canEdit = canEditPhoto || canEditVideo;
 
   const notice =
     !sent || needsSignIn
@@ -351,6 +382,11 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
       // a new file from Explorer does.
       itemKey={current}
       textSource={{ path: current }}
+      stageExtra={
+        clip?.path === current ? (
+          <MotionClip itemKey={current} kind={/\.hei[cf]$/i.test(current) ? "live" : "motion"} load={() => Promise.resolve(clip.clip)} />
+        ) : undefined
+      }
       name={name}
       stage={stage}
       error={error || (needsSignIn ? "" : uploads.error)}
@@ -365,7 +401,7 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
       // This viewer is the whole of its window, so there is no app title bar to move
       // it by or close it with: its own bar has to be both.
       ownsWindow
-      onRename={rename}
+      onRename={info?.canRename === false ? undefined : rename}
       onVideoError={() => {
         setVideoUrl(null);
         setProblem("videoUnsupported");
@@ -381,7 +417,7 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
             <button
               className="lbx-tbtn"
               disabled={busy}
-              onClick={() => setEditing(true)}
+              onClick={() => (isVideo ? setEditingVideo(true) : setEditing(true))}
               title={t("editor.edit")}
             >
               <PencilIcon size={15} />
@@ -469,10 +505,10 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         />
       )}
 
-      {confirmDelete && (
+      {confirmDelete && deleteAsk.kind === "confirm" && (
         <Confirm
           title={t("local.deleteTitle")}
-          message={t("local.deleteMessage", { name })}
+          message={t(deleteAsk.messageKey, { name })}
           confirmLabel={t("local.delete")}
           danger
           onCancel={() => setConfirmDelete(false)}
@@ -480,8 +516,36 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
         />
       )}
 
+      {/* A file the trash cannot be reached for: said before anything is confirmed, and
+          nothing is deleted. */}
+      {confirmDelete && deleteAsk.kind === "outOfReach" && (
+        <Confirm
+          title={t(deleteAsk.titleKey)}
+          message={t(deleteAsk.messageKey, { name })}
+          confirmLabel={t("common.close")}
+          noCancel
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={() => setConfirmDelete(false)}
+        />
+      )}
+
       {/* Over the whole viewer while it is up. Saving writes a new copy beside the
           original, so the viewer is retargeted onto it, exactly as a rename does. */}
+      {editingVideo && (
+        <VideoEditor
+          source={{ kind: "local", path: current, picksPlace: info?.savesBeside === false }}
+          onClose={() => setEditingVideo(false)}
+          onSaved={(paths) => {
+            setEditingVideo(false);
+            const next = paths[0];
+            if (next) {
+              setCurrent(next);
+              onRetarget(next);
+            }
+          }}
+        />
+      )}
+
       {editing && (
         <PhotoEditor
           sourceKey={current}
@@ -489,7 +553,10 @@ export function LocalViewer({ path, delivery = 0, onClose, onSignIn, onRetarget 
           saveTo="computer"
           saveFormats={["jpeg", "png", "webp"]}
           defaultFormat={copyFormatFor(current)}
-          saveEdit={(base64, _src, options) => saveLocalEdit(current, base64, options.format)}
+          copyPicksPlace={info?.savesBeside === false}
+          saveEdit={(base64, _src, options) =>
+            saveLocalEdit(current, base64, options.format, t("editor.saveCopyWhereLinux"))
+          }
           onClose={() => setEditing(false)}
           onSaved={(p) => {
             setEditing(false);

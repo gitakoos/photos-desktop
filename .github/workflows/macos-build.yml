@@ -1,0 +1,309 @@
+# Builds the macOS app as one universal file for Apple silicon and Intel Macs, with its disk
+# image and a zip of the app, and keeps both as build artifacts. Started by hand from the
+# Actions tab, or by a version tag. It publishes nothing and needs no secrets: the app is
+# signed ad hoc, not with a developer certificate.
+#
+# Three jobs. ONNX Runtime publishes no Node binding for Intel Macs, so one job takes the one
+# built from the pinned source in gitakoos/onnxruntime, checked against its SHA-256, and builds
+# it from that source only when the download fails, keeping that build in the cache. Another
+# builds the app's own ffmpeg (ffmpeg/build.sh macos). The last builds the app around both.
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  MACOSX_DEPLOYMENT_TARGET: "13.5"
+  # The Node the app's background service runs on, from nodejs.org, checked against these.
+  NODE_VERSION: "24.15.0"
+  NODE_SHA256_ARM64: 372331b969779ab5d15b949884fc6eaf88d5afe87bde8ba881d6400b9100ffc4
+  NODE_SHA256_X64: ffd5ee293467927f3ee731a553eb88fd1f48cf74eebc2d74a6babe4af228673b
+  # The ONNX Runtime the sidecar's onnxruntime-node is: v1.30.0.
+  ORT_COMMIT: f2c39fe2f838cf35ce7da92824f5a5e3ee6e88a7
+  ORT_X64_URL: https://github.com/gitakoos/onnxruntime/releases/download/v1.30.0-macos-x64/onnxruntime-node-1.30.0-macos-x64.tar.gz
+  ORT_X64_SHA256: 4fbd499494a0d44c16b49eba680be3cbd37e34bdbff04bf7cbcc188107650d00
+
+jobs:
+  onnxruntime-x64:
+    name: ONNX Runtime for Intel Macs
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - name: Take the prebuilt binding
+        id: prebuilt
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o ort-x64.tar.gz "$ORT_X64_URL"
+          echo "$ORT_X64_SHA256  ort-x64.tar.gz" | shasum -a 256 -c
+          # Unpacked aside and moved in only once it checks out, so a failed step leaves nothing.
+          mkdir -p ort-x64.part
+          tar -xzf ort-x64.tar.gz -C ort-x64.part
+          test "$(lipo -archs ort-x64.part/onnxruntime_binding.node)" = x86_64
+          mv ort-x64.part ort-x64
+          ls -l ort-x64
+
+      - name: Take an earlier build of the same source
+        id: cache
+        if: steps.prebuilt.outcome != 'success'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ort-x64
+          key: onnxruntime-node-${{ env.ORT_COMMIT }}-darwin-x64-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}-1
+
+      - if: steps.prebuilt.outcome != 'success' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build the Node binding for x86_64
+        if: steps.prebuilt.outcome != 'success' && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # Tools the build makes for x86_64 run during the build itself.
+          sudo softwareupdate --install-rosetta --agree-to-license
+          git init -q ort
+          cd ort
+          git remote add origin https://github.com/microsoft/onnxruntime.git
+          git fetch -q --depth 1 origin "$ORT_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          python3 tools/ci_build/build.py \
+            --build_dir "$RUNNER_TEMP/ort-build" --config Release --parallel --skip_tests \
+            --build_shared_lib --build_nodejs --osx_arch x86_64 \
+            --apple_deploy_target "$MACOSX_DEPLOYMENT_TARGET" --compile_no_warning_as_error
+          mkdir -p ../ort-x64
+          # Real files, not links: the app's resource folder keeps no symbolic links.
+          cp -RL js/node/bin/napi-v6/darwin/x64/. ../ort-x64/
+          # Signed ad hoc like every other piece of code in the app.
+          find ../ort-x64 -type f \( -name '*.node' -o -name '*.dylib' \) -exec codesign --force --sign - {} \;
+          ls -l ../ort-x64
+          test "$(lipo -archs ../ort-x64/onnxruntime_binding.node)" = x86_64
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: onnxruntime-node-darwin-x64
+          path: ort-x64
+          if-no-files-found: error
+          retention-days: 1
+
+  ffmpeg:
+    name: ffmpeg
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Take an earlier build of the same script
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ffmpeg-macos
+          key: ffmpeg-macos-${{ hashFiles('ffmpeg/build.sh') }}-macos${{ env.MACOSX_DEPLOYMENT_TARGET }}
+
+      - name: Build ffmpeg and ffprobe
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          brew install bash nasm pkgconf autoconf automake libtool
+          "$(brew --prefix)/bin/bash" ffmpeg/build.sh macos "$PWD/ffmpeg-macos"
+
+      - name: Check them
+        run: |
+          set -euo pipefail
+          cd ffmpeg-macos
+          for name in ffmpeg ffprobe; do
+            lipo -archs "$name" | tr ' ' '\n' | sort | tr '\n' ' ' | grep -qx "arm64 x86_64 "
+            codesign --verify "$name"
+          done
+          # LGPL only: no GPL part was configured in.
+          ./ffmpeg -hide_banner -L | head -n 3
+          if ./ffmpeg -hide_banner -version | grep -q -- "--enable-gpl"; then
+            echo "This ffmpeg is a GPL build" >&2
+            exit 1
+          fi
+          for encoder in h264_videotoolbox hevc_videotoolbox mjpeg; do
+            ./ffmpeg -hide_banner -encoders | grep -q " $encoder "
+          done
+          # The upload's picture, drawn the way the app draws it.
+          ./ffmpeg -hide_banner -loglevel error -nostdin -y -f lavfi -i testsrc2=size=1280x720:duration=1 \
+            -frames:v 1 -an -vf "scale=w='min(1920,iw)':h='min(1920,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,format=yuvj420p" \
+            -c:v mjpeg -q:v 3 -f mjpeg "$RUNNER_TEMP/picture.jpg"
+          test -s "$RUNNER_TEMP/picture.jpg"
+          # A hosted runner is a virtual Mac and may have no VideoToolbox encoder; said, not failed.
+          ./ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=640x360:rate=30:duration=0.3 \
+            -pix_fmt nv12 -c:v h264_videotoolbox -b:v 1000000 -f null - \
+            && echo "VideoToolbox H.264 encodes here" || echo "No VideoToolbox H.264 encoder on this runner"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ffmpeg-macos
+          path: ffmpeg-macos
+          if-no-files-found: error
+          retention-days: 1
+
+  app:
+    name: App
+    needs: [onnxruntime-x64, ffmpeg]
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            sidecar/package-lock.json
+
+      - name: Rust for both architectures
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app/src-tauri -> target
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefix app
+          npm ci --prefix sidecar
+
+      # Never run on a Mac before; a failure is shown here and the build goes on.
+      - name: Tests
+        continue-on-error: true
+        run: |
+          (cd sidecar && npx vitest run)
+          (cd app && npx tsc --noEmit -p . && npx vitest run)
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: onnxruntime-node-darwin-x64
+          path: ${{ runner.temp }}/ort-x64
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ffmpeg-macos
+          path: app/src-tauri/binaries/ffmpeg-macos
+
+      - name: Native parts for Intel Macs beside the Apple silicon ones
+        run: |
+          set -euo pipefail
+          mkdir -p sidecar/node_modules/onnxruntime-node/bin/napi-v6/darwin/x64
+          cp -R "$RUNNER_TEMP/ort-x64/." sidecar/node_modules/onnxruntime-node/bin/napi-v6/darwin/x64/
+          # sharp's Intel binaries, from the same lockfile and checked against it by npm.
+          x64="$RUNNER_TEMP/sharp-x64"
+          mkdir -p "$x64"
+          cp sidecar/package.json sidecar/package-lock.json "$x64/"
+          npm ci --prefix "$x64" --os=darwin --cpu=x64 --omit=dev --ignore-scripts --no-audit --no-fund
+          for pkg in sharp-darwin-x64 sharp-libvips-darwin-x64; do
+            rm -rf "sidecar/node_modules/@img/$pkg"
+            cp -R "$x64/node_modules/@img/$pkg" "sidecar/node_modules/@img/$pkg"
+          done
+          chmod -R u+w app/src-tauri/binaries/ffmpeg-macos
+          chmod +x app/src-tauri/binaries/ffmpeg-macos/ffmpeg app/src-tauri/binaries/ffmpeg-macos/ffprobe
+
+      - name: One Node runtime for both architectures
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/node-universal"
+          mkdir -p "$dir"
+          cd "$dir"
+          for arch in arm64 x64; do
+            name="node-v$NODE_VERSION-darwin-$arch"
+            curl -fsSLO "https://nodejs.org/dist/v$NODE_VERSION/$name.tar.gz"
+            if [ "$arch" = arm64 ]; then want="$NODE_SHA256_ARM64"; else want="$NODE_SHA256_X64"; fi
+            echo "$want  $name.tar.gz" | shasum -a 256 -c -
+            tar -xzf "$name.tar.gz" "$name/bin/node"
+          done
+          lipo -create -output node "node-v$NODE_VERSION-darwin-arm64/bin/node" "node-v$NODE_VERSION-darwin-x64/bin/node"
+          codesign --force --sign - node
+          lipo -archs node
+          echo "PFP_SIDECAR_RUNTIME=$dir/node" >> "$GITHUB_ENV"
+
+      - name: Build the sidecar
+        working-directory: sidecar
+        env:
+          PFP_SIDECAR_ARCHES: arm64,x64
+        run: npm run build
+
+      - name: The runtime loads both native parts on both architectures
+        working-directory: sidecar/build
+        run: |
+          set -euo pipefail
+          sudo softwareupdate --install-rosetta --agree-to-license
+          probe="const sharp = (await import('sharp')).default; await import('onnxruntime-node'); console.log(process.arch, 'sharp', sharp.versions.vips, 'onnxruntime-node loaded')"
+          arch -arm64 "$PFP_SIDECAR_RUNTIME" --input-type=module -e "$probe"
+          arch -x86_64 "$PFP_SIDECAR_RUNTIME" --input-type=module -e "$probe"
+
+      # The sidecar is built above with both architectures, so the app's own build step leaves
+      # it as it is and builds only the window.
+      - name: Build the app and the disk image
+        working-directory: app
+        run: >-
+          npx tauri build --target universal-apple-darwin --bundles app,dmg
+          --config '{"build":{"beforeBuildCommand":"npm run build"}}'
+
+      - name: Check the bundle
+        run: |
+          set -euo pipefail
+          bundle=app/src-tauri/target/universal-apple-darwin/release/bundle
+          app="$bundle/macos/Photos for Proton.app"
+          plist="$app/Contents/Info.plist"
+          exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")" = "$MACOSX_DEPLOYMENT_TARGET"
+          res="$app/Contents/Resources"
+          for file in "$exe" "$res/sidecar-runtime" "$res/ffmpeg/ffmpeg" "$res/ffmpeg/ffprobe"; do
+            test -x "$file"
+            lipo -archs "$file" | tr ' ' '\n' | sort | tr '\n' ' ' | grep -qx "arm64 x86_64 "
+          done
+          test -f "$res/sidecar/server.mjs"
+          test -f "$res/sidecar/ortWorker.mjs"
+          test -f "$res/sidecar/assets/bpe_simple_vocab_16e6.txt.gz"
+          test -f "$res/sidecar/node_modules/onnxruntime-node/bin/napi-v6/darwin/arm64/onnxruntime_binding.node"
+          test -f "$res/sidecar/node_modules/onnxruntime-node/bin/napi-v6/darwin/x64/onnxruntime_binding.node"
+          test -d "$res/sidecar/node_modules/@img/sharp-darwin-arm64"
+          test -d "$res/sidecar/node_modules/@img/sharp-darwin-x64"
+          for notice in LICENSE THIRD-PARTY-NOTICES.txt NODE-LICENSE.txt ffmpeg/FFMPEG-LICENSE.txt; do
+            test -s "$res/$notice"
+          done
+          test -z "$(find "$app" -type l)"
+          codesign --verify --verbose=2 "$app"
+          cd "$res/sidecar"
+          for a in arm64 x86_64; do
+            arch "-$a" ../sidecar-runtime --input-type=module -e "await import('sharp'); await import('onnxruntime-node'); console.log(process.arch, 'ok')"
+          done
+
+      - name: Name the files for download
+        run: |
+          set -euo pipefail
+          bundle=app/src-tauri/target/universal-apple-darwin/release/bundle
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          cp "$bundle"/dmg/*.dmg "$out/Photos-for-Proton-macOS-alpha.dmg"
+          ditto -c -k --sequesterRsrc --keepParent "$bundle/macos/Photos for Proton.app" "$out/Photos-for-Proton-macOS-alpha.app.zip"
+          cd "$out"
+          shasum -a 256 Photos-for-Proton-macOS-alpha.dmg Photos-for-Proton-macOS-alpha.app.zip | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: photos-for-proton-macos-dmg
+          path: |
+            ${{ runner.temp }}/out/Photos-for-Proton-macOS-alpha.dmg
+            ${{ runner.temp }}/out/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: photos-for-proton-macos-app
+          path: ${{ runner.temp }}/out/Photos-for-Proton-macOS-alpha.app.zip
+          if-no-files-found: error

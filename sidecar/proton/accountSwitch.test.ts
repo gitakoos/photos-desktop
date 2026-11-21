@@ -20,22 +20,61 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { sameAccount } from "./accountSwitch.ts";
+import { accountMatch, recordAccountKeys, recordedAccountKeys } from "./accountSwitch.ts";
+import { clearDataKey, initStore, setDataKey, StoreLockedError, wipeCache } from "./store.ts";
 
-describe("sameAccount", () => {
+describe("accountMatch", () => {
   it("knows the account again by a user key it unlocked before", () => {
-    expect(sameAccount(["k1", "k2"], ["k2"])).toBe(true);
-    expect(sameAccount(["k1"], ["k1", "k3"])).toBe(true);
+    expect(accountMatch(["k1", "k2"], ["k2"])).toBe("same");
+    expect(accountMatch(["k1"], ["k1", "k3"])).toBe("same");
   });
 
   it("takes keys that share nothing for another account", () => {
-    expect(sameAccount(["k1", "k2"], ["k3"])).toBe(false);
+    expect(accountMatch(["k1", "k2"], ["k3"])).toBe("different");
   });
 
-  it("takes an empty side for another account", () => {
-    expect(sameAccount([], ["k1"])).toBe(false);
-    expect(sameAccount(["k1"], [])).toBe(false);
+  // An empty side used to count as another account, which deleted the vault of the same account
+  // signing in again after its saved session was lost.
+  it("takes an empty side for unknown, never for another account", () => {
+    expect(accountMatch([], ["k1"])).toBe("unknown");
+    expect(accountMatch(["k1"], [])).toBe("unknown");
+  });
+});
+
+describe("the account record", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "pfp-account-"));
+    initStore(dir);
+    setDataKey(randomBytes(32));
+  });
+  afterEach(() => {
+    clearDataKey();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps the key ids for a sign-in after the session file was lost", () => {
+    expect(recordedAccountKeys()).toEqual([]);
+    recordAccountKeys(["k2", "k1"]);
+    expect(recordedAccountKeys()).toEqual(["k1", "k2"]);
+    expect(accountMatch(recordedAccountKeys(), ["k1"])).toBe("same");
+  });
+
+  it("goes at sign-out with the rest of the account", () => {
+    recordAccountKeys(["k1"]);
+    wipeCache();
+    expect(recordedAccountKeys()).toEqual([]);
+  });
+
+  it("is not read while the store is locked", () => {
+    recordAccountKeys(["k1"]);
+    clearDataKey();
+    expect(() => recordedAccountKeys()).toThrow(StoreLockedError);
   });
 });

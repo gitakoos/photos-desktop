@@ -25,3 +25,18 @@
 
 export type CompressionTier = "high" | "balanced" | "small";
 export type VideoCodecChoice = "auto" | "avc" | "hevc" | "av1" | "keep";
+
+/** Where a Compress on Drive run stands, as the sidecar answers `cloudCompressStatus`. */
+export type CompressStatus = {
+  running: boolean;
+  total: number;
+  done: number;
+  compressed: number;
+  kept: number;
+  failed: number;
+  savedBytes: number;
+  /** How far the photo in hand is, 0 to 1. */
+  current: number;
+  errors: { uid: string; error: string }[];
+  cancelled: boolean;
+};

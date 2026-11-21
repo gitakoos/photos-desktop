@@ -30,9 +30,9 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { adoptDeviceId } from "./deviceId.ts";
-import { FACE_EMBEDDING_DIM } from "./faceCluster.ts";
+import { FACE_EMBEDDING_DIM, runPausableSliced, timeSlicer, type Pausable } from "./faceCluster.ts";
 import { curationKey, foldPersonName, legacyFoldPersonName } from "./personName.ts";
-import { FACES_DIR, PEOPLE_FILE, readSealedOrDiscard, storeDir, writeSealedAtomic } from "./store.ts";
+import { FACES_DIR, PEOPLE_FILE, readSealedOrSetAside, storeDir, writeSealedAtomic } from "./store.ts";
 
 const SHARDS = 64;
 const MAGIC = 0x50465046; // "PFPF"
@@ -86,6 +86,9 @@ export type HeldOver = {
   name: string;
 };
 
+/** A person hidden (or shown again) by hand at `at` (epoch ms). */
+export type HiddenRow = { name: string; hidden: boolean; at: number };
+
 /** Everything the user decided, and the grouping it applies to. */
 export type PeopleState = {
   version: number;
@@ -112,6 +115,11 @@ export type PeopleState = {
    * or a photo attached to a person on the phone (kind 1, its link id).
    */
   curation: Record<string, Curation>;
+  /**
+   * Who was hidden from People, or shown again, by `foldPersonName` of the name, with the name as
+   * spelled and when it was set by hand, here or on another device; the later one wins.
+   */
+  hidden: Record<string, HiddenRow>;
   /** Whether the first whole-library grouping has run. */
   grouped: boolean;
   nextId: number;
@@ -182,6 +190,7 @@ export function emptyPeople(): PeopleState {
     namedAt: {},
     nameChanges: [],
     curation: {},
+    hidden: {},
     grouped: false,
     nextId: 1,
     deviceId: null,
@@ -236,8 +245,18 @@ const UNTRUSTED_DROP_FLOOR = 20;
 
 const indexIn = (faceId: string) => Number(faceId.slice(faceId.lastIndexOf("#") + 1));
 
+/** Each photo's shard, worked out once: the hash costs more than every other step of a face lookup. */
+const shardCache = new Map<string, number>();
+const SHARD_CACHE_MAX = 1_000_000;
+
 function shardOf(uid: string): number {
-  return createHash("sha256").update(uid).digest()[0] % SHARDS;
+  let n = shardCache.get(uid);
+  if (n === undefined) {
+    if (shardCache.size >= SHARD_CACHE_MAX) shardCache.clear();
+    n = createHash("sha256").update(uid).digest()[0] % SHARDS;
+    shardCache.set(uid, n);
+  }
+  return n;
 }
 
 function dir(): string {
@@ -251,6 +270,9 @@ function shardPath(n: number): string {
 
 /** The photos of one shard: each scanned photo with its faces (none for a photo without any). */
 export type Shard = Map<string, FaceRecord[]>;
+
+/** What a load read from disk, before the store holds it. */
+type Loaded = { people: PeopleState; shards: Shard[]; swept: Set<string>[]; peopleDirty: boolean };
 
 const FLOATS_PER_FACE = 4 + 10 + 3 + FACE_EMBEDDING_DIM;
 
@@ -307,6 +329,19 @@ export function decodeShard(buf: Buffer): Shard {
 
 /** A shard's photos and which of them "Find more photos" has looked at already. */
 export function readShard(buf: Buffer): { shard: Shard; swept: Set<string> } {
+  return straight(readShardSteps(buf));
+}
+
+/** Runs a loop written as steps straight through. */
+function straight<T>(steps: Generator<void, T>): T {
+  for (;;) {
+    const step = steps.next();
+    if (step.done) return step.value;
+  }
+}
+
+/** `readShard` a photo at a time: a step between every two photos. */
+function* readShardSteps(buf: Buffer): Generator<void, { shard: Shard; swept: Set<string> }> {
   const shard: Shard = new Map();
   const swept = new Set<string>();
   const format = buf.length >= 12 && buf.readUInt32LE(0) === MAGIC ? buf.readUInt32LE(4) : -1;
@@ -354,6 +389,7 @@ export function readShard(buf: Buffer): { shard: Shard; swept: Set<string> } {
       });
     }
     shard.set(uid, faces);
+    yield;
   }
   return { shard, swept };
 }
@@ -362,6 +398,45 @@ export function readShard(buf: Buffer): { shard: Shard; swept: Set<string> } {
  * The faces of every scanned photo, held in memory and written back shard by shard: `put`
  * marks a shard changed and `flush` writes the changed ones.
  */
+/** How many entries of a record go into words between two asks for a turn. */
+const ENTRIES_PER_STEP = 4096;
+
+/**
+ * The people in JSON, word for word as `JSON.stringify` puts them, each large record a part at a
+ * time, so a library of many faces is written without holding up the rest of the process.
+ */
+export function* peopleJsonSteps(people: PeopleState): Pausable<string> {
+  const parts: string[] = [];
+  const whole = people as unknown as Record<string, unknown>;
+  for (const key of Object.keys(whole)) {
+    const value = whole[key];
+    if (value === undefined || typeof value === "function") continue;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      parts.push(`${JSON.stringify(key)}:${JSON.stringify(value)}`);
+      continue;
+    }
+    const record = value as Record<string, unknown>;
+    // Each part is joined in its own step, so no step joins a whole large record.
+    const pieces: string[] = [];
+    let entries: string[] = [];
+    let n = 0;
+    for (const k of Object.keys(record)) {
+      if (++n % ENTRIES_PER_STEP === 0) {
+        if (entries.length) pieces.push(entries.join(","));
+        entries = [];
+        yield;
+      }
+      const v = record[k];
+      if (v === undefined || typeof v === "function") continue;
+      entries.push(`${JSON.stringify(k)}:${JSON.stringify(v)}`);
+    }
+    if (entries.length) pieces.push(entries.join(","));
+    parts.push(`${JSON.stringify(key)}:{${pieces.join(",")}}`);
+    yield;
+  }
+  return `{${parts.join(",")}}`;
+}
+
 export class FaceStore {
   private shards: Shard[] = [];
   private swept: Set<string>[] = [];
@@ -370,17 +445,52 @@ export class FaceStore {
   people: PeopleState = emptyPeople();
   /** Counts the user's changes, so a regroup that ran across one knows to throw its result away. */
   edits = 0;
+  /** Counts every change to the people, by anyone, so a long step that gave the rest a turn knows to read them again. */
+  peopleMarks = 0;
+  /** Counts every change to the faces held, so a long step that gave the rest a turn knows to look a photo's faces up again. */
+  facesMarks = 0;
   private loaded = false;
+  /** Counts each load, emptying and letting go of the store, so a save under way can tell it holds something else now. */
+  private holding = 0;
 
   /** Reads what is on disk, once. Faces from another pipeline generation are dropped. */
   load(): void {
     if (this.loaded) return;
-    this.shards = Array.from({ length: SHARDS }, () => new Map());
-    this.swept = Array.from({ length: SHARDS }, () => new Set());
+    this.take(straight(this.loadSteps()));
+  }
+
+  /**
+   * `load`, giving the rest of the process its turn between photos as `slice` says: a library of
+   * many faces takes seconds to read. What it read is taken only if the store is still as it was
+   * at the start: one loaded, emptied or let go meanwhile keeps that.
+   */
+  async loadSliced(slice: () => Promise<void> | undefined = timeSlicer()): Promise<void> {
+    if (this.loaded) return;
+    const holding = this.holding;
+    const steps = this.loadSteps();
+    for (;;) {
+      const step = steps.next();
+      // Taken straight after the last step, with no turn between: that step may have deleted the
+      // files of another model generation.
+      if (step.done) return void (this.loaded || this.holding !== holding || this.take(step.value));
+      const turn = slice();
+      if (!turn) continue;
+      await turn;
+      if (this.loaded || this.holding !== holding) return;
+    }
+  }
+
+  /** What is on disk, read a step at a time; nothing is held until `take`. */
+  private *loadSteps(): Generator<void, Loaded> {
+    const shards: Shard[] = Array.from({ length: SHARDS }, () => new Map());
+    const swept: Set<string>[] = Array.from({ length: SHARDS }, () => new Set());
+    let peopleDirty = false;
     mkdirSync(dir(), { recursive: true });
-    const people = readSealedOrDiscard(join(dir(), PEOPLE_FILE));
+    const people = readSealedOrSetAside(join(dir(), PEOPLE_FILE));
     let parsed: PeopleState | null = null;
     if (people) {
+      // A large library's people run to megabytes: read and parsed in turns of their own.
+      yield;
       try {
         const raw = JSON.parse(people.toString("utf8")) as Partial<PeopleState>;
         // A file from before the format was recorded is the first generation.
@@ -389,43 +499,57 @@ export class FaceStore {
         parsed = null;
       }
     }
+    yield;
+    let held: PeopleState;
     if (parsed && parsed.version === FACE_MODEL_VERSION) {
-      this.people = parsed;
+      held = parsed;
       let lost = false;
       for (let n = 0; n < SHARDS; n++) {
-        const blob = readSealedOrDiscard(shardPath(n));
+        const blob = readSealedOrSetAside(shardPath(n));
         if (!blob) continue;
+        yield;
         try {
-          const read = readShard(blob);
-          this.shards[n] = read.shard;
-          this.swept[n] = read.swept;
+          const read = yield* readShardSteps(blob);
+          shards[n] = read.shard;
+          swept[n] = read.swept;
         } catch {
-          this.shards[n] = new Map();
+          shards[n] = new Map();
           lost = true;
         }
       }
       // Its photos are looked at again; what the other devices' copies brought to them is taken
       // in again too, which fills only what is missing.
-      if (lost || this.people.format < PEOPLE_FORMAT) {
-        this.people.applied = {};
-        this.people.format = PEOPLE_FORMAT;
-        this.peopleDirty = true;
+      if (lost || held.format < PEOPLE_FORMAT) {
+        held.applied = {};
+        held.format = PEOPLE_FORMAT;
+        peopleDirty = true;
       }
     } else {
       // Nothing yet, or another generation's faces, whose ids every choice pointed at: the faces start
       // over, and the names, marks and removals wait by where each face sat for the new scan to find it.
-      this.people = parsed ? this.heldOverFrom(parsed) : emptyPeople();
+      held = parsed ? this.heldOverFrom(parsed) : emptyPeople();
       this.clearFiles();
-      this.peopleDirty = true;
+      peopleDirty = true;
     }
-    if (this.people.nameKeys < NAME_KEYS) {
-      rekeyNames(this.people);
-      this.people.nameKeys = NAME_KEYS;
-      this.peopleDirty = true;
+    if (held.nameKeys < NAME_KEYS) {
+      rekeyNames(held);
+      held.nameKeys = NAME_KEYS;
+      peopleDirty = true;
     }
+    return { people: held, shards, swept, peopleDirty };
+  }
+
+  /** Holds what `loadSteps` read, as the store's own. */
+  private take(read: Loaded): void {
+    this.facesMarks++;
+    this.shards = read.shards;
+    this.swept = read.swept;
+    this.people = read.people;
+    if (read.peopleDirty) this.peopleDirty = true;
     // A face copy saved before the install had one id for all its copies keeps its id.
     if (this.people.deviceId) adoptDeviceId(this.people.deviceId);
     this.loaded = true;
+    this.holding++;
   }
 
   /**
@@ -441,7 +565,7 @@ export class FaceStore {
     const held: HeldOver[] = [...(old.heldOver ?? [])];
     const rejected = new Set(old.rejected ?? []);
     for (let n = 0; n < SHARDS; n++) {
-      const blob = readSealedOrDiscard(shardPath(n));
+      const blob = readSealedOrSetAside(shardPath(n));
       if (!blob) continue;
       let shard: Shard;
       try {
@@ -468,6 +592,7 @@ export class FaceStore {
     next.namedAt = { ...(old.namedAt ?? {}) };
     next.nameChanges = [...(old.nameChanges ?? [])];
     next.curation = { ...(old.curation ?? {}) };
+    next.hidden = { ...(old.hidden ?? {}) };
     next.nameKeys = old.nameKeys ?? 1;
     next.deviceId = old.deviceId ?? null;
     next.nextId = Math.max(1, old.nextId ?? 1);
@@ -504,6 +629,17 @@ export class FaceStore {
     const n = shardOf(uid);
     this.shards[n].set(uid, faces);
     this.dirty.add(n);
+    this.facesMarks++;
+  }
+
+  /** Drops a photo's record, so the next pass looks at it again. */
+  forget(uid: string): void {
+    if (!this.loaded) return;
+    const n = shardOf(uid);
+    if (!this.shards[n].delete(uid)) return;
+    this.swept[n].delete(uid);
+    this.dirty.add(n);
+    this.facesMarks++;
   }
 
   /**
@@ -567,6 +703,7 @@ export class FaceStore {
     }
     this.shards[from].delete(oldUid);
     this.shards[to].set(newUid, next);
+    this.facesMarks++;
     if (this.swept[from].delete(oldUid)) this.swept[to].add(newUid);
     this.dirty.add(from);
     this.dirty.add(to);
@@ -597,6 +734,7 @@ export class FaceStore {
       this.swept[n].delete(uid);
       this.dirty.add(n);
     }
+    if (gone.length > 0) this.facesMarks++;
     if (ids.size > 0) this.forgetFaces(ids);
     return gone.length;
   }
@@ -628,20 +766,60 @@ export class FaceStore {
 
   markPeople(): void {
     this.peopleDirty = true;
+    this.peopleMarks++;
   }
 
   /** Writes what changed. Throws what the write threw; what was not written stays marked. */
   flush(): void {
     if (!this.loaded) return;
     mkdirSync(dir(), { recursive: true });
+    for (const n of [...this.dirty]) this.writeShard(n);
+    if (this.peopleDirty) this.writePeople();
+  }
+
+  /**
+   * `flush`, giving the rest of the process its turn between the parts as `slice` says. What changes
+   * meanwhile is marked again and written by the next flush; a store let go or emptied meanwhile
+   * writes no more of what it held.
+   */
+  async flushSliced(slice: () => Promise<void> | undefined = timeSlicer()): Promise<void> {
+    if (!this.loaded) return;
+    const holding = this.holding;
+    const same = () => this.loaded && this.holding === holding;
+    mkdirSync(dir(), { recursive: true });
     for (const n of [...this.dirty]) {
-      writeSealedAtomic(shardPath(n), encodeShard(this.shards[n], this.swept[n]));
-      this.dirty.delete(n);
+      const turn = slice();
+      if (turn) await turn;
+      if (!same()) return;
+      if (this.dirty.has(n)) this.writeShard(n);
     }
-    if (this.peopleDirty) {
-      writeSealedAtomic(join(dir(), PEOPLE_FILE), Buffer.from(JSON.stringify(this.people)));
+    // The people as one moment's: a change while they are put in words starts them over, and after
+    // a few tries they are written at once.
+    for (let tries = 0; tries < 3; tries++) {
+      if (!same() || !this.peopleDirty) return;
+      const held = this.people;
+      const marks = this.peopleMarks;
+      const text = await runPausableSliced(peopleJsonSteps(held), slice);
+      // The write takes a turn of its own.
+      const turn = slice();
+      if (turn) await turn;
+      if (!same()) return;
+      if (this.people !== held || this.peopleMarks !== marks) continue;
+      writeSealedAtomic(join(dir(), PEOPLE_FILE), Buffer.from(text));
       this.peopleDirty = false;
+      return;
     }
+    if (same() && this.peopleDirty) this.writePeople();
+  }
+
+  private writeShard(n: number): void {
+    writeSealedAtomic(shardPath(n), encodeShard(this.shards[n], this.swept[n]));
+    this.dirty.delete(n);
+  }
+
+  private writePeople(): void {
+    writeSealedAtomic(join(dir(), PEOPLE_FILE), Buffer.from(JSON.stringify(this.people)));
+    this.peopleDirty = false;
   }
 
   /** Forgets every face and person, here and on disk. */
@@ -653,6 +831,8 @@ export class FaceStore {
     this.clearFiles();
     this.peopleDirty = true;
     this.loaded = true;
+    this.holding++;
+    this.facesMarks++;
   }
 
   /** Forgets what is held without touching the disk, for a sign-out or a lock. */
@@ -663,6 +843,8 @@ export class FaceStore {
     this.peopleDirty = false;
     this.people = emptyPeople();
     this.loaded = false;
+    this.holding++;
+    this.facesMarks++;
   }
 
   private clearFiles(): void {

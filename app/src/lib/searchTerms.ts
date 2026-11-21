@@ -21,7 +21,7 @@
  */
 
 // Words typed into the search that name something the photos can be narrowed by: a category
-// ("screenshots"), a type ("videos"), a person or a label. As on Android, a whole name at the
+// ("screenshots"), a type ("videos") or a person. As on Android, a whole name at the
 // end of the text becomes a pill once the typing pauses, and the start of one is offered.
 
 import { foldWord } from "./dateQuery";
@@ -94,7 +94,7 @@ export function termsStartedAtEnd(
     const tail = foldPhrase(words.slice(-n).join(" "));
     for (const term of terms) {
       if (taken.has(term.key)) continue;
-      const min = term.key.startsWith("people:") || term.key.startsWith("labels:") ? 2 : 3;
+      const min = term.key.startsWith("people:") ? 2 : 3;
       if (tail.length < min) continue;
       if (term.forms.some((f) => f.startsWith(tail) || f.split(" ").some((w) => w.startsWith(tail) && n === 1))) {
         taken.add(term.key);

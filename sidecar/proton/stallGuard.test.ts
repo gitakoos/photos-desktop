@@ -90,6 +90,25 @@ describe("withStallGuard", () => {
     expect(released).toBe(true);
   });
 
+  it("gives up on a stalled generator without waiting on its release, which queues behind the stall", async () => {
+    // An async generator's return() waits for its pending next(): awaited, the guard would
+    // hang on the very call it gave up on, and the walk it guards would never end.
+    async function* stuck(): AsyncGenerator<number> {
+      yield 1;
+      await new Promise(() => {});
+    }
+    const started = Date.now();
+    const outcome = await Promise.race([
+      collect(withStallGuard(stuck(), 20, "stuck walk")).then(
+        () => "finished",
+        (e) => (e instanceof StallError ? "stalled" : "other"),
+      ),
+      new Promise((r) => setTimeout(() => r("hung"), 1000)),
+    ]);
+    expect(outcome).toBe("stalled");
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it("releases the underlying iterator when the caller stops early", async () => {
     let released = false;
     const src: AsyncIterable<number> = {

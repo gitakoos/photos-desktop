@@ -41,6 +41,7 @@ import {
   getOriginal,
   getSaveStatus,
   isViewableOriginal,
+  mountDigests,
   mountFates,
   readOriginalBytes,
   releaseOriginal,
@@ -905,9 +906,29 @@ describe("mountFates", () => {
     expect(await mountFates(photos, ["a", "b", "c"])).toEqual({ a: "trashed", b: "gone", c: "present" });
   });
 
-  it("answers hidden photos without asking Drive", async () => {
-    const photos = photosWith([{ uid: "a" }]);
+  it("answers hidden only for a hidden photo Drive still has", async () => {
+    const asked: string[][] = [];
+    const photos = {
+      async *iterateNodes(uids: string[]) {
+        asked.push(uids);
+        yield { uid: "a" };
+        yield { uid: "h" };
+      },
+    };
     expect(await mountFates(photos, ["a", "h"], (uid) => uid === "h")).toEqual({ a: "present", h: "hidden" });
+    expect(asked).toEqual([["a", "h"]]);
+  });
+
+  // The only copy of a hidden photo deleted for good elsewhere must not be let go of as hidden.
+  it("answers a hidden photo deleted for good or trashed as any photo", async () => {
+    const photos = photosWith([{ missingUid: "g" }, { uid: "t", trashTime: new Date() }]);
+    const hidden = () => true;
+    expect(await mountFates(photos, ["g", "t", "u"], hidden)).toEqual({ g: "gone", t: "trashed", u: "unknown" });
+  });
+
+  it("leaves a hidden photo unknown when Drive cannot be asked", async () => {
+    const photos = photosWith([{ uid: "h" }], 0);
+    expect(await mountFates(photos, ["h"], () => true)).toEqual({ h: "unknown" });
   });
 
   it("leaves a photo it never got an answer for unknown, so nothing acts on it", async () => {
@@ -919,5 +940,41 @@ describe("mountFates", () => {
   it("ignores an answer for a photo it did not ask about", async () => {
     const photos = photosWith([{ missingUid: "x" }, { uid: "a" }]);
     expect(await mountFates(photos, ["a"])).toEqual({ a: "present" });
+  });
+});
+
+describe("mountDigests", () => {
+  const photosWith = (answers: any[], failAfter?: number) => ({
+    async *iterateNodes(_uids: string[]) {
+      let n = 0;
+      for (const a of answers) {
+        if (failAfter !== undefined && n++ >= failAfter) throw new Error("network");
+        yield a;
+      }
+    },
+  });
+  const sha1 = "A9993E364706816ABA3E25717850C26C9CD0D89D";
+
+  it("answers each revision's recorded SHA-1 in lowercase, and null for one without", async () => {
+    const photos = photosWith([
+      { uid: "a", activeRevision: { claimedDigests: { sha1 } } },
+      { uid: "b", activeRevision: { ok: true, value: { claimedDigests: {} } } },
+      { uid: "c", activeRevision: { claimedDigests: { sha1: "not-a-digest" } } },
+    ]);
+    expect(await mountDigests(photos, ["a", "b", "c"])).toEqual({ a: sha1.toLowerCase(), b: null, c: null });
+  });
+
+  it("leaves out what Drive did not answer for, so no digest is never taken for a match", async () => {
+    const photos = photosWith(
+      [
+        { uid: "a", activeRevision: { claimedDigests: { sha1 } } },
+        { missingUid: "b" },
+        { uid: "x", activeRevision: { claimedDigests: { sha1 } } },
+        { uid: "d", activeRevision: { ok: false, error: new Error("bad") } },
+        { uid: "c", activeRevision: { claimedDigests: { sha1 } } },
+      ],
+      4,
+    );
+    expect(await mountDigests(photos, ["a", "b", "c", "d"])).toEqual({ a: sha1.toLowerCase() });
   });
 });

@@ -32,6 +32,7 @@
 // tool and for the face scan, which hands what it finds on to the recognition model.
 
 import { markGpuFailed, openModel, type Accel } from "./inference.ts";
+import { ModelWorkerGone, tensor, type OrtSession } from "./ortSession.ts";
 import { pinnedModel } from "./pinnedModel.ts";
 
 /** The YOLOv5-face detector the phone uses, pinned to the release's bytes. */
@@ -135,7 +136,7 @@ export const removeFaceModel = () => {
   return model.remove();
 };
 
-let session: any = null;
+let session: OrtSession | null = null;
 let sessionAccel: Accel = "cpu";
 let idle: ReturnType<typeof setTimeout> | null = null;
 
@@ -155,19 +156,19 @@ export async function detectFaces(rgbBase64: string): Promise<FaceHit[] | null> 
   const rgb = Buffer.from(rgbBase64, "base64");
   if (rgb.length !== FACE_INPUT * FACE_INPUT * 3) throw new Error("the picture is not the detector's size");
   if (!(await model.intact())) return null;
-  const ort = await import("onnxruntime-node");
   if (idle) clearTimeout(idle);
   idle = setTimeout(closeDetector, DETECTOR_IDLE_MS);
-  const input = new ort.Tensor("float32", toPlanes(new Uint8Array(rgb)), [1, 3, FACE_INPUT, FACE_INPUT]);
+  const input = tensor("float32", toPlanes(new Uint8Array(rgb)), [1, 3, FACE_INPUT, FACE_INPUT]);
   for (;;) {
     if (!session) ({ session, accel: sessionAccel } = await openModel(model.path(), false));
+    const open: OrtSession = session;
     try {
-      const result = await session.run({ [session.inputNames[0]]: input });
-      const output = result[session.outputNames[0]].data as Float32Array;
+      const result = await open.run({ [open.inputNames[0]]: input });
+      const output = result[open.outputNames[0]].data as Float32Array;
       return suppressFaces(decodeFaces(output));
     } catch (e) {
       // A card that fails mid-run (a driver reset) hands the work to the processor once.
-      if (sessionAccel !== "gpu") throw e;
+      if (sessionAccel !== "gpu" || e instanceof ModelWorkerGone) throw e;
       markGpuFailed((e as Error)?.name ?? "run failed");
       closeDetector();
       idle = setTimeout(closeDetector, DETECTOR_IDLE_MS);

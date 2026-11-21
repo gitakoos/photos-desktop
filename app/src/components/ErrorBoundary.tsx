@@ -22,6 +22,7 @@
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { isMac } from "../lib/platform";
 
 /**
  * The last thing between a failed render and a window with nothing in it.
@@ -70,7 +71,7 @@ export class ErrorBoundary extends Component<Props, State> {
           <h1 className="eb-title">Photos for Proton ran into a problem</h1>
           <p className="eb-text">
             The window could not be drawn. Reopening it usually clears this, and nothing
-            in your library or on your PC has been changed.
+            in your library or on your {isMac ? "Mac" : "PC"} has been changed.
           </p>
           <p className="eb-detail">{this.state.message}</p>
           <button className="eb-btn" onClick={() => window.location.reload()}>

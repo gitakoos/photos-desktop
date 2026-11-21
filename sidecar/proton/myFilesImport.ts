@@ -31,6 +31,8 @@ import { dirname, resolve, sep } from "node:path";
 import { diag } from "./diag.ts";
 import { activeRevisionOf, nodeName } from "./nodes.ts";
 import { SDK_STALL_MS, StallError } from "./stallGuard.ts";
+import { openDownloader } from "./downloadSlots.ts";
+import { folderAlbum } from "./takeout.ts";
 
 /** A photo or video of My files, as the picker shows it. */
 export type MyFileEntry = { uid: string; name: string; size: number; modifiedMs: number | null };
@@ -52,6 +54,8 @@ export type MyFileItem = {
   nodeUid: string;
   /** The path under the staging folder, the chosen folder first. */
   rel: string;
+  /** The album it goes into: the one named after the Drive folder it is in, or none. */
+  album: string | null;
   size: number;
   /** When the file was last changed, as the device that put it on Drive said. */
   modifiedMs: number | null;
@@ -188,9 +192,9 @@ export function safeName(name: string): string {
 }
 
 /**
- * Every photo and video in the chosen folders, their sub-folders included, each under the
- * chosen folder's name, and the files chosen one by one, each under the name of the folder it
- * is in. Two chosen folders of the same name are told apart by a number.
+ * Every photo and video in the chosen folders, their sub-folders included, and the files chosen
+ * one by one. Each goes into the album of the Drive folder it is in, by that folder's own name.
+ * A name starting with `.` inside a chosen folder is left out with everything under it. On disk, two chosen folders of the same name are told apart by a number.
  */
 export async function planMyFiles(
   client: any,
@@ -209,17 +213,19 @@ export async function planMyFiles(
     let top = safeName(folder.name);
     for (let n = 2; tops.has(top.toLowerCase()); n++) top = `${safeName(folder.name)} (${n})`;
     tops.add(top.toLowerCase());
-    const walk = async (uid: string, path: string): Promise<void> => {
+    const walk = async (uid: string, path: string, folderName: string): Promise<void> => {
+      const album = folderAlbum(folderName);
       for await (const node of client.iterateFolderChildren(uid)) {
         if (signal?.aborted) throw new Error("cancelled");
         const name = nodeName(node);
-        if (isFolder(node)) await walk(node.uid, `${path}/${safeName(name)}`);
+        if (name.startsWith(".")) continue;
+        if (isFolder(node)) await walk(node.uid, `${path}/${safeName(name)}`, name);
         else if (isFile(node) && isMedia(name)) {
-          items.push({ nodeUid: node.uid, rel: uniqueRel(`${path}/${safeName(name)}`, rels), size: sizeOf(node), modifiedMs: modifiedOf(node) });
+          items.push({ nodeUid: node.uid, rel: uniqueRel(`${path}/${safeName(name)}`, rels), album, size: sizeOf(node), modifiedMs: modifiedOf(node) });
         }
       }
     };
-    await walk(folder.uid, top);
+    await walk(folder.uid, top, folder.name);
   }
   for (const item of items) taken.add(item.nodeUid);
   const byFolder = new Map<string, string>();
@@ -236,7 +242,8 @@ export async function planMyFiles(
       tops.add(top.toLowerCase());
       byFolder.set(file.folder, top);
     }
-    items.push({ nodeUid: node.uid, rel: uniqueRel(`${top}/${safeName(name)}`, rels), size: sizeOf(node), modifiedMs: modifiedOf(node) });
+    const album = folderAlbum(file.folder || "My files");
+    items.push({ nodeUid: node.uid, rel: uniqueRel(`${top}/${safeName(name)}`, rels), album, size: sizeOf(node), modifiedMs: modifiedOf(node) });
   }
   return items;
 }
@@ -251,12 +258,6 @@ export function uniqueRel(rel: string, used: Set<string>): string {
   for (let n = 2; used.has(candidate.toLowerCase()); n++) candidate = `${stem} (${n})${ext}`;
   used.add(candidate.toLowerCase());
   return candidate;
-}
-
-/** The album a file brought in goes into: the chosen folder it was found under. */
-export function albumOfRel(rel: string): string | null {
-  const top = rel.split("/")[0];
-  return top ? top : null;
 }
 
 /**
@@ -296,7 +297,7 @@ async function downloadOne(client: any, uid: string, dest: string, stallMs: numb
   let last = Date.now();
   let timer: ReturnType<typeof setInterval> | undefined;
   try {
-    const downloader = await client.getFileDownloader(uid, signal);
+    const { downloader } = await openDownloader(client, uid, signal);
     const sink = new WritableStream<Uint8Array>({
       async write(chunk) {
         last = Date.now();

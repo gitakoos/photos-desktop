@@ -89,6 +89,8 @@ export type PhotoFace = {
 export type LocalPeople = {
   named: PersonView[];
   unnamed: PersonView[];
+  /** People hidden from the lists above, kept for the Hidden section. */
+  hidden?: PersonView[];
   leftover: number;
   suggestions: FaceSuggestion[];
   loose: { faces: LooseFace[]; total: number };

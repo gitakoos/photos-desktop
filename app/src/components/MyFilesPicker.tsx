@@ -24,6 +24,7 @@ import { useEffect, useState } from "react";
 import { useT } from "../lib/i18n";
 import { rpc } from "../lib/rpc";
 import { CheckIcon, ChevronRightIcon, CloseIcon, FolderOpenIcon, ImageIcon, PlayArrowIcon } from "./icons";
+import { backdropClose } from "../lib/backdrop";
 import "../styles/Confirm.css";
 import "../styles/Settings.css";
 import "../styles/AlbumDialogs.css";
@@ -170,10 +171,7 @@ export function MyFilesPicker({
   return (
     <div
       className="cf-backdrop"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClose();
-      }}
+      {...backdropClose(onClose)}
     >
       <div className="cf-panel ad-picker lp-picker mf-picker" role="dialog" onClick={(e) => e.stopPropagation()}>
         <div className="ad-picker-head">

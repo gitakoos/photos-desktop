@@ -28,6 +28,7 @@ import { isWindows } from "../lib/platform";
 import type { UploadItem, UploadStatus } from "../hooks/useUploads";
 import { useT } from "../lib/i18n";
 import { formatBytes } from "../lib/format";
+import { importFraction, importOwnsBar } from "../lib/importProgress";
 import { ContextMenu, type MenuAt } from "./ContextMenu";
 import { CheckIcon, ChevronLeftIcon, SpinnerIcon, UploadArrowIcon } from "./icons";
 import type { SyncInfo } from "../lib/mountActivity";
@@ -214,16 +215,19 @@ export function Upload({ status, running, error, nothingFound, start, startImpor
           done: megabytes(importing.done),
           total: megabytes(importing.total),
         })
-      : t("upload.importReading");
+      : importing.phase === "ready"
+        ? t("upload.importVideos")
+        : t("upload.importReading");
 
   const settled = status.done + status.skipped + status.failed;
   const waiting = Math.max(0, status.total - settled);
-  const progress =
-    status.total > 0
-      ? settled / status.total
-      : importing?.phase === "downloading" && importing.total > 0
-        ? importing.done / importing.total
-        : 0;
+  // Before anything is queued the bar belongs to the import, even over the totals of an
+  // upload that finished earlier: its bytes while a zip downloads or unpacks, and a moving
+  // bar, with no percentage, through the steps that have no count.
+  const importOnly = importOwnsBar(importing, running);
+  const importShare = importOnly ? importFraction(importing) : null;
+  const importUncounted = importOnly && importShare === null;
+  const progress = importShare ?? (status.total > 0 ? settled / status.total : 0);
   const moved = status.moveResult;
   const busy = status.total > 0 || status.items.length > 0 || !!importing;
   const message = error || pickError || (nothingFound ? t("upload.nothingFound") : "") || status.importError;
@@ -342,16 +346,37 @@ export function Upload({ status, running, error, nothingFound, start, startImpor
         <div className="up-body">
           <div className="up-summary">
             <div className="up-sumtop">
-              <span className="up-percent">{Math.floor(progress * 100)}%</span>
+              {!importUncounted && <span className="up-percent">{Math.floor(progress * 100)}%</span>}
               <span className="up-sumtext">
                 <span className="up-sumtitle">
                   {status.total === 0
                     ? importLine
-                    : t(running ? "upload.progressRunning" : "upload.progressFinished", {
-                        settled,
-                        total: status.total,
-                      })}
+                    : status.albumStep
+                      ? t("upload.albumStep", {
+                          album: status.albumStep.album,
+                          added: status.albumStep.added,
+                          total: status.albumStep.total,
+                        })
+                      : t(running ? "upload.progressRunning" : "upload.progressFinished", {
+                          settled,
+                          total: status.total,
+                        })}
                 </span>
+                {status.albumStep && (
+                  <span className="up-sumsub">
+                    {t(settled < status.total ? "upload.progressRunning" : "upload.progressFinished", {
+                      settled,
+                      total: status.total,
+                    })}
+                  </span>
+                )}
+                {status.albumNotes?.map((n, i) => (
+                  <span key={i} className="up-sumsub">
+                    {n.kind === "split"
+                      ? t("upload.albumSplit", { album: n.album, part: n.part, moved: n.moved })
+                      : t("upload.albumFailed", { album: n.album, count: n.count })}
+                  </span>
+                ))}
                 {importing && status.total > 0 && <span className="up-sumsub">{importLine}</span>}
                 {moved && !running && (
                   <span className="up-sumsub">
@@ -368,7 +393,11 @@ export function Upload({ status, running, error, nothingFound, start, startImpor
               </button>
             </div>
             <div className="up-bar">
-              <div className="up-barfill" style={{ width: `${progress * 100}%` }} />
+              {importUncounted ? (
+                <div className="up-barfill up-barfill-moving" />
+              ) : (
+                <div className="up-barfill" style={{ width: `${progress * 100}%` }} />
+              )}
             </div>
             {status.total > 0 && (
               <div className="up-chips">

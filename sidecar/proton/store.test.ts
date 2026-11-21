@@ -43,11 +43,15 @@ import {
   originalHas,
   originalSize,
   originalUsage,
-  readSealedOrDiscard,
+  readSealedOrSetAside,
   thumbGet,
   thumbPut,
   wipeCache,
   writeSealedAtomic,
+  HIDDEN_FILE,
+  SET_ASIDE_PREFIX,
+  StoreLockedError,
+  setAsideVault,
 } from "./store.ts";
 
 /** The first bytes of a real JPEG, for proving a blob on disk is not one. */
@@ -222,33 +226,61 @@ describe("sealed files: writing and recovering", () => {
   it("reads a sealed file back", () => {
     writeSealedAtomic(path, Buffer.from("readable"));
 
-    expect(readSealedOrDiscard(path)?.toString()).toBe("readable");
+    expect(readSealedOrSetAside(path)?.toString()).toBe("readable");
     expect(existsSync(path)).toBe(true);
   });
 
   it("answers a missing file with null", () => {
-    expect(readSealedOrDiscard(join(dir, "not-there.enc"))).toBeNull();
+    expect(readSealedOrSetAside(join(dir, "not-there.enc"))).toBeNull();
   });
+
+  const asides = () => readdirSync(dir).filter((n) => n.startsWith("small.enc.unreadable-"));
 
   // The fix for the bricked unlock: a torn blob has to be as recoverable as a missing
   // one. Anything else fails identically on every retry with the correct password.
-  it("discards a torn blob and reports it as absent, rather than throwing", () => {
+  it("sets a torn blob aside and reports it as absent, rather than throwing", () => {
     writeSealedAtomic(path, Buffer.from("the good session"));
-    writeFileSync(path, randomBytes(64)); // a write torn by a crash or a power cut
+    const torn = randomBytes(64); // a write torn by a crash or a power cut
+    writeFileSync(path, torn);
 
-    expect(readSealedOrDiscard(path)).toBeNull();
+    expect(readSealedOrSetAside(path)).toBeNull();
 
-    // Gone, so the next start looks like a first start instead of failing the same way.
+    // Out of the way, so the next start looks like a first start instead of failing the same
+    // way, and kept, never deleted.
     expect(existsSync(path)).toBe(false);
+    expect(asides().map((n) => readFileSync(join(dir, n)).equals(torn))).toContain(true);
   });
 
-  it("discards a blob written under a previous key", () => {
+  it("sets aside a blob written under a previous key, which that key still opens", () => {
+    const old = randomBytes(32);
+    setDataKey(Buffer.from(old));
     writeSealedAtomic(path, Buffer.from("sealed under the old password"));
 
     setDataKey(randomBytes(32)); // the password changed
 
-    expect(readSealedOrDiscard(path)).toBeNull();
+    const before = new Set(asides());
+    expect(readSealedOrSetAside(path)).toBeNull();
     expect(existsSync(path)).toBe(false);
+    const added = asides().filter((n) => !before.has(n));
+    expect(added).toHaveLength(1);
+    setDataKey(old);
+    expect(readSealedOrSetAside(join(dir, added[0]))?.toString()).toBe("sealed under the old password");
+  });
+
+  // A locked store read the hidden list as a torn file and deleted it.
+  it("refuses to read while locked, and leaves the file alone", () => {
+    const key = randomBytes(32);
+    setDataKey(Buffer.from(key));
+    writeSealedAtomic(path, Buffer.from("the hidden list"));
+    const sealed = readFileSync(path);
+
+    clearDataKey();
+    expect(() => readSealedOrSetAside(path)).toThrow(StoreLockedError);
+    expect(() => writeSealedAtomic(path, Buffer.from(""))).toThrow(StoreLockedError);
+    expect(readFileSync(path).equals(sealed)).toBe(true);
+
+    setDataKey(key);
+    expect(readSealedOrSetAside(path)?.toString()).toBe("the hidden list");
   });
 
   // The caches are what make a discard cheap: nothing else on disk is touched, so a
@@ -257,9 +289,58 @@ describe("sealed files: writing and recovering", () => {
     thumbPut("uid-1", 0, Buffer.from("thumbnail bytes"));
     writeFileSync(path, randomBytes(64));
 
-    expect(readSealedOrDiscard(path)).toBeNull();
+    expect(readSealedOrSetAside(path)).toBeNull();
 
     expect(thumbGet("uid-1", 0)?.toString()).toBe("thumbnail bytes");
+  });
+
+  it("lets sign-out take the files set aside with the rest", () => {
+    writeFileSync(path, randomBytes(64));
+    expect(readSealedOrSetAside(path)).toBeNull();
+    expect(asides().length).toBeGreaterThan(0);
+    wipeCache();
+    expect(asides()).toEqual([]);
+  });
+});
+
+describe("a vault set aside whole", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "pfp-aside-"));
+    initStore(dir);
+    setDataKey(randomBytes(32));
+  });
+
+  it("moves the vault and what it sealed into a folder of its own, deleting nothing", () => {
+    writeSealedAtomic(join(dir, HIDDEN_FILE), Buffer.from("hidden"));
+    writeSealedAtomic(join(dir, SESSION_FILE), Buffer.from("session"));
+    thumbPut("uid-1", 0, Buffer.from("thumb"));
+    writeFileSync(join(dir, "vault.json"), "meta");
+    writeFileSync(join(dir, "settings"), "host's own");
+
+    const aside = setAsideVault(["vault.json"]);
+
+    expect(aside).not.toBeNull();
+    expect(existsSync(join(dir, HIDDEN_FILE))).toBe(false);
+    expect(existsSync(join(dir, "vault.json"))).toBe(false);
+    expect(readFileSync(join(aside!, "vault.json"), "utf8")).toBe("meta");
+    expect(unseal(readFileSync(join(aside!, HIDDEN_FILE))).toString()).toBe("hidden");
+    expect(readdirSync(join(aside!, "thumbs"))).toHaveLength(1);
+    // What is not the vault's stays, and the store is usable at once.
+    expect(readFileSync(join(dir, "settings"), "utf8")).toBe("host's own");
+    expect(existsSync(join(dir, "thumbs"))).toBe(true);
+    thumbPut("uid-2", 0, Buffer.from("new"));
+    expect(thumbGet("uid-2", 0)?.toString()).toBe("new");
+  });
+
+  it("goes only at sign-out", async () => {
+    writeSealedAtomic(join(dir, HIDDEN_FILE), Buffer.from("hidden"));
+    setAsideVault([]);
+    const folders = () => readdirSync(dir).filter((n) => n.startsWith(SET_ASIDE_PREFIX));
+    expect(folders()).toHaveLength(1);
+    wipeCache();
+    for (let i = 0; i < 100 && folders().length > 0; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(folders()).toEqual([]);
   });
 });
 

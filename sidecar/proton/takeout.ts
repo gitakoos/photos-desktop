@@ -153,11 +153,16 @@ export function albumFolderOf(relPath: string): string | null {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   if (segments.length < 2) return null;
-  const parent = segments[segments.length - 2];
-  const lower = parent.toLowerCase();
-  if (EXPORT_CONTAINERS.has(lower)) return null;
+  return folderAlbum(segments[segments.length - 2]);
+}
+
+/** The album a folder's own photos go into: its name, trimmed, unless it is a wrapper or a timeline bucket. */
+export function folderAlbum(folder: string): string | null {
+  const name = folder.trim();
+  const lower = name.toLowerCase();
+  if (!name || EXPORT_CONTAINERS.has(lower)) return null;
   if (TIMELINE_BUCKETS.has(lower) || TIMELINE_YEAR.test(lower)) return null;
-  return parent;
+  return name;
 }
 
 /**

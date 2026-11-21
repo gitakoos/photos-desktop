@@ -25,7 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LockIcon } from "./icons";
 import { LocalPasswordForm, useLocalLockKind } from "./LocalPassword";
 import { useT } from "../lib/i18n";
-import { isWindows } from "../lib/platform";
+import { hasOsLock, isMac } from "../lib/platform";
 import "../styles/Hidden.css";
 
 type Verification = "verified" | "canceled" | "failed" | "unavailable";
@@ -33,9 +33,10 @@ type Verification = "verified" | "canceled" | "failed" | "unavailable";
 /**
  * The app lock: Windows Hello before the photos show again, when the app opens and when it comes
  * back from the tray. Nothing is stored for it; Windows checks the PIN, face or fingerprint this
- * account signs in with. Where Hello is no longer set up the app opens, rather than locking its
- * owner out for good. The prompt comes up when its owner asks for it, by a click or Enter. On
- * Linux, where no app can ask for the person's own sign-in, it asks for the local lock's password.
+ * account signs in with, and a Mac checks Touch ID or its own password. Where neither is set up
+ * any more the app opens, rather than locking its owner out for good. The prompt comes up when
+ * its owner asks for it, by a click or Enter. On Linux, where no app can ask for the person's own
+ * sign-in, it asks for the local lock's password.
  */
 export function AppLock({ onUnlock }: { onUnlock: () => void }) {
   const t = useT();
@@ -43,10 +44,10 @@ export function AppLock({ onUnlock }: { onUnlock: () => void }) {
   const [lockKind] = useLocalLockKind();
 
   async function unlock() {
-    if (asking || !isWindows) return;
+    if (asking || !hasOsLock) return;
     setAsking(true);
     try {
-      const answer = await invoke<Verification>("hello_verify", { message: t("appLock.prompt") });
+      const answer = await invoke<Verification>("hello_verify", { message: t(isMac ? "appLock.promptMac" : "appLock.prompt") });
       if (answer === "verified" || answer === "unavailable") onUnlock();
     } catch {
       /* stays locked; the button asks again */
@@ -67,7 +68,7 @@ export function AppLock({ onUnlock }: { onUnlock: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (!isWindows) {
+  if (!hasOsLock) {
     return (
       <div className="app-content app-lock">
         <div className="hd-lock">
@@ -88,7 +89,7 @@ export function AppLock({ onUnlock }: { onUnlock: () => void }) {
           <LockIcon size={30} />
         </span>
         <h2 className="hd-locktitle">{t("appLock.title")}</h2>
-        <p className="hd-locktext">{t("appLock.text")}</p>
+        <p className="hd-locktext">{t(isMac ? "appLock.textMac" : "appLock.text")}</p>
         <button
           className="hd-unlock"
           onClick={(e) => {

@@ -40,6 +40,12 @@ export type LocalFileInfo = {
   height?: number;
   captureTime?: number | string | null;
   camera?: string | null;
+  /** False where the host would refuse a rename. */
+  canRename?: boolean;
+  /** False where the host cannot move this file to the trash (Linux only). */
+  canTrash?: boolean;
+  /** False where an edited copy cannot go next to this file and the save dialog asks where. */
+  savesBeside?: boolean;
 };
 
 export const localFileInfo = (path: string) => invoke<LocalFileInfo>("local_file_info", { path });
@@ -55,6 +61,35 @@ export const renameLocalFile = (path: string, newName: string) =>
 
 /** Send the file to the recycle bin. Rejects with "cancelled" if the user backed out. */
 export const deleteLocalFile = (path: string) => invoke<void>("delete_local_file", { path });
+
+/**
+ * What the viewer's delete opens: the question, or, for a file the host said it cannot
+ * move to the trash, a plain notice saying so, which comes before any confirm instead of
+ * an error after it.
+ */
+export type DeletePrompt =
+  | { kind: "confirm"; messageKey: string }
+  | { kind: "outOfReach"; titleKey: string; messageKey: string };
+
+export function deletePrompt(
+  canTrash: boolean | undefined,
+  platform: "windows" | "mac" | "linux",
+): DeletePrompt {
+  if (canTrash === false) {
+    return {
+      kind: "outOfReach",
+      titleKey: "local.trashOutOfReachTitleLinux",
+      messageKey: "local.trashOutOfReachLinux",
+    };
+  }
+  const messageKey =
+    platform === "windows"
+      ? "local.deleteMessage"
+      : platform === "mac"
+        ? "local.deleteMessageMac"
+        : "local.deleteMessageLinux";
+  return { kind: "confirm", messageKey };
+}
 
 /**
  * The editor's source: the file's pixels as a same-origin `data:` URL (upright, full
@@ -79,8 +114,30 @@ export const localEditorSource = (path: string) =>
  * metadata (date, GPS, camera) with orientation reset. Returns the new file's path.
  * `imageBase64` is the canvas output, already encoded as `format`.
  */
-export const saveLocalEdit = (srcPath: string, imageBase64: string, format: SaveFormat) =>
-  invoke<string>("save_local_edit", { srcPath, imageBase64, format });
+export const saveLocalEdit = (srcPath: string, imageBase64: string, format: SaveFormat, pickTitle?: string) =>
+  invoke<string>("save_local_edit", { srcPath, imageBase64, format, pickTitle });
+
+/** A save the person backed out of in the save dialog: nothing was written, nothing failed. */
+export const isCancelled = (e: unknown): boolean => String(e).includes("cancelled");
+
+/** A save refused because the name picked in the save dialog is already taken. */
+export const isNameTaken = (e: unknown): boolean => String(e).includes("name taken:");
+
+/**
+ * Runs a save that asks for a place in the save dialog, and while the picked name is already
+ * taken, says so through `onTaken` and asks again, so the edit can still be saved. Ends when
+ * the save is made, or when the dialog is dismissed or the save fails (those throw).
+ */
+export async function untilNameFree<T>(attempt: () => Promise<T>, onTaken: () => void): Promise<T> {
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (e) {
+      if (!isNameTaken(e)) throw e;
+      onTaken();
+    }
+  }
+}
 
 /** The format a copy of this file defaults to: its own where it can be written, else JPEG. */
 export function copyFormatFor(path: string): SaveFormat {
