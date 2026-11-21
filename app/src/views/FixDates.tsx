@@ -20,7 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useThumbnails } from "../hooks/useThumbnails";
 import { dateProblem, type DateProblem } from "../lib/fixDates";
@@ -63,11 +63,14 @@ function writeKept(kept: Set<string>) {
  */
 export function FixDates({
   items,
+  loading = false,
   onEditDate,
   onView,
 }: {
   /** The timeline as the grid has it, hidden photos left out. */
   items: Item[];
+  /** The timeline is still arriving: `items` grows every couple of seconds until it is all in. */
+  loading?: boolean;
   /** Opens the date editor; `byName` when every photo has a name that records its day. */
   onEditDate: (uids: string[], byName: boolean) => void;
   onView: (uids: string[], at: string) => void;
@@ -76,32 +79,55 @@ export function FixDates({
   const { lang } = useLang();
   const dateFormat = useMemo(() => new Intl.DateTimeFormat(lang, { year: "numeric", month: "long", day: "numeric" }), [lang]);
   const dateText = (ms: number) => dateFormat.format(ms);
-  const [read, setRead] = useState(() => items.filter((it) => names.has(it.uid)).length);
+  // Bumped as names arrive, for what is worked out from them.
+  const [arrived, setArrived] = useState(0);
   const [kept, setKept] = useState<Set<string>>(readKept);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [shownCount, setShownCount] = useState(PAGE);
 
-  // The names come from the sidecar's encrypted cache, so only a first visit decrypts them.
+  // The names come from the sidecar's encrypted cache, so only a first visit decrypts them. While the
+  // timeline is still arriving, `items` grows every couple of seconds: the photos new to it join the
+  // one reading under way, rather than each growth starting the reading over from the top.
+  const waiting = useRef<string[]>([]);
+  const asked = useRef(new Set<string>());
+  // Asked once and not answered: counted as read for this visit, so the page does not wait on them.
+  const unanswered = useRef(new Set<string>());
+  const draining = useRef(false);
+  const alive = useRef(true);
   useEffect(() => {
-    const missing = items.filter((it) => !names.has(it.uid)).map((it) => it.uid);
-    if (missing.length === 0) {
-      setRead(items.length);
-      return;
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    for (const it of items) {
+      if (names.has(it.uid) || asked.current.has(it.uid)) continue;
+      asked.current.add(it.uid);
+      waiting.current.push(it.uid);
     }
-    let live = true;
+    if (draining.current || waiting.current.length === 0) return;
+    draining.current = true;
     void (async () => {
-      for (let at = 0; at < missing.length && live; at += META_BATCH) {
-        const rows = await rpc<{ uid: string; name: string }[]>("getMetadata", {
-          uids: missing.slice(at, at + META_BATCH),
-        }).catch(() => []);
-        for (const r of rows) names.set(r.uid, r.name);
-        if (live) setRead(items.length - missing.length + Math.min(at + META_BATCH, missing.length));
+      try {
+        while (alive.current && waiting.current.length > 0) {
+          const uids = waiting.current.splice(0, META_BATCH);
+          const rows = await rpc<{ uid: string; name: string }[]>("getMetadata", { uids }).catch(() => null);
+          if (rows) for (const r of rows) names.set(r.uid, r.name);
+          for (const uid of uids) if (!names.has(uid)) unanswered.current.add(uid);
+          if (alive.current) setArrived((n) => n + 1);
+        }
+      } finally {
+        draining.current = false;
       }
     })();
-    return () => {
-      live = false;
-    };
   }, [items]);
+  const read = useMemo(
+    () => items.reduce((n, it) => (names.has(it.uid) || unanswered.current.has(it.uid) ? n + 1 : n), 0),
+    // `arrived` stands for the names that have come in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, arrived],
+  );
 
   const rows = useMemo(() => {
     const now = Date.now();
@@ -113,9 +139,9 @@ export function FixDates({
       if (problem) out.push({ uid: it.uid, captureMs: it.captureTime, name: name ?? "", problem });
     }
     return out;
-    // `read` stands for the names that have arrived.
+    // `arrived` stands for the names that have come in.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, kept, read]);
+  }, [items, kept, arrived]);
 
   // Picks of photos no longer listed fall away.
   useEffect(() => {
@@ -129,7 +155,8 @@ export function FixDates({
   const visible = useMemo(() => rows.slice(0, shownCount), [rows, shownCount]);
   const visibleUids = useMemo(() => visible.map((r) => r.uid), [visible]);
   const thumbs = useThumbnails(visibleUids);
-  const reading = read < items.length;
+  // One reading from the first page of the timeline to its last name, not one for each page.
+  const reading = loading || read < items.length;
 
   const keep = (uids: string[]) => {
     const next = new Set(kept);
@@ -159,20 +186,9 @@ export function FixDates({
     <div className="fd-page">
       <div className="fd-head">
         <p className="fd-hint">{t("fixDates.hint")}</p>
-        <div className="fd-status" aria-live="polite">
-          {reading ? (
-            <>
-              <span>
-                {t("fixDates.reading", {
-                  done: read.toLocaleString(lang),
-                  total: items.length.toLocaleString(lang),
-                })}
-              </span>
-              <span className="fd-bar">
-                <span style={{ width: `${items.length ? Math.round((read / items.length) * 100) : 0}%` }} />
-              </span>
-            </>
-          ) : rows.length > 0 ? (
+        <div className="fd-status">
+          {/* The choices stay where they are while names still come in; the reading shows beside them. */}
+          {rows.length > 0 && (
             <>
               <button
                 className="g-chip"
@@ -191,7 +207,20 @@ export function FixDates({
                 </>
               )}
             </>
-          ) : null}
+          )}
+          {reading && (
+            <span className="fd-reading" aria-live="polite">
+              <span>
+                {t("fixDates.reading", {
+                  done: read.toLocaleString(lang),
+                  total: items.length.toLocaleString(lang),
+                })}
+              </span>
+              <span className="fd-bar">
+                <span style={{ width: `${items.length ? Math.round((read / items.length) * 100) : 0}%` }} />
+              </span>
+            </span>
+          )}
         </div>
       </div>
 

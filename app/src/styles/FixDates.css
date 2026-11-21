@@ -42,10 +42,17 @@
 .fd-status {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   min-height: 34px;
   color: var(--fg-dim);
   font-size: 13px;
+}
+.fd-reading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
 }
 .fd-bar {
   flex: 0 0 160px;
