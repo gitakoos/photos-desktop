@@ -1,7 +1,7 @@
 # Builds the macOS app as one universal file for Apple silicon and Intel Macs, with its disk
 # image and a zip of the app, and keeps both as build artifacts. Started by hand from the
-# Actions tab, or by a version tag. It publishes nothing and needs no secrets: the app is
-# signed ad hoc, not with a developer certificate.
+# Actions tab. It publishes nothing and needs no secrets: the app is signed ad hoc, not with
+# a developer certificate.
 #
 # Three jobs. ONNX Runtime publishes no Node binding for Intel Macs, so one job takes the one
 # built from the pinned source in gitakoos/onnxruntime, checked against its SHA-256, and builds
@@ -11,9 +11,6 @@ name: macOS build
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
 
 permissions:
   contents: read
