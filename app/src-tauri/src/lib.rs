@@ -346,6 +346,10 @@ struct GateState {
 struct Gate {
     state: Mutex<GateState>,
     admit: Condvar,
+    /// The same wake as `admit`, for a caller that waits as a task rather than on a
+    /// thread: the window's calls, which would otherwise each park a blocking-pool
+    /// thread for as long as they queue.
+    admit_task: tokio::sync::Notify,
 }
 
 /// Proof of admission from `acquire`. Releasing the lane is tied to dropping this, so
@@ -358,17 +362,56 @@ struct GatePermit<'a> {
 
 impl Drop for GatePermit<'_> {
     fn drop(&mut self) {
+        self.gate.release(self.background);
+    }
+}
+
+impl GatePermit<'_> {
+    /// Hand the lane on to an owner that is not tied to the gate's lifetime (a call that
+    /// is admitted on a task and run on a blocking thread). The lane stays held: it is
+    /// released when the `OwnedPermit` is dropped instead of this.
+    fn into_owned(self, shared: SharedSidecar) -> OwnedPermit {
+        let background = self.background;
+        std::mem::forget(self);
+        OwnedPermit { shared, background }
+    }
+}
+
+/// A `GatePermit` that owns its gate, so it can move to the thread that runs the call.
+struct OwnedPermit {
+    shared: SharedSidecar,
+    background: bool,
+}
+
+impl Drop for OwnedPermit {
+    fn drop(&mut self) {
+        self.shared.gate.release(self.background);
+    }
+}
+
+/// A task's place in a lane's queue, taken out again if the task stops waiting (its
+/// future dropped, or the call let go of): a ticket left behind would sit at the head of
+/// its lane for ever and hold up everyone after it.
+struct QueuedTicket<'a> {
+    gate: &'a Gate,
+    me: Ticket,
+    background: bool,
+    armed: bool,
+}
+
+impl Drop for QueuedTicket<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let mut st = self.gate.state.lock().unwrap();
         if self.background {
-            st.bg_busy = false;
+            st.bg_waiters.retain(|t| *t != self.me);
         } else {
-            st.fg_busy = false;
+            st.fg_waiters.retain(|t| *t != self.me);
         }
-        // notify_all, not notify_one: a single wake could land on a waiter that is not
-        // the head of its lane, which would then re-check, see it is not first in line,
-        // and go back to sleep while the true head keeps sleeping — a stall. Waking all
-        // lets each lane's head win and the rest re-queue.
-        self.gate.admit.notify_all();
+        drop(st);
+        self.gate.wake();
     }
 }
 
@@ -383,6 +426,89 @@ impl Gate {
                 bg_waiters: BinaryHeap::new(),
             }),
             admit: Condvar::new(),
+            admit_task: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Free a lane and let its next waiter in.
+    fn release(&self, background: bool) {
+        let mut st = self.state.lock().unwrap();
+        if background {
+            st.bg_busy = false;
+        } else {
+            st.fg_busy = false;
+        }
+        drop(st);
+        self.wake();
+    }
+
+    /// Every waiter re-checks whether it is now the head of a free lane: threads on the
+    /// condvar and tasks on the notify alike.
+    ///
+    /// notify_all, not notify_one: a single wake could land on a waiter that is not the
+    /// head of its lane, which would then re-check, see it is not first in line, and go
+    /// back to sleep while the true head keeps sleeping — a stall. Waking all lets each
+    /// lane's head win and the rest re-queue. For a task a wake is a poll of a future,
+    /// not a thread switch, so waking all of them stays cheap.
+    fn wake(&self) {
+        self.admit.notify_all();
+        self.admit_task.notify_waiters();
+    }
+
+    /// `acquire_unless`, waited for as a task: a queued call holds no thread.
+    ///
+    /// The wait is the same predicate loop. The notification is registered before the
+    /// predicate is read, under the gate's mutex, so a release between the read and the
+    /// await still wakes this task: `notify_waiters` reaches every `Notified` that was
+    /// enabled before it was called.
+    async fn acquire_unless_async(
+        &self,
+        prio: Priority,
+        abandoned: &(dyn Fn() -> bool + Sync),
+    ) -> Option<GatePermit<'_>> {
+        let background = is_background(prio);
+        let mut queued = {
+            let mut st = self.state.lock().unwrap();
+            let seq = st.next_seq;
+            st.next_seq = st.next_seq.wrapping_add(1);
+            let me = Ticket { prio, seq };
+            if background {
+                st.bg_waiters.push(me);
+            } else {
+                st.fg_waiters.push(me);
+            }
+            QueuedTicket { gate: self, me, background, armed: true }
+        };
+        loop {
+            let notified = self.admit_task.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut st = self.state.lock().unwrap();
+                let me = queued.me;
+                let ready = if background {
+                    !st.bg_busy && st.bg_waiters.peek() == Some(&me)
+                } else {
+                    !st.fg_busy && st.fg_waiters.peek() == Some(&me)
+                };
+                if ready {
+                    if background {
+                        st.bg_waiters.pop();
+                        st.bg_busy = true;
+                    } else {
+                        st.fg_waiters.pop();
+                        st.fg_busy = true;
+                    }
+                    queued.armed = false;
+                    return Some(GatePermit { gate: self, background });
+                }
+                if abandoned() {
+                    // `queued` takes the ticket out as it drops, after this lock is let go.
+                    drop(st);
+                    return None;
+                }
+            }
+            notified.await;
         }
     }
 
@@ -435,7 +561,7 @@ impl Gate {
                 drop(st);
                 // Leaving cannot promote anyone who was not already admissible, so this
                 // is belt-and-braces rather than load-bearing.
-                self.admit.notify_all();
+                self.wake();
                 return None;
             }
             st = self.admit.wait(st).unwrap();
@@ -455,7 +581,7 @@ impl Gate {
     /// between reading its predicate and sleeping on it while it holds that mutex.
     fn wake_all(&self) {
         let _held = self.state.lock().unwrap();
-        self.admit.notify_all();
+        self.wake();
     }
 
     /// The number of callers currently queued, across both lanes. Test-only: lets a test
@@ -689,9 +815,8 @@ impl SidecarGate {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Start following a cancellable call. Idempotent, and deliberately so: the call is
-    /// registered on the way in from the frontend AND again once it reaches a pool
-    /// thread, and the second must not wipe a cancel that landed between the two.
+    /// Start following a cancellable call. Idempotent, and deliberately so: registering a
+    /// call twice must never wipe a cancel that landed in between.
     fn track(&self, id: CallId) {
         self.pending.lock().unwrap().entry(id).or_insert(false);
     }
@@ -790,6 +915,23 @@ impl SidecarGate {
         Some(permit)
     }
 
+    /// `admit`, waited for as a task. The same checks in the same places: on the way in,
+    /// throughout the wait, and once more on admission.
+    async fn admit_async(&self, method: &str, call_id: Option<CallId>) -> Option<GatePermit<'_>> {
+        let prio = priority_for(method);
+        let Some(id) = call_id else {
+            return self.gate.acquire_unless_async(prio, &|| false).await;
+        };
+        if self.is_abandoned(id) {
+            return None;
+        }
+        let permit = self.gate.acquire_unless_async(prio, &|| self.is_abandoned(id)).await?;
+        if self.is_abandoned(id) {
+            return None; // dropping the permit hands the channel straight on
+        }
+        Some(permit)
+    }
+
     /// Run one RPC end to end: queue by the method's priority and, once admitted, hold
     /// the channel exclusively while writing the request and reading its response.
     /// A call that waited to be admitted or held the channel long enough to be felt
@@ -820,7 +962,20 @@ impl SidecarGate {
         if permit.is_some() {
             flight.admitted();
         }
+        self.run_admitted(app, method, params, call_id, wait_ms, permit)
+    }
 
+    /// The rest of a call once its wait is over: answer a call given up on while it
+    /// queued, or hold the lane (`permit`, whichever kind) for the request and its answer.
+    fn run_admitted<P>(
+        &self,
+        app: &AppHandle,
+        method: String,
+        params: serde_json::Value,
+        call_id: Option<CallId>,
+        wait_ms: u128,
+        permit: Option<P>,
+    ) -> Result<serde_json::Value, String> {
         let Some(permit) = permit else {
             // Nothing was written and the channel was never held, so there is no hold to
             // report: the wait is the whole of what this call cost.
@@ -1640,9 +1795,10 @@ fn recv_response(
     }
 }
 
-/// Bridge from a Tauri command or the mount into the gate. Kept as a thin wrapper so
-/// both entry points (`rpc` and `sidecar_rpc`) share the one path: priority is derived
-/// from the method name inside the gate, so neither caller can get it wrong.
+/// Bridge from the host's own callers (the mount, the viewer's byte protocol) into the
+/// gate, waiting on the calling thread. The window's `rpc` waits as a task instead
+/// (`admit_async`) and runs the same rest of the call: priority is derived from the
+/// method name inside the gate either way, so no caller can get it wrong.
 ///
 /// `call_id` is the frontend's alone. Everything reaching the sidecar from inside the
 /// host (the mount's hydration, the viewer's byte protocol) passes `None` and is
@@ -1880,24 +2036,43 @@ async fn rpc(
         files_drive::session_ended();
     }
     let shared = state.inner().clone();
-    // Registered here rather than inside the task below, so a cancel arriving while the
-    // task is still waiting for a thread from the blocking pool already finds the call
-    // to mark. Registering twice is harmless: `track` never clears an existing entry.
-    if let Some(id) = call_id {
+    // Followed from here until it answers, so a cancel finds the call whether it is still
+    // queued or already running.
+    let _tracked = call_id.map(|id| {
         shared.track(id);
-    }
+        Tracked { shared: &shared, id }
+    });
     let called = method.clone();
     let app_after = app.clone();
+    // A sign-out the user let go of what is not on Drive yet does not wait for it again.
+    // The save is sidecar calls of its own, so it runs before this call takes a lane.
     let discard = params.get("discard").and_then(serde_json::Value::as_bool) == Some(true);
+    if method == "signOut" && !discard {
+        let app = app.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || save_backup_before_sign_out(&app)).await;
+    }
+    // Followed from here until it answers, so the watchdog can name it while it is stuck.
+    let flight = shared.flights.start(&method);
+    // The wait for the channel is a task, not a thread: a burst of calls (a page of
+    // covers, a run through the viewer) queues as futures. A blocking-pool thread is
+    // taken only once the call is admitted, for the write and the wait for its answer,
+    // so at most one per lane is ever held, however long the queue.
+    let wait_start = Instant::now();
+    let permit = shared
+        .admit_async(&method, call_id)
+        .await
+        .map(|p| p.into_owned(shared.clone()));
+    let wait_ms = wait_start.elapsed().as_millis();
+    if permit.is_some() {
+        flight.admitted();
+    }
+    let runner = shared.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        // A sign-out the user let go of what is not on Drive yet does not wait for it again.
-        if method == "signOut" && !discard {
-            save_backup_before_sign_out(&app);
-        }
-        rpc_blocking(&app, &shared, method, params, call_id)
+        runner.run_admitted(&app, method, params, call_id, wait_ms, permit)
     })
     .await
     .map_err(|e| format!("sidecar task failed: {e}"))?;
+    drop(flight);
     // The Explorer folder held the account that just signed out: its placeholders go.
     // A sign-out held for changes not on Drive yet left the account as it was.
     let signed_out = called == "signOut" && result.as_ref().is_ok_and(sign_out_done);
@@ -4423,6 +4598,134 @@ mod gate_tests {
             drop(gate.acquire(Priority::Background));
         });
     }
+
+    // Calls waited for as tasks queue without a thread each: 200 of them wait on ONE
+    // thread here, and still come through by priority, then in order of arrival.
+    #[test]
+    fn queued_tasks_hold_no_thread_and_keep_the_order() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let order = Arc::new(Mutex::new(Vec::<u32>::new()));
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let local = Arc::clone(&gate);
+            let order_t = Arc::clone(&order);
+            let runner = thread::spawn(move || {
+                rt.block_on(async move {
+                    let mut tasks = Vec::new();
+                    for id in 0..200u32 {
+                        let prio = if id % 50 == 49 { Priority::Interactive } else { Priority::UserAction };
+                        let gate = Arc::clone(&local);
+                        let order = Arc::clone(&order_t);
+                        tasks.push(tokio::spawn(async move {
+                            let permit = gate.acquire_unless_async(prio, &|| false).await;
+                            order.lock().unwrap().push(id);
+                            drop(permit);
+                        }));
+                    }
+                    for t in tasks {
+                        t.await.unwrap();
+                    }
+                });
+            });
+            wait_until_queued(&gate, 200);
+            drop(holder);
+            runner.join().unwrap();
+            let got = order.lock().unwrap().clone();
+            let mut want: Vec<u32> = vec![49, 99, 149, 199];
+            want.extend((0..200).filter(|id| id % 50 != 49));
+            assert_eq!(got, want);
+        });
+    }
+
+    // A thread and a task wait in the same line: whichever kind a caller is, its place
+    // is its priority and arrival, and a release wakes both kinds.
+    #[test]
+    fn threads_and_tasks_share_one_line() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+            let (gate_t, order_t) = (Arc::clone(&gate), Arc::clone(&order));
+            let as_thread = thread::spawn(move || {
+                let permit = gate_t.acquire(Priority::UserAction);
+                order_t.lock().unwrap().push("thread");
+                drop(permit);
+            });
+            wait_until_queued(&gate, 1);
+
+            let (gate_a, order_a) = (Arc::clone(&gate), Arc::clone(&order));
+            let as_task = thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                rt.block_on(async move {
+                    let permit = gate_a.acquire_unless_async(Priority::Interactive, &|| false).await;
+                    order_a.lock().unwrap().push("task");
+                    drop(permit);
+                });
+            });
+            wait_until_queued(&gate, 2);
+
+            drop(holder);
+            as_thread.join().unwrap();
+            as_task.join().unwrap();
+            assert_eq!(*order.lock().unwrap(), vec!["task", "thread"]);
+        });
+    }
+
+    // A task that stops waiting (its future dropped, as when the window goes) takes its
+    // ticket with it: left at the head of the lane, it would hold up everyone after it.
+    #[test]
+    fn a_dropped_waiting_task_leaves_the_line() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            rt.block_on(async {
+                use std::future::Future;
+                let mut waiting = Box::pin(gate.acquire_unless_async(Priority::Interactive, &|| false));
+                // Poll it once, so it joins the line, then give up on it.
+                let waker = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(waker);
+                assert!(waiting.as_mut().poll(&mut cx).is_pending());
+                assert_eq!(gate.queued(), 1);
+                drop(waiting);
+                assert_eq!(gate.queued(), 0);
+            });
+            drop(holder);
+            // The lane is free for the next caller at once.
+            drop(gate.acquire(Priority::UserAction));
+        });
+    }
+
+    // A queued task let go of leaves at the next wake with nothing admitted, as a thread
+    // does, and the caller behind it is let in as if it had never queued.
+    #[test]
+    fn an_abandoned_task_leaves_without_the_lane() {
+        with_watchdog(10, || {
+            let gate = Arc::new(Gate::new());
+            let holder = gate.acquire(Priority::UserAction);
+            let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (gate_t, gone_t) = (Arc::clone(&gate), Arc::clone(&gone));
+            let task = thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+                rt.block_on(async move {
+                    gate_t
+                        .acquire_unless_async(Priority::Interactive, &|| gone_t.load(Ordering::SeqCst))
+                        .await
+                        .is_none()
+                })
+            });
+            wait_until_queued(&gate, 1);
+            gone.store(true, Ordering::SeqCst);
+            gate.wake_all();
+            assert!(task.join().unwrap(), "an abandoned task was admitted");
+            assert_eq!(gate.queued(), 0);
+            // The holder still has the lane, and its release lets the next caller straight in.
+            drop(holder);
+            drop(gate.acquire(Priority::UserAction));
+        });
+    }
 }
 
 #[cfg(test)]
@@ -4440,8 +4743,7 @@ mod cancel_tests {
         shared.abandon(7);
         assert!(shared.is_abandoned(7));
 
-        // Registering again must not undo a cancel that landed in between: the frontend
-        // registers on the way in and the pool thread registers again when it starts.
+        // Registering again must not undo a cancel that landed in between.
         shared.track(7);
         assert!(shared.is_abandoned(7), "a second registration wiped the cancel");
     }
@@ -4491,6 +4793,42 @@ mod cancel_tests {
         shared.sent.lock().unwrap().remove(&10);
         shared.abandon(10);
         assert!(rx.try_recv().is_err(), "an answered call was cancelled");
+    }
+
+    // The window's cancel reaches a call still waiting as a task: it leaves the line
+    // without the lane, and the call behind it is admitted once the lane frees.
+    #[test]
+    fn a_cancel_takes_a_queued_task_out_of_the_line() {
+        let shared = std::sync::Arc::new(SidecarGate::new());
+        let holder = shared.gate.acquire(super::Priority::UserAction);
+        shared.track(5);
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            use std::future::Future;
+            let waker = std::task::Waker::noop();
+            let mut cx = std::task::Context::from_waker(waker);
+            let mut cancelled = Box::pin(shared.admit_async("getPreview", Some(5)));
+            let mut kept = Box::pin(shared.admit_async("getPreview", Some(6)));
+            assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+            assert!(kept.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(shared.gate.queued(), 2);
+
+            shared.abandon(5);
+            assert!(matches!(cancelled.as_mut().poll(&mut cx), std::task::Poll::Ready(None)));
+            assert_eq!(shared.gate.queued(), 1, "the cancelled call is still in line");
+
+            drop(holder);
+            match kept.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(Some(permit)) => drop(permit),
+                _ => panic!("the call behind a cancelled one was not admitted"),
+            }
+            assert_eq!(shared.gate.queued(), 0);
+        });
+        // A call let go of before it queues never joins the line at all.
+        rt.block_on(async {
+            assert!(shared.admit_async("getPreview", Some(5)).await.is_none());
+        });
+        assert_eq!(shared.gate.queued(), 0);
     }
 
     #[test]

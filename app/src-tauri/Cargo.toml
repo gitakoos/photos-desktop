@@ -40,6 +40,9 @@ tauri-build = { version = "2", features = [] }
 #                   `macOSPrivateApi` in tauri.conf.json and refuses one without the other.
 tauri = { version = "2", features = ["tray-icon", "image-png", "protocol-asset", "macos-private-api"] }
 tauri-plugin-opener = "2"
+# `sync` - the Notify a window's call waits on for its turn at the sidecar, so a call
+#          queued behind others holds no thread (already in the tree through tauri).
+tokio = { version = "1", features = ["sync"] }
 # Single-instance: a second launch focuses the running window instead of starting
 # a duplicate copy.
 tauri-plugin-single-instance = "2"
@@ -78,6 +81,11 @@ base64 = "0.23"
 # it. No dependencies of its own.
 minisign-verify = "=0.3.0"
 semver = "1"
+
+[dev-dependencies]
+# A single-threaded runtime for the gate's tests: many queued calls on one thread is what
+# shows that a call waiting for its turn holds no thread of its own.
+tokio = { version = "1", features = ["rt", "sync"] }
 
 # Windows-only integration: the Cloud Filter mount, WIC image decoding, the shell,
 # WebView2 suspend, the registry, and DPAPI sealing. None of it exists on Linux, where
