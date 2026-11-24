@@ -243,6 +243,7 @@ import {
   countTrashed,
   deletePhotosForever as runDeleteForever,
   emptyTrash as runEmptyTrash,
+  forgetTrashItems,
   listTrashed as readTrash,
   TrashListing,
   restorePhotos as runRestore,
@@ -3927,6 +3928,8 @@ export class ProtonSession {
   /** Moves photos to the trash. The SDK reports per-node results. */
   async trashPhotos(uids: string[]): Promise<{ uid: string; ok: boolean; error?: string }[]> {
     if (!this.photos) throw new Error("Not signed in");
+    // Read afresh in the trash: kept from an earlier stay there, they may have changed since.
+    forgetTrashItems(uids);
     const out: { uid: string; ok: boolean; error?: string }[] = [];
     try {
       for await (const r of withStallGuard(this.photos.trashNodes(uids), SDK_STALL_MS, "trashNodes")) {

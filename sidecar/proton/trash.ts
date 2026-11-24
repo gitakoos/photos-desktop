@@ -33,6 +33,7 @@
 
 import { collectResults, nodeName, toMillis, type NodeOpResult } from "./nodes.ts";
 import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
+import { trashItemsGet, trashItemsPut } from "./store.ts";
 
 /**
  * A trashed node, shaped like the timeline's items so the grid renders it with
@@ -49,6 +50,38 @@ export type TrashItem = {
 };
 
 export type TrashResult = NodeOpResult;
+
+/** An item as kept from an earlier read, with when it was read. */
+type KeptItem = TrashItem & { readAt: number };
+
+/** How long a kept item stands before it is read again: what another device changed shows within it. */
+const TRASH_ITEM_KEPT_MS = 7 * 24 * 3600 * 1000;
+
+function isKeptItem(v: unknown, now: number): v is KeptItem {
+  const t = v as KeptItem | undefined;
+  return (
+    !!t &&
+    typeof t.uid === "string" &&
+    typeof t.name === "string" &&
+    typeof t.type === "string" &&
+    typeof t.captureTime === "number" &&
+    Array.isArray(t.tags) &&
+    typeof t.readAt === "number" &&
+    now - t.readAt < TRASH_ITEM_KEPT_MS
+  );
+}
+
+/**
+ * Forgets what was kept of these items: an item restored here may be edited before it is
+ * trashed again, so it is read afresh then.
+ */
+export function forgetTrashItems(uids: string[]): void {
+  const kept = trashItemsGet();
+  if (!kept) return;
+  let changed = false;
+  for (const uid of uids) if (uid in kept) changed = delete kept[uid];
+  if (changed) trashItemsPut(kept);
+}
 
 /**
  * Everything in the photos trash, newest first.
@@ -67,22 +100,52 @@ export async function listTrashed(photos: any): Promise<TrashItem[]> {
   )) {
     uids.push(uid as string);
   }
-  if (uids.length === 0) return [];
-
-  const out: TrashItem[] = [];
-  for await (const node of withStallGuard(photos.iterateNodes(uids), SDK_STALL_MS, "iterateNodes")) {
-    const n = node as any;
-    if (n.missingUid) continue; // vanished server-side between the two passes
-    out.push({
-      uid: n.uid,
-      name: nodeName(n),
-      type: n.type,
-      mediaType: n.mediaType ?? null,
-      // An album has no capture time of its own; its creation time orders it.
-      captureTime: toMillis(n.photo?.captureTime) || toMillis(n.creationTime),
-      tags: (n.photo?.tags ?? []) as number[],
-    });
+  // What was read of each item before is kept (sealed): an item cannot change while it is in
+  // the trash, and one that leaves it is dropped, so one trashed again is read afresh. Only
+  // the items new to the trash are decrypted, where every one was at each start.
+  const now = Date.now();
+  const kept = (trashItemsGet() ?? {}) as Record<string, KeptItem>;
+  const present = new Set(uids);
+  const known: Record<string, KeptItem> = {};
+  for (const uid of uids) if (isKeptItem(kept[uid], now)) known[uid] = kept[uid];
+  const missing = uids.filter((uid) => !known[uid]);
+  /** What this read found that is not kept: an item whose name would not decrypt is shown, not kept. */
+  const shown: Record<string, TrashItem> = {};
+  let added = 0;
+  try {
+    if (missing.length > 0) {
+      for await (const node of withStallGuard(photos.iterateNodes(missing), SDK_STALL_MS, "iterateNodes")) {
+        const n = node as any;
+        if (n.missingUid) continue; // vanished server-side between the two passes
+        const item: TrashItem = {
+          uid: n.uid,
+          name: nodeName(n),
+          type: n.type,
+          mediaType: n.mediaType ?? null,
+          // An album has no capture time of its own; its creation time orders it.
+          captureTime: toMillis(n.photo?.captureTime) || toMillis(n.creationTime),
+          tags: (n.photo?.tags ?? []) as number[],
+        };
+        if (n.name?.ok === false || typeof item.type !== "string") shown[n.uid] = item;
+        else {
+          known[n.uid] = { ...item, readAt: now };
+          added++;
+        }
+      }
+    }
+  } finally {
+    // Kept as far as it got, so a read cut short does not start from nothing next time.
+    const left = Object.keys(kept).some((uid) => !present.has(uid) || !known[uid]);
+    if (added > 0 || left) trashItemsPut(known);
   }
+  const out = uids
+    .map((uid): TrashItem | undefined => {
+      const k = known[uid];
+      if (!k) return shown[uid];
+      const { readAt: _readAt, ...item } = k;
+      return item;
+    })
+    .filter((item): item is TrashItem => !!item);
   // The API promises no order, so impose the timeline's.
   out.sort((a, b) => b.captureTime - a.captureTime);
   return out;
@@ -90,6 +153,7 @@ export async function listTrashed(photos: any): Promise<TrashItem[]> {
 
 /** Puts trashed nodes back where they were trashed from. */
 export async function restorePhotos(photos: any, uids: string[]): Promise<TrashResult[]> {
+  forgetTrashItems(uids);
   return collectResults(photos.restoreNodes(uids));
 }
 
@@ -99,6 +163,7 @@ export async function restorePhotos(photos: any, uids: string[]): Promise<TrashR
  * with its own result rather than quietly doing nothing.
  */
 export async function deletePhotosForever(photos: any, uids: string[]): Promise<TrashResult[]> {
+  forgetTrashItems(uids);
   return collectResults(photos.deleteNodes(uids));
 }
 
@@ -119,6 +184,7 @@ export async function emptyTrash(photos: any, listed: string[]): Promise<TrashRe
     if (shown.has(uid as string)) still.push(uid as string);
   }
   if (still.length === 0) return [];
+  forgetTrashItems(still);
   return collectResults(photos.deleteNodes(still));
 }
 
