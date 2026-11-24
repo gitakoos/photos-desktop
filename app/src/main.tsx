@@ -27,6 +27,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "./styles/theme.css";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ResizeEdges } from "./components/ResizeEdges";
 import { TrayPopup } from "./views/TrayPopup";
 import { ViewerWindow } from "./views/ViewerWindow";
 import { LangProvider } from "./lib/i18n";
@@ -108,6 +109,8 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <ErrorBoundary>
     <LangProvider>
       {isTrayPopup ? <TrayPopup /> : isViewer ? <ViewerWindow /> : <App />}
+      {/* Windows and a Mac's main window keep a system frame; elsewhere the page is the frame and its edges resize it. */}
+      {!isTrayPopup && !isWindows && !macChrome && <ResizeEdges />}
     </LangProvider>
   </ErrorBoundary>,
 );
