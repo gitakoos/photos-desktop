@@ -53,6 +53,7 @@ import { HiddenStore } from "./hidden.ts";
 import { emptyPeople, type PeopleState } from "./faceStore.ts";
 import { curationKey, rekeyPeople } from "./facePeople.ts";
 import { StoreLockedError } from "./store.ts";
+import { untilIdle } from "./stallGuard.ts";
 
 const OLD = "vol~old";
 const NEW = "vol~new";
@@ -898,5 +899,95 @@ describe("dateEditInfo", () => {
     expect(singles).toBe(0);
     expect(out.every((i) => i.blocked === "read")).toBe(true);
     expect(out.map((i) => i.uid)).toEqual(uids);
+  });
+});
+
+describe("a step that never answers", () => {
+  const never = () => new Promise<never>(() => {});
+  const settled = async (editor: DateEditor) => {
+    for (let i = 0; i < 400 && editor.getStatus().running; i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  it("gives up on an upload that sends nothing, stops it, and keeps what the next try looks for", async () => {
+    const { f, deps } = fake();
+    let signal: AbortSignal | undefined;
+    f.photos.getFileUploader = async (_n: string, _m: any, s: AbortSignal) => {
+      signal = s;
+      return { uploadFromStream: async () => ({ completion: never }) };
+    };
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    await expect(replaceOne({ ...deps, stallMs: 5 }, entry, () => {})).rejects.toThrow(/upload produced nothing/);
+    expect(signal?.aborted).toBe(true);
+    expect(entry.sent).toBeDefined();
+  });
+
+  it("picks up a copy Drive committed after its upload was given up on, sending no second one", async () => {
+    const { f, deps } = fake();
+    const getFileUploader = f.photos.getFileUploader;
+    f.photos.getFileUploader = async (...args: any[]) => {
+      const uploader = await getFileUploader(...args);
+      return {
+        uploadFromStream: async () => {
+          const controller = await uploader.uploadFromStream();
+          return { completion: () => new Promise((r) => setTimeout(() => r(controller.completion()), 120)) };
+        },
+      };
+    };
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    // Ten stall times for an upload: 50 ms here, well before the commit lands.
+    await expect(replaceOne({ ...deps, stallMs: 5 }, entry, () => {})).rejects.toThrow(/upload/);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await replaceOne(deps, entry, () => {})).toBe("changed");
+    expect(f.uploads).toBe(1);
+    expect(f.calls).toContain(`trash:${OLD}`);
+  });
+
+  it("gives up on a download that stops sending", async () => {
+    const { f, deps } = fake();
+    f.photos.getFileDownloader = async () => ({ downloadToStream: () => ({ completion: never }) });
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    await expect(replaceOne({ ...deps, stallMs: 20 }, entry, () => {})).rejects.toThrow(/download produced nothing/);
+    expect(entry.sent).toBeUndefined();
+  });
+
+  it("goes on to trash the original when carrying over runs out of time, keeping the copy that holds the data", async () => {
+    const { f, deps } = fake();
+    const entry: any = { uid: OLD, captureMs: WANT, stage: "queued" };
+    expect(await replaceOne({ ...deps, stallMs: 10, carry: never }, entry, () => {})).toBe("changed");
+    expect(f.calls).toContain(`trash:${OLD}`);
+    expect(f.calls).not.toContain(`trash:${NEW}`);
+  });
+
+  it("pauses after three stalls in a row, keeping the rest on disk instead of waiting each out", async () => {
+    const { f, deps } = fake();
+    f.photos.getNode = never;
+    let saved: any[] = [];
+    const editor = new DateEditor((items) => (saved = items.slice()));
+    editor.attach({ ...deps, stallMs: 20 }, []);
+    editor.start(Array.from({ length: 10 }, (_, i) => ({ uid: `vol~${i}`, captureMs: WANT })));
+    await settled(editor);
+    const status = editor.getStatus();
+    expect(status.running).toBe(false);
+    expect(status.failed).toBe(3);
+    expect(status.errors.at(-1)?.error).toMatch(/7 photos left/);
+    expect(saved.map((q) => q.uid)).toEqual(Array.from({ length: 7 }, (_, i) => `vol~${i + 3}`));
+
+    // The next change asked for carries them on.
+    f.photos.getNode = async (uid: string) => f.nodes.get(uid);
+    editor.start([{ uid: OLD, captureMs: WANT }]);
+    await settled(editor);
+    expect(editor.getStatus().done).toBe(11);
+    expect(saved).toEqual([]);
+  });
+
+  it("waits as long as the work keeps showing progress", async () => {
+    const out = await untilIdle("slow", 200, async (touch) => {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 60));
+        touch();
+      }
+      return "done";
+    });
+    expect(out).toBe("done");
   });
 });

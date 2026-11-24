@@ -145,3 +145,38 @@ export async function* withStallGuard<T>(
     }
   }
 }
+
+/**
+ * `work`, given up on once it shows no sign of life for `idleMs`. `work` calls `touch` as it makes
+ * progress (bytes moved), which starts the wait afresh; on giving up, `abort` stops it and a
+ * `StallError` is thrown. For a single awaited step what `withStallGuard` is for an iterator.
+ */
+export async function untilIdle<T>(what: string, idleMs: number, work: (touch: () => void) => Promise<T>, abort?: () => void): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  let fail: (e: Error) => void = () => {};
+  const stalled = new Promise<never>((_, reject) => {
+    fail = reject;
+  });
+  const arm = () => {
+    if (settled) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        abort?.();
+      } catch {
+        /* stopping is best-effort; the step is let go of either way */
+      }
+      fail(new StallError(what, idleMs));
+    }, idleMs);
+  };
+  arm();
+  const run = Promise.resolve().then(() => work(arm));
+  run.catch(() => {}); // abandoned when the stall wins
+  try {
+    return await Promise.race([run, stalled]);
+  } finally {
+    settled = true;
+    clearTimeout(timer);
+  }
+}
