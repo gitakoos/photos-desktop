@@ -54,7 +54,7 @@ import { applyMeta, canEditMeta, parseMetaChange, readTextMeta, type MetaChange,
 import { downloadWhole } from "./viewerMeta.ts";
 import { dateFromName } from "./nameDate.ts";
 import { activeRevisionOf, nodeLocation, nodeName, toMillis } from "./nodes.ts";
-import { SDK_STALL_MS, withStallGuard } from "./stallGuard.ts";
+import { isStall, SDK_STALL_MS, StallError, withStallGuard } from "./stallGuard.ts";
 import { readSealedOrSetAside, StoreLockedError, storeDir, writeSealedAtomic } from "./store.ts";
 
 /**
@@ -489,26 +489,77 @@ export async function storedThumbnails(photos: any, uid: string): Promise<any[]>
   return out;
 }
 
-/** What the editor shows of each photo: its name, date, the date its name records, and whether it can change. */
-export async function dateEditInfo(photos: any, uids: string[]): Promise<DateEditInfo[]> {
-  const out: DateEditInfo[] = [];
-  for (const uid of uids) {
+/** Nodes read per `iterateNodes` call by the date editor's listing. */
+const INFO_BATCH = 200;
+
+/** One photo's row in the editor, from its node. */
+function infoOf(uid: string, node: any): DateEditInfo {
+  const name = nodeName(node);
+  return {
+    uid,
+    name,
+    captureMs: toMillis(node?.photo?.captureTime),
+    nameMs: name ? dateFromName(name) : null,
+    place: nodeLocation(node),
+    blocked: isLivePhoto(node) ? "live" : canCarryDate(node?.mediaType) ? null : "type",
+  };
+}
+
+const unread = (uid: string): DateEditInfo => ({ uid, name: "", captureMs: 0, nameMs: null, place: null, blocked: "read" });
+
+/** `photos.getNode`, given up on after `stallMs`. */
+async function oneNode(photos: any, uid: string, stallMs: number): Promise<any> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stall = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new StallError("getNode(dateEdit)", stallMs)), stallMs);
+  });
+  const read = Promise.resolve().then(() => photos.getNode(uid));
+  read.catch(() => {}); // abandoned when the stall wins
+  try {
+    return await Promise.race([read, stall]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * What the editor shows of each photo: its name, date, the date its name records, and whether it can change.
+ *
+ * Read a few hundred nodes at a time through `iterateNodes`, as the map and the downloads do. One
+ * `getNode` after another took minutes over a Fix dates selection of a couple of thousand photos, and one
+ * that never answered held the panel on "Reading the photos" for good. A batch that fails leaves only
+ * its unread photos to `getNode`, each under the same stall guard. Once anything stalls the SDK is not
+ * answering, and every photo not read yet is shown as one that could not be read: waiting out each
+ * batch in turn would outlast the host's wait for the answer.
+ */
+export async function dateEditInfo(photos: any, uids: string[], stallMs = SDK_STALL_MS): Promise<DateEditInfo[]> {
+  const found = new Map<string, DateEditInfo>();
+  let wedged = false;
+  for (let at = 0; at < uids.length && !wedged; at += INFO_BATCH) {
+    const batch = uids.slice(at, at + INFO_BATCH);
     try {
-      const node = await photos.getNode(uid);
-      const name = nodeName(node);
-      out.push({
-        uid,
-        name,
-        captureMs: toMillis(node?.photo?.captureTime),
-        nameMs: name ? dateFromName(name) : null,
-        place: nodeLocation(node),
-        blocked: isLivePhoto(node) ? "live" : canCarryDate(node?.mediaType) ? null : "type",
-      });
-    } catch {
-      out.push({ uid, name: "", captureMs: 0, nameMs: null, place: null, blocked: "read" });
+      for await (const node of withStallGuard(photos.iterateNodes(batch), stallMs, "iterateNodes(dateEdit)")) {
+        const n = node as any;
+        if (n?.missingUid) found.set(n.missingUid, unread(n.missingUid));
+        else if (n?.uid) found.set(n.uid, infoOf(n.uid, n));
+      }
+    } catch (e) {
+      if (isStall(e)) wedged = true;
+      process.stderr.write(`[dateedit] a batch of ${batch.length} could not be read together: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
+    for (const uid of batch) {
+      if (found.has(uid) || wedged) continue;
+      try {
+        const node = await oneNode(photos, uid, stallMs);
+        found.set(uid, node ? infoOf(uid, node) : unread(uid));
+      } catch (e) {
+        if (isStall(e)) wedged = true;
+        found.set(uid, unread(uid));
+      }
     }
   }
-  return out;
+  if (wedged) process.stderr.write(`[dateedit] Drive stopped answering; ${uids.length - found.size} photos shown as unread\n`);
+  return uids.map((uid) => found.get(uid) ?? unread(uid));
 }
 
 /** What the description and strip panels, and the viewer's details, show of a photo. */
