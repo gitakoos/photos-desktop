@@ -3918,6 +3918,18 @@ pub fn run() {
                 app.handle().exit(0);
                 return Ok(());
             }
+            // A diagnostic build opens the Web Inspector on every window when asked to, so a
+            // slow screen can be recorded in its Timelines (see `devtools` in Cargo.toml).
+            #[cfg(feature = "devtools")]
+            if std::env::var_os("PFP_DEVTOOLS").is_some() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(2));
+                    for (_, window) in handle.webview_windows() {
+                        let _ = handle.run_on_main_thread(move || window.open_devtools());
+                    }
+                });
+            }
             // An update installed while this app still ran set the files it held aside (`.pfp-old`); this
             // process no longer uses them, so they go now rather than at the next update.
             std::thread::spawn(sweep_update_leftovers);
