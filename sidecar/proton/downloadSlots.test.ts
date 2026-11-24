@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openDownloader } from "./downloadSlots.ts";
+import { openDownloader, slotsInUse } from "./downloadSlots.ts";
 import { getOriginal, getVideo, releaseOriginal } from "./download.ts";
 import { downloadWhole } from "./viewerMeta.ts";
 
@@ -101,6 +101,21 @@ describe("a downloader that is not used", () => {
     (await openDownloader(client, "u")).stop();
     await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
     expect(client.slots.written).toBe(0);
+  });
+
+  it("is counted in the slot log while it holds its slot, and not after", async () => {
+    const client = slotClient();
+    const before = slotsInUse().count;
+    const used = await openDownloader(client, "a");
+    const left = await openDownloader(client, "b");
+    const stopped = await openDownloader(client, "c");
+    expect(slotsInUse().count).toBe(before + 3);
+    expect(slotsInUse().oldestMs).toBeGreaterThanOrEqual(0);
+    await used.downloader.downloadToStream(new WritableStream()).completion();
+    left.unused();
+    stopped.stop();
+    await vi.waitFor(() => expect(slotsInUse().count).toBe(before));
+    expect(client.slots.inUse).toBe(0);
   });
 
   it("five left unused do not stop the sixth download", async () => {

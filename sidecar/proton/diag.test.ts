@@ -22,7 +22,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { Diagnostics, SLOW_MS, STALL_MS, formatLine, safeValue } from "./diag.ts";
+import { Diagnostics, SLOW_MS, STALL_MS, formatLine, logStamp, safeValue } from "./diag.ts";
 
 function setup() {
   let now = new Date(2026, 9, 24, 15, 0, 0).getTime();
@@ -45,6 +45,10 @@ describe("a diagnostics line", () => {
     expect(safeValue("C:\\Users\\Anna\\Pictures")).toBe("[x]");
     expect(safeValue("Személyes")).toBe("[x]");
     expect(formatLine(0, "app", "Anna's photo", { "a name": 1 })).toMatch(/ app \[x\] \[x\]=1$/);
+  });
+
+  it("written by a module itself, is stamped in UTC as the host's are", () => {
+    expect(logStamp(Date.UTC(2026, 9, 24, 3, 4, 5, 600))).toBe("[03:04:05]");
   });
 });
 
