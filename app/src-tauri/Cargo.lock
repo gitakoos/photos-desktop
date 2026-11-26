@@ -126,6 +126,7 @@ dependencies = [
  "jpeg-encoder",
  "kamadak-exif",
  "keyring",
+ "libc",
  "libheif-rs",
  "little_exif",
  "minisign-verify",

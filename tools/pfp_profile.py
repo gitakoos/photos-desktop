@@ -20,16 +20,19 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 """
-pfp_profile.py - profile the Photos for Proton desktop app (Linux) from the outside.
+pfp_profile.py - profile the Photos for Proton desktop app from the outside.
 
-No build, no root, no extra packages: it only reads /proc for the app's processes
-while you walk through a fixed scenario, then collects the app's own slow-call log.
+No build, no root, no extra packages. Turn on Settings > Diagnostics > Detailed logging in
+the app first: with it on, the app writes its own CPU and memory (host, sidecar and, where
+the system lets it be read, the window's web view) and the screen it shows into its log
+every few seconds, and this script reads them on Windows, macOS and Linux alike. On Linux
+it also reads /proc for the app's processes, once a second, for more detail.
 
 What it records
-  - per process, once a second: CPU, memory (RSS, PSS), thread count, disk I/O
-  - for each process, how busy its MAIN thread is (a main thread stuck near 100%
-    is what makes an app feel frozen)
-  - which threads of the Node sidecar burn the CPU
+  - from the app's log: CPU and memory of the host, the sidecar and the web view, every 5 s
+  - on Linux, per process, once a second: CPU, memory (RSS, PSS), thread count, disk I/O
+  - on Linux, how busy each process's MAIN thread is (a main thread stuck near 100%
+    is what makes an app feel frozen), and which threads of the Node sidecar burn the CPU
   - the app's "[rpc] <method> wait=<ms> hold=<ms>" log lines written during the run
     (the app logs every call that waited or ran for 1 s or more)
   - the sidecar's timing of the steps of its face, search and Explorer-folder work
@@ -46,10 +49,10 @@ What it does NOT record
     durations and counts
 
 Usage
-  1. Close the app completely.
-  2. python3 pfp_profile.py
+  1. Turn on Settings > Diagnostics > Detailed logging, then close the app completely.
+  2. Linux and macOS: python3 pfp_profile.py    Windows: py pfp_profile.py
   3. Follow the prompts (about 10 minutes).
-  4. Upload the .tar.gz it prints at the end.
+  4. The results are in the .tar.gz it prints at the end, in the folder it was run from.
 
 Watching, with nothing to answer
   python3 pfp_profile.py --watch      (or --people)
@@ -58,6 +61,7 @@ Watching, with nothing to answer
   and what the app logged then.
 
 Options
+  --log PATH      the app's sidecar.log, when it is not found by itself
   --app-id ID     Flatpak app id (default eu.akoos.photos)
   --watch         follow the app's screens, no steps or questions
   --people        the same as --watch
@@ -78,8 +82,18 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-CLK = os.sysconf("SC_CLK_TCK")
-PAGE = os.sysconf("SC_PAGE_SIZE")
+# /proc is read where there is one (Linux); everywhere the app's own resource lines are read.
+HAS_PROC = os.path.isdir("/proc/self")
+CLK = os.sysconf("SC_CLK_TCK") if HAS_PROC else 100
+PAGE = os.sysconf("SC_PAGE_SIZE") if HAS_PROC else 4096
+# The app's own resource lines, every 5 s with Detailed logging on (numbers only):
+RES_HOST_LINE = re.compile(
+    r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[res\](?: host cpu=([\d.]+) mem_mb=(\d+))?"
+    r"(?: webview cpu=([\d.]+) mem_mb=(\d+) procs=(\d+))?\s*$")
+RES_SIDECAR_LINE = re.compile(
+    r"^\[(\d\d):(\d\d):(\d\d)\] \[sidecar\] \[res\] sidecar cpu=([\d.]+) rss_mb=(\d+) heap_mb=(\d+)")
+# Seconds between two resource lines: each stands for that long.
+RES_EVERY_S = 5
 RPC_LINE = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\] \[host\] \[rpc\] (\w+) wait=(\d+) hold=(\d+)")
 OTHER_TAG = re.compile(r"^\[\d\d:\d\d:\d\d\] \[(\w+)\] \[(\w+)\]")
 # The app's watchdog, every 5 s while a call is stuck (method names and counts only):
@@ -147,10 +161,13 @@ def follow_screens(sampler, log_path, offset, limit, app_id, already_running):
     if already_running:
         print("The app is already running: measuring it from now. Switch to a screen to start.")
     else:
-        print("Start the app now (from the menu, or: flatpak run eu.akoos.photos).")
+        print("Start the app now (from the menu" + (", or: flatpak run eu.akoos.photos)." if HAS_PROC else ")."))
     print("Use it as you like: open the screens that feel slow and stay a little on each.")
-    print("When done, quit the app (its Quit; closing the window may only hide it) or press")
-    print("Ctrl+C here. Nothing to answer.\n")
+    if HAS_PROC:
+        print("When done, quit the app (its Quit; closing the window may only hide it) or press")
+        print("Ctrl+C here. Nothing to answer.\n")
+    else:
+        print("When done, press Ctrl+C here. Nothing to answer.\n")
     seen_app = already_running
     gone_since = None
     phases = []
@@ -215,7 +232,7 @@ def follow_screens(sampler, log_path, offset, limit, app_id, already_running):
     if ended == "limit":
         print(f"   Stopped after {limit // 60} minutes.")
     if screens_seen == 0:
-        print("   The app wrote no screen names: this build may not have them, so the run is one step.")
+        print("   The app wrote no screen names (is Detailed logging on?), so the run is one step.")
     end = (time.monotonic() - sampler.t0) - (3.5 if ended == "quit" else 0)
     phases.append((current, started, max(end, started), False))
     return [p for p in phases if p[2] - p[1] >= 0.5], rotated, ended, log_path
@@ -285,7 +302,7 @@ def screens_summary(rows, phases):
     cpu = defaultdict(lambda: defaultdict(float))   # screen -> role -> cpu-seconds
     for r in rows:
         if r["cpu"] is not None:
-            cpu[base(r["phase"])][r["role"]] += r["cpu"] / 100
+            cpu[base(r["phase"])][r["role"]] += r["cpu"] / 100 * r.get("span", 1)
     lines = ["\n== CPU by screen, all visits together (cpu-seconds; 1 = one core for one second)",
              f"{'screen':20} {'time':>7} {'sidecar':>8} {'window':>8} {'host':>8} {'network':>8}"]
     for name in sorted(seconds, key=lambda n: -sum(cpu[n].values())):
@@ -293,6 +310,15 @@ def screens_summary(rows, phases):
         lines.append(f"{name:20} {seconds[name]:6.0f}s {c.get('sidecar', 0):8.1f} {c.get('webview', 0):8.1f} "
                      f"{c.get('host', 0):8.1f} {c.get('webkit-network', 0):8.1f}")
     return lines
+
+
+def res_row(sec, phase, role, cpu, mem_mb):
+    """A sample from one of the app's resource lines, standing for the seconds since the last."""
+    return {
+        "t": sec, "phase": phase, "role": role, "pid": None, "cpu": cpu, "main_cpu": None,
+        "rss_mb": float(mem_mb), "pss_mb": None, "threads": None, "read_mb": None, "write_mb": None,
+        "span": RES_EVERY_S,
+    }
 
 
 def fields_of(text):
@@ -360,6 +386,8 @@ class Sampler(threading.Thread):
 
     def find_pids(self):
         found, ppid_of, comm_of = set(), {}, {}
+        if not HAS_PROC:
+            return found
         for name in os.listdir("/proc"):
             if not name.isdigit():
                 continue
@@ -483,14 +511,23 @@ class Sampler(threading.Thread):
 
 def find_log(app_id):
     home = os.path.expanduser("~")
-    roots = [os.path.join(home, ".var", "app", app_id), os.path.join(home, ".local", "share")]
+    if sys.platform == "win32":
+        # The installed app keeps its log in its own folder's "data", or in %LOCALAPPDATA%.
+        roots = [os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))]
+        marks = ("Photos for Proton", "eu.akoos.photos")
+    elif sys.platform == "darwin":
+        roots = [os.path.join(home, "Library", "Application Support")]
+        marks = ("eu.akoos.photos",)
+    else:
+        roots = [os.path.join(home, ".var", "app", app_id), os.path.join(home, ".local", "share")]
+        marks = ("akoos", app_id)
     hits = []
     for root in roots:
         for dirpath, dirnames, filenames in os.walk(root):
             if dirpath.count(os.sep) - root.count(os.sep) > 4:
                 dirnames[:] = []
                 continue
-            if "sidecar.log" in filenames and ("akoos" in dirpath or app_id in dirpath):
+            if "sidecar.log" in filenames and any(m in dirpath for m in marks):
                 hits.append(os.path.join(dirpath, "sidecar.log"))
     hits.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return hits[0] if hits else None
@@ -509,6 +546,10 @@ def system_info(app_id):
     osr = read("/etc/os-release") or ""
     m = re.search(r'^PRETTY_NAME="?([^"\n]+)', osr, re.M)
     info["distro"] = m.group(1) if m else "?"
+    info["os"] = platform.system()
+    if not sys.platform.startswith("linux"):
+        info["os_version"] = platform.release()
+        return info
     info["session"] = os.environ.get("XDG_SESSION_TYPE", "?")
     info["desktop"] = os.environ.get("XDG_CURRENT_DESKTOP", "?")
     try:
@@ -543,7 +584,7 @@ def summarise(rows, phases):
             for r in rs:
                 slot = per_t[int(r["t"])]
                 slot["rss"] += r["rss_mb"]
-                slot["thr"] += r["threads"]
+                slot["thr"] += r["threads"] or 0
                 if r["cpu"] is not None:
                     slot["cpu"] += r["cpu"]
                     slot["main"] = max(slot["main"], r["main_cpu"] or 0.0)
@@ -578,7 +619,7 @@ def summarise(rows, phases):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Profile Photos for Proton desktop from /proc")
+    ap = argparse.ArgumentParser(description="Profile Photos for Proton desktop from its own log (and /proc on Linux)")
     ap.add_argument("--app-id", default="eu.akoos.photos")
     ap.add_argument("--idle", type=int)
     ap.add_argument("--ask", action="store_true",
@@ -588,7 +629,7 @@ def main():
     ap.add_argument("--watch", action="store_true",
                     help="no steps or questions: follow the screens the app shows until it is closed, "
                          "and report the busiest moments")
-    ap.add_argument("--log", help=argparse.SUPPRESS)         # testing: the app log to read
+    ap.add_argument("--log", help="the app's sidecar.log, when it is not found by itself")
     ap.add_argument("--match", help=argparse.SUPPRESS)       # testing: match processes by name
     ap.add_argument("--auto", type=int, help=argparse.SUPPRESS)  # testing: seconds per step, no prompts
     args = ap.parse_args()
@@ -596,9 +637,6 @@ def main():
         args.idle = 30
     watch = args.watch or args.people
     steps = [] if watch else STEPS
-
-    if not sys.platform.startswith("linux"):
-        sys.exit("This script reads /proc and only works on Linux.")
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir = os.path.abspath(f"pfp-profile-{stamp}")
@@ -614,7 +652,9 @@ def main():
     answers = {}
     if not args.auto:
         print(f"Photos for Proton desktop profiler. {'As long as you like' if watch else 'About 10 minutes'}. "
-              "Nothing personal is recorded.\n")
+              "Nothing personal is recorded.")
+        print("Settings > Diagnostics > Detailed logging must be on in the app: with it off, the app writes"
+              " no resource or screen lines" + ("." if HAS_PROC else ", and there is nothing to measure.") + "\n")
     # The questions about the library are asked only with --ask: the measurement itself says
     # what they used to, and a run that repeats one before is quicker without them.
     if args.ask and not args.auto:
@@ -670,12 +710,8 @@ def main():
     sampler.join(timeout=5)
     utc_end = datetime.now(timezone.utc)
     rows = list(sampler.rows)
+    res_rows = []
     thread_ticks = [(n, at, dict(used)) for n, at, used in list(sampler.thread_ticks)]
-    cols = ["t", "phase", "role", "pid", "cpu", "main_cpu", "rss_mb", "pss_mb", "threads", "read_mb", "write_mb"]
-    with open(os.path.join(out_dir, "samples.csv"), "w") as f:
-        f.write(",".join(cols) + "\n")
-        for r in rows:
-            f.write(",".join("" if r[c] is None else str(r[c]) for c in cols) + "\n")
 
     # the app's own slow-call log, rpc timing lines only
     rpc_lines, other_tags = [], defaultdict(int)
@@ -815,8 +851,32 @@ def main():
                     slots_by[phase][1] = max(slots_by[phase][1], int(oldest))
                     slot_lines.append(f"{h}:{mi}:{s} +{sec:4d}s {phase:16} in_use={in_use} oldest={int(oldest) // 1000} s")
                     continue
+                m = RES_HOST_LINE.match(line)
+                if m:
+                    h, mi, s, hcpu, hmem, wcpu, wmem, procs = m.groups()
+                    sec, phase = when(h, mi, s)
+                    if hcpu is not None:
+                        res_rows.append(res_row(sec, phase, "host", float(hcpu), int(hmem)))
+                    if wcpu is not None:
+                        res_rows.append(res_row(sec, phase, "webview", float(wcpu), int(wmem)))
+                    continue
+                m = RES_SIDECAR_LINE.match(line)
+                if m:
+                    h, mi, s, scpu, rss, _heap = m.groups()
+                    sec, phase = when(h, mi, s)
+                    res_rows.append(res_row(sec, phase, "sidecar", float(scpu), int(rss)))
+                    continue
                 m = OTHER_TAG.match(line)
                 other_tags[(m.group(1) + "/" + m.group(2)) if m else "untagged"] += 1
+
+    # /proc's once-a-second samples where they were taken; else the app's own lines.
+    if not rows:
+        rows = res_rows
+    cols = ["t", "phase", "role", "pid", "cpu", "main_cpu", "rss_mb", "pss_mb", "threads", "read_mb", "write_mb"]
+    with open(os.path.join(out_dir, "samples.csv"), "w") as f:
+        f.write(",".join(cols) + "\n")
+        for r in rows:
+            f.write(",".join("" if r[c] is None else str(r[c]) for c in cols) + "\n")
 
 
     summary = ["Photos for Proton desktop profile", f"UTC {utc_start:%Y-%m-%d %H:%M:%S} to {utc_end:%H:%M:%S}", ""]
@@ -913,7 +973,8 @@ def main():
             "system": system_info(args.app_id),
             "answers": answers,
             "phases": [{"name": n, "start": round(a, 1), "end": round(b, 1), "skipped": s} for n, a, b, s in phases],
-            "processes_seen": sorted(set(sampler.roles.values())),
+            "processes_seen": sorted(set(sampler.roles.values()) | {r["role"] for r in res_rows}),
+            "measured_from": "proc" if sampler.rows else "app log",
             "log_found": bool(log_path),
             "other_log_lines_by_tag": dict(other_tags),
         }, f, indent=2)
@@ -923,9 +984,10 @@ def main():
         tar.add(out_dir, arcname=os.path.basename(out_dir))
 
     print("\n".join(summary[:60]))
-    seen = sorted(set(sampler.roles.values()))
+    seen = sorted(set(sampler.roles.values()) | {r["role"] for r in res_rows})
     if not any(r in ("host", "sidecar", "webview") for r in seen):
-        print("\nWARNING: no app processes were found. Was the app started during the run?")
+        print("\nWARNING: no app processes were measured. Was the app started during the run, with"
+              " Settings > Diagnostics > Detailed logging on?")
     elif "webview" not in seen:
         print("\nNote: the WebKit web process was not matched; the window's own CPU/memory is missing.")
     print(f"\nDone. Upload this file:\n  {archive}")

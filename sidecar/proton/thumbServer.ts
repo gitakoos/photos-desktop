@@ -104,25 +104,29 @@ const STATS_EVERY_MS = 5_000;
 let statsTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * Every few seconds while answers are open or have ended, one line in the app's log:
+ * With Detailed logging on, every few seconds while answers are open or have ended, one line
+ * in the app's log:
  *   [HH:MM:SS] [sidecar] [thumbs] open=<n> oldest=<ms> served=<n> missing=<n> failed=<n> dropped=<n>
  * `dropped` is answers the window stopped waiting for (a tile scrolled away).
  */
 function watchServer(): void {
-  if (statsTimer) return;
-  statsTimer = setInterval(() => {
-    const s = takeServerStats();
-    if (s.open + s.served + s.missing + s.failed + s.dropped === 0) {
-      if (statsTimer) clearInterval(statsTimer);
-      statsTimer = null;
-      return;
-    }
-    process.stderr.write(
-      `${logStamp()} [sidecar] [thumbs] open=${s.open} oldest=${s.oldestMs} served=${s.served} ` +
-        `missing=${s.missing} failed=${s.failed} dropped=${s.dropped}\n`,
-    );
-  }, STATS_EVERY_MS);
+  if (statsTimer || !diag.isDetailed()) return;
+  statsTimer = setInterval(() => serverLogTick(), STATS_EVERY_MS);
   statsTimer.unref?.();
+}
+
+/** One look of the server's line; stops it once there is nothing to say or Detailed logging is off. */
+export function serverLogTick(write: (line: string) => void = (line) => process.stderr.write(line)): void {
+  const s = takeServerStats();
+  if (!diag.isDetailed() || s.open + s.served + s.missing + s.failed + s.dropped === 0) {
+    if (statsTimer) clearInterval(statsTimer);
+    statsTimer = null;
+    return;
+  }
+  write(
+    `${logStamp()} [sidecar] [thumbs] open=${s.open} oldest=${s.oldestMs} served=${s.served} ` +
+      `missing=${s.missing} failed=${s.failed} dropped=${s.dropped}\n`,
+  );
 }
 
 let server: Server | null = null;

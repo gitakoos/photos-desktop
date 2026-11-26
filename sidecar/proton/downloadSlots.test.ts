@@ -21,7 +21,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openDownloader, slotsInUse } from "./downloadSlots.ts";
+import { openDownloader, slotLogTick, slotsInUse } from "./downloadSlots.ts";
+import { diag } from "./diag.ts";
 import { getOriginal, getVideo, releaseOriginal } from "./download.ts";
 import { downloadWhole } from "./viewerMeta.ts";
 
@@ -151,5 +152,30 @@ describe("the paths that made a downloader and then did not download", () => {
     const client = slotClient({ claimed: 2048 });
     for (let i = 0; i < 8; i++) expect(await downloadWhole(client, `w${i}`, 1024)).toBeNull();
     await vi.waitFor(() => expect(client.slots.inUse).toBe(0));
+  });
+});
+
+describe("the slot log", () => {
+  it("writes nothing with Detailed logging off, however many slots are held", async () => {
+    diag.setDetailed(false);
+    const held = await openDownloader(slotClient(), "a");
+    const lines: string[] = [];
+    slotLogTick((line) => lines.push(line));
+    held.unused();
+    expect(lines).toEqual([]);
+  });
+
+  it("writes the count and the oldest age with Detailed logging on", async () => {
+    diag.setDetailed(true);
+    try {
+      const held = await openDownloader(slotClient(), "a");
+      const lines: string[] = [];
+      slotLogTick((line) => lines.push(line));
+      held.unused();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/^\[\d{2}:\d{2}:\d{2}\] \[sidecar\] \[slots\] in_use=\d+ oldest=\d+\n$/);
+    } finally {
+      diag.setDetailed(false);
+    }
   });
 });

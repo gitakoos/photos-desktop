@@ -31,6 +31,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+case "${PFP_BUILD_JOBS:-}" in
+  "") ;;
+  *[!0-9]* | 0*) echo "PFP_BUILD_JOBS must be a whole number above 0, not '${PFP_BUILD_JOBS}'" >&2; exit 2 ;;
+esac
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 work="${PFP_FLATPAK_WORK:-$HOME/.cache/photosforproton-flatpak}"

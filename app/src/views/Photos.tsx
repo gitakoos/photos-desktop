@@ -1836,7 +1836,9 @@ export function Photos({
   const driveKinds = `${readKinds.faces}:${readKinds.labels}:${readKinds.search}:${readKinds.faceData}`;
   // Detailed diagnostics: every photo and file step noted, not only the slow ones.
   useEffect(() => {
-    if (settingsLoaded) void rpc("diagSetDetailed", { on: settings.diagDetailed }).catch(() => {});
+    if (!settingsLoaded) return;
+    void rpc("diagSetDetailed", { on: settings.diagDetailed }).catch(() => {});
+    void invoke("diag_set_detailed", { on: settings.diagDetailed }).catch(() => {});
   }, [settingsLoaded, settings.diagDetailed]);
 
   // Compression on upload, as Settings has it: the sidecar decides each file by it.

@@ -32,7 +32,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { logStamp } from "./diag.ts";
+import { diag, logStamp } from "./diag.ts";
 
 export type OpenedDownloader = {
   downloader: any;
@@ -59,26 +59,28 @@ let slotLog: ReturnType<typeof setInterval> | null = null;
 let lastLogged = 0;
 
 /**
- * Every few seconds while any slot is held, one line in the app's log saying how many and
- * for how long the oldest:
+ * With Detailed logging on, every few seconds while any slot is held, one line in the app's
+ * log saying how many and for how long the oldest:
  *   [HH:MM:SS] [sidecar] [slots] in_use=<n> oldest=<ms>
  * A slot lost, or a download that never ends, shows as a count that does not come down,
  * rather than as a hang nobody can see. Counts and ages only.
  */
 function watchSlots(): void {
-  if (slotLog) return;
-  slotLog = setInterval(() => {
-    const { count, oldestMs } = slotsInUse();
-    if (count > 0 || lastLogged > 0) {
-      process.stderr.write(`${logStamp()} [sidecar] [slots] in_use=${count} oldest=${oldestMs}\n`);
-    }
-    lastLogged = count;
-    if (count === 0 && slotLog) {
-      clearInterval(slotLog);
-      slotLog = null;
-    }
-  }, SLOT_LOG_EVERY_MS);
+  if (slotLog || !diag.isDetailed()) return;
+  slotLog = setInterval(() => slotLogTick(), SLOT_LOG_EVERY_MS);
   slotLog.unref?.();
+}
+
+/** One look of the slot log; stops it once nothing is held or Detailed logging is off. */
+export function slotLogTick(write: (line: string) => void = (line) => process.stderr.write(line)): void {
+  const { count, oldestMs } = slotsInUse();
+  const on = diag.isDetailed();
+  if (on && (count > 0 || lastLogged > 0)) write(`${logStamp()} [sidecar] [slots] in_use=${count} oldest=${oldestMs}\n`);
+  lastLogged = on ? count : 0;
+  if ((count === 0 || !on) && slotLog) {
+    clearInterval(slotLog);
+    slotLog = null;
+  }
 }
 
 /** Counts a slot as held from now; the returned function lets it go, once. */

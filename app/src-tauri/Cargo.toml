@@ -127,6 +127,10 @@ windows = { version = "0.62", features = [
   "Win32_Storage_FileSystem",
   # Whether the PC runs on battery, which holds the pass that keeps every photo on this PC.
   "Win32_System_Power",
+  # The app's own CPU time and memory, and its WebView2 processes', for the resource lines
+  # Detailed logging writes (resource_log.rs).
+  "Win32_System_ProcessStatus",
+  "Win32_System_Diagnostics_ToolHelp",
   # The system's SHA-1 (BCrypt), to check a copy in the Explorer folder against the digest
   # its cloud revision records before it is marked in sync or freed.
   "Win32_Security_Cryptography",
@@ -241,6 +245,9 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError", "NSFileManager", "NSURL"] }
 objc2-local-authentication = { version = "=0.3.2", default-features = false, features = ["std", "block2", "LAContext"] }
 block2 = "0.6"
+# getrusage and proc_pidinfo, for the app's own CPU time and memory in the resource lines
+# Detailed logging writes (resource_log.rs). Already in the build through Tauri.
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1

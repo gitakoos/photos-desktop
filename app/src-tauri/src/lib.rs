@@ -49,6 +49,7 @@ mod notices;
 mod local_file;
 mod local_folder;
 mod photo_edit;
+mod resource_log;
 mod secure_store;
 #[cfg(windows)]
 mod sync_location;
@@ -2675,13 +2676,24 @@ fn screen_name_ok(screen: &str) -> bool {
         && screen.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
-/// Which screen the window shows, written into the log as it changes, so a profile run
-/// (tools/pfp_profile.py) can say on its own what the app was doing when it measured.
+/// The log line for the screen the window shows: only with Detailed logging on, and only a screen's name.
+fn screen_line(detailed: bool, screen: &str) -> Option<String> {
+    (detailed && screen_name_ok(screen)).then(|| format!("[screen] {screen}"))
+}
+
+/// Which screen the window shows, written into the log as it changes with Detailed logging
+/// on, so a profile run (tools/pfp_profile.py) can say what the app was doing when it measured.
 #[tauri::command]
 fn screen_note(app: AppHandle, screen: String) {
-    if screen_name_ok(&screen) {
-        note(&app, &format!("[screen] {screen}"));
+    if let Some(line) = screen_line(resource_log::detailed(), &screen) {
+        note(&app, &line);
     }
+}
+
+/// The Detailed logging setting, for what the host itself writes with it on.
+#[tauri::command]
+fn diag_set_detailed(app: AppHandle, on: bool) {
+    resource_log::set_detailed(&app, on);
 }
 
 /// The current start-with-Windows preference, for the Settings toggle.
@@ -3854,6 +3866,7 @@ pub fn run() {
             page_settled,
             log_note,
             screen_note,
+            diag_set_detailed,
             launch_at_login,
             set_launch_at_login,
             hide_tray_popup,
@@ -4207,6 +4220,14 @@ mod gate_tests {
         for bad in ["", "People", "a b", "x/y", "Violeta", long.as_str()] {
             assert!(!screen_name_ok(bad), "{bad:?} was let through");
         }
+    }
+
+    #[test]
+    fn a_screen_is_noted_only_with_detailed_logging_on() {
+        use super::screen_line;
+        assert_eq!(screen_line(true, "people").as_deref(), Some("[screen] people"));
+        assert_eq!(screen_line(false, "people"), None);
+        assert_eq!(screen_line(true, "Violeta"), None);
     }
 
     #[test]

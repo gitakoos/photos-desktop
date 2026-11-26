@@ -23,7 +23,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { request } from "node:http";
 
-import { NOT_STREAMABLE_STATUS, startThumbServer, stopThumbServer, takeServerStats } from "./thumbServer.ts";
+import { NOT_STREAMABLE_STATUS, serverLogTick, startThumbServer, stopThumbServer, takeServerStats } from "./thumbServer.ts";
+import { diag } from "./diag.ts";
 import { NOT_STREAMABLE, videoFromBytes, type VideoSource } from "./videoStream.ts";
 
 const PHOTO = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
@@ -290,6 +291,25 @@ describe("the loopback thumbnail server", () => {
     release();
     await pending;
     await vi.waitFor(() => expect(takeServerStats().open).toBe(0));
+  });
+
+  it("writes its line only with Detailed logging on", async () => {
+    takeServerStats();
+    const base = await startThumbServer(async () => PHOTO);
+    const lines: string[] = [];
+    await get(base + encodeURIComponent(UID));
+    diag.setDetailed(false);
+    serverLogTick((line) => lines.push(line));
+    expect(lines).toEqual([]);
+    await get(base + encodeURIComponent(UID));
+    diag.setDetailed(true);
+    try {
+      serverLogTick((line) => lines.push(line));
+    } finally {
+      diag.setDetailed(false);
+    }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^\[\d{2}:\d{2}:\d{2}\] \[sidecar\] \[thumbs\] open=0 oldest=0 served=1 missing=0 failed=0 dropped=0\n$/);
   });
 
   it("counts an answer the window stopped waiting for as dropped", async () => {

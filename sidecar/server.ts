@@ -47,6 +47,7 @@ import { setHostWriter, takeHostLine } from "./proton/hostCall.ts";
 import { readCompressionSettings, setCompression, sweepCompressionTemp } from "./proton/compression.ts";
 import { scrubSecrets } from "./scrub.ts";
 import { diag, type DiagArea } from "./proton/diag.ts";
+import { resourceLog } from "./proton/resourceLog.ts";
 import { sessionLockHeld } from "./proton/sessionLock.ts";
 import { diagnosticsReport, saveDiagnostics, watchJobs, withoutNames } from "./proton/diagReport.ts";
 import { checkUpdate, downloadUpdate, startUpdateDownload, updateStatus } from "./update.ts";
@@ -471,6 +472,7 @@ const handlers: Record<string, (params: any, signal?: AbortSignal) => Promise<un
   updateStatus: () => updateStatus(),
   diagSetDetailed: (p) => {
     diag.setDetailed(p?.on === true);
+    resourceLog.set(diag.isDetailed());
     return { detailed: diag.isDetailed() };
   },
   diagReport: (p) => diagnosticsReport(Array.isArray(p?.header) ? p.header : []),
