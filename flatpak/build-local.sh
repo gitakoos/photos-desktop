@@ -12,13 +12,22 @@
 # --bundle <file> writes a single-file bundle instead of installing: the file a release
 # ships, which `flatpak install --user <file>` installs on any machine, fetching the
 # runtime from Flathub.
+#
+# --devtools builds a diagnostic copy with WebKit's Web Inspector, opened at start with:
+#   flatpak run --env=PFP_DEVTOOLS=1 eu.akoos.photos
+# Never ship one: build again without the flag to go back.
+#
+# PFP_BUILD_JOBS=<n> caps the Rust compiler's parallel jobs, for a machine that runs out of
+# memory compiling with one job per CPU thread (the build is then killed, exit code 137).
 set -euo pipefail
 
 bundle=""
+devtools=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --bundle) bundle="$(realpath -m "${2:?usage: $0 [--bundle <file.flatpak>]}")"; shift ;;
-    *) echo "usage: $0 [--bundle <file.flatpak>]" >&2; exit 2 ;;
+    --bundle) bundle="$(realpath -m "${2:?usage: $0 [--bundle <file.flatpak>] [--devtools]}")"; shift ;;
+    --devtools) devtools=1 ;;
+    *) echo "usage: $0 [--bundle <file.flatpak>] [--devtools]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -41,6 +50,14 @@ git -C "$root" ls-files -z --cached --others --exclude-standard \
   | tar -C "$root" --null --ignore-failed-read -T - -cf - \
   | tar -C "$src" -xf -
 
+if [ -n "$devtools" ]; then
+  echo "==> Diagnostic build: with the Web Inspector"
+  sed -i 's#--features tauri/custom-protocol#--features tauri/custom-protocol --features devtools#' "$manifest"
+fi
+if [ -n "${PFP_BUILD_JOBS:-}" ]; then
+  echo "==> Rust compiler capped at ${PFP_BUILD_JOBS} parallel jobs"
+  sed -i "s#^    CARGO_NET_OFFLINE: 'true'\$#&\n    CARGO_BUILD_JOBS: '${PFP_BUILD_JOBS}'#" "$manifest"
+fi
 
 echo "==> Fetching the pinned ffmpeg sources"
 # The app's own ffmpeg (ffmpeg/build.sh) is compiled inside the build, which has no network.

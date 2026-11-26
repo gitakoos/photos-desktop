@@ -79,6 +79,16 @@ export function formatLine(at: number, area: DiagArea, event: string, fields: Re
   return [time, area, CODE_WORD.test(event) ? event : "[x]", ...parts].join(" ");
 }
 
+/**
+ * "[HH:MM:SS]" in UTC, as the host stamps its own lines in the same log. For the few lines the
+ * sidecar writes there itself that a profile run lines up with the host's.
+ */
+export function logStamp(at = Date.now()): string {
+  const d = new Date(at);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `[${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}]`;
+}
+
 type Stat = { count: number; failed: number; slow: number; totalMs: number; maxMs: number };
 
 /** A job the watchdog looks at: whether it is working, and a number that grows while it does. */

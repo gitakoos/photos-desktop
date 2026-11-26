@@ -23,6 +23,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "photosforproton"
 path = "src/main.rs"
 
+[features]
+# Opt-in for a diagnostic build only: WebKit's Web Inspector, opened at start when the
+# app is run with PFP_DEVTOOLS=1. `bash flatpak/build-local.sh --devtools` builds with it.
+devtools = ["tauri/devtools"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
