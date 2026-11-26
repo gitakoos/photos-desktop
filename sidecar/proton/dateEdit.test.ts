@@ -30,6 +30,7 @@ import {
   asksForChange,
   canCarryDate,
   claimChangedByStrip,
+  dateEditInfo,
   DateEditor,
   META_READ_MAX_BYTES,
   mergeMeta,
@@ -829,5 +830,73 @@ describe("a lock or a crash while a copy goes up", () => {
     // Moved again in full once unlocked, then the original trashed once.
     expect(f.calls.filter((c) => c.startsWith("carry:"))).toEqual([`carry:${OLD}>${NEW}`, `carry:${OLD}>${NEW}`]);
     expect(f.calls.filter((c) => c === `trash:${OLD}`)).toHaveLength(1);
+  });
+});
+
+describe("dateEditInfo", () => {
+  const node = (uid: string, name: string, ms: number) => ({
+    uid,
+    name: { ok: true, value: name },
+    mediaType: "image/jpeg",
+    photo: { captureTime: new Date(ms), relatedPhotoNodeUids: [] },
+  });
+
+  it("reads a big selection in a few batches, not one node at a time, in the order asked", async () => {
+    const uids = Array.from({ length: 450 }, (_, i) => `vol~${i}`);
+    const batches: number[] = [];
+    let singles = 0;
+    const photos = {
+      iterateNodes: async function* (asked: string[]) {
+        batches.push(asked.length);
+        for (const uid of [...asked].reverse()) yield node(uid, `IMG_${uid}.jpg`, 1_600_000_000_000);
+      },
+      getNode: async () => {
+        singles++;
+        return null;
+      },
+    };
+    const out = await dateEditInfo(photos, uids);
+    expect(batches).toEqual([200, 200, 50]);
+    expect(singles).toBe(0);
+    expect(out.map((i) => i.uid)).toEqual(uids);
+    expect(out[0]).toMatchObject({ name: "IMG_vol~0.jpg", captureMs: 1_600_000_000_000, blocked: null });
+  });
+
+  it("marks a vanished photo unreadable, and reads alone what a failed batch left", async () => {
+    const photos = {
+      iterateNodes: async function* (asked: string[]) {
+        yield { missingUid: asked[0] };
+        yield node(asked[1], "b.jpg", 1);
+        throw new Error("network");
+      },
+      getNode: async (uid: string) => node(uid, "c.jpg", 2),
+    };
+    const out = await dateEditInfo(photos, ["vol~a", "vol~b", "vol~c"]);
+    expect(out.map((i) => [i.uid, i.name, i.blocked])).toEqual([
+      ["vol~a", "", "read"],
+      ["vol~b", "b.jpg", null],
+      ["vol~c", "c.jpg", null],
+    ]);
+  });
+
+  it("lists every photo at once as unread when Drive stops answering, instead of waiting out each batch", async () => {
+    let batches = 0;
+    let singles = 0;
+    const photos = {
+      iterateNodes: async function* () {
+        batches++;
+        await new Promise(() => {});
+      },
+      getNode: async () => {
+        singles++;
+        return null;
+      },
+    };
+    const uids = Array.from({ length: 450 }, (_, i) => `vol~${i}`);
+    const out = await dateEditInfo(photos, uids, 20);
+    expect(batches).toBe(1);
+    expect(singles).toBe(0);
+    expect(out.every((i) => i.blocked === "read")).toBe(true);
+    expect(out.map((i) => i.uid)).toEqual(uids);
   });
 });
