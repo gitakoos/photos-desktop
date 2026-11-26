@@ -3642,11 +3642,22 @@ mod capability_tests {
             "core:window:allow-minimize",
             "core:window:allow-toggle-maximize",
             "core:window:allow-start-dragging",
-            "core:window:allow-start-resize-dragging",
             "core:window:allow-set-title",
         ] {
             assert!(granted.contains(&permission), "{permission} is not granted");
         }
+    }
+
+    /// Windows keeps the system frame, so only Linux and macOS may resize a window from the
+    /// page's own edges, and only the windows that draw them.
+    #[test]
+    fn resizing_from_the_page_edges_is_granted_only_outside_windows() {
+        let edges: serde_json::Value = serde_json::from_str(include_str!("../capabilities/resize-edges.json"))
+            .expect("the resize capability is not valid JSON");
+        assert_eq!(edges["platforms"], serde_json::json!(["linux", "macOS"]));
+        assert_eq!(edges["windows"], serde_json::json!([MAIN_WINDOW, VIEWER_WINDOW]));
+        assert_eq!(edges["permissions"], serde_json::json!(["core:window:allow-start-resize-dragging"]));
+        assert!(!capability()["permissions"].to_string().contains("allow-start-resize-dragging"));
     }
 
     /// The renderer opens four fixed pages in the browser and nothing else, so that is

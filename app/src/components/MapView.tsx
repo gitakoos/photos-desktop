@@ -30,6 +30,7 @@ import { groupByCity, loadCities, type Place } from "../lib/geocoder";
 import citiesUrl from "../assets/geo/cities15000.tsv?url";
 import { foldWord } from "../lib/dateQuery";
 import { smoothZoom } from "../lib/smoothZoom";
+import { isLinux } from "../lib/platform";
 import { ChevronRightIcon, CloseIcon, SearchIcon } from "./icons";
 import "../styles/Map.css";
 
@@ -193,17 +194,13 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
     if (!host.current) return;
     const map = L.map(host.current, {
       zoomControl: false,
-      // New tiles take their place at once rather than cross-fading over the old level (which
-      // still shows, scaled, until they arrive): two levels half-showing at a zoom's end.
-      fadeAnimation: false,
-      // Zooms are drawn a frame at a time instead (see smoothZoom): WebKitGTK showed the
-      // view from before a zoom for a frame as Leaflet's CSS zoom ended.
-      zoomAnimation: false,
+      // WebKitGTK flashes the old view as Leaflet's CSS zoom ends, so Linux zooms a frame at a time (smoothZoom).
+      ...(isLinux ? { fadeAnimation: false, zoomAnimation: false } : {}),
       maxBounds: WORLD,
       maxBoundsViscosity: 1,
       maxZoom: 19,
     }).setView([30, 10], 2);
-    smoothZoom(map);
+    if (isLinux) smoothZoom(map);
     map.attributionControl.setPrefix(false);
     // Bottom right, beside the credit: the top corners belong to the page's title and the
     // places search.
@@ -343,7 +340,7 @@ export function MapView({ points, progress, settled = true, onOpen, title, onOpe
 
   return (
     <div className="map-view">
-      <div ref={host} className="map-canvas" />
+      <div ref={host} className={isLinux ? "map-canvas map-canvas-linux" : "map-canvas"} />
       {title && <div className="map-titlepill">{title}</div>}
       {places.length > 0 && (
         <div className={`map-places${listOpen ? " open" : ""}`}>
