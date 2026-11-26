@@ -43,6 +43,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -128,6 +129,7 @@ let dataKey: Buffer | null = null;
 
 export function initStore(dir: string): void {
   dataDir = dir;
+  coversCount = null;
   mkdirSync(thumbDir(), { recursive: true });
   // A wipe the app quit in the middle of leaves its set-aside folders behind.
   try {
@@ -216,6 +218,7 @@ function originalDir(): string {
  */
 export function wipeCache(): void {
   if (!dataDir) return;
+  coversCount = null;
   try {
     discardDir(thumbDir());
     mkdirSync(thumbDir(), { recursive: true });
@@ -307,6 +310,7 @@ export function setAsideVault(files: string[]): string | null {
     }
   }
   mkdirSync(thumbDir(), { recursive: true });
+  coversCount = null;
   return aside;
 }
 
@@ -479,29 +483,76 @@ export function thumbGet(uid: string, type: number): Buffer | null {
   }
 }
 
-/** A face cover cut before (see faceCover), sealed beside the thumbnails, by its key. */
+/** The face covers kept at most (a few tens of KB each); past it the ones read longest ago go. */
+export const COVERS_KEPT_MAX = 2000;
+
+/** How many covers are on disk, counted once per store and kept up as they are written. */
+let coversCount: number | null = null;
+
+/** Face covers cut before (see faceCover), sealed in a folder of the thumbnails so a wipe takes them. */
+function coverDir(): string {
+  return join(thumbDir(), "covers");
+}
+
 function coverPath(key: string): string {
-  return join(thumbDir(), `${createHash("sha256").update(`cover:${key}`).digest("hex")}.bin`);
+  return join(coverDir(), `${createHash("sha256").update(`cover:${key}`).digest("hex")}.bin`);
 }
 
 export function coverGet(key: string): Buffer | null {
   if (!isReady()) return null;
   const path = coverPath(key);
   if (!existsSync(path)) return null;
+  let cut: Buffer;
   try {
-    return unseal(readFileSync(path));
+    cut = unseal(readFileSync(path));
   } catch {
     return null; // tampered or written under a previous key
   }
+  try {
+    const now = new Date();
+    utimesSync(path, now, now);
+  } catch {
+    /* only orders what a trim drops first */
+  }
+  return cut;
 }
 
-export function coverPut(key: string, data: Buffer): void {
+export function coverPut(key: string, data: Buffer, keepAtMost = COVERS_KEPT_MAX): void {
   if (!isReady()) return;
   try {
-    writeFileSync(coverPath(key), seal(data));
+    const path = coverPath(key);
+    mkdirSync(coverDir(), { recursive: true });
+    const isNew = !existsSync(path);
+    writeFileSync(path, seal(data));
+    coversCount = (coversCount ?? readdirSync(coverDir()).length - (isNew ? 1 : 0)) + (isNew ? 1 : 0);
+    if (coversCount > keepAtMost) trimCovers(path, Math.floor(keepAtMost * 0.9));
   } catch {
     /* best-effort, as the thumbnails */
   }
+}
+
+/** Drops the covers read longest ago down to `keep`, never the one just written. */
+function trimCovers(justWritten: string, keep: number): void {
+  const dir = coverDir();
+  const aged = readdirSync(dir)
+    .map((name) => join(dir, name))
+    .filter((path) => path !== justWritten)
+    .map((path) => {
+      try {
+        return { path, at: statSync(path).mtimeMs };
+      } catch {
+        return null;
+      }
+    })
+    .filter((f): f is { path: string; at: number } => f !== null)
+    .sort((a, b) => a.at - b.at);
+  let count = aged.length + 1;
+  for (const f of aged) {
+    if (count <= keep) break;
+    rmSync(f.path, { force: true });
+    count--;
+  }
+  coversCount = count;
 }
 
 export function thumbPut(uid: string, type: number, data: Buffer): void {

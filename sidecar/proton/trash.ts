@@ -54,6 +54,9 @@ export type TrashResult = NodeOpResult;
 /** An item as kept from an earlier read, with when it was read. */
 type KeptItem = TrashItem & { readAt: number };
 
+/** What was forgotten since each read underway began, so that read does not keep it again. */
+const readsUnderway = new Set<Set<string>>();
+
 /** How long a kept item stands before it is read again: what another device changed shows within it. */
 const TRASH_ITEM_KEPT_MS = 7 * 24 * 3600 * 1000;
 
@@ -76,6 +79,7 @@ function isKeptItem(v: unknown, now: number): v is KeptItem {
  * trashed again, so it is read afresh then.
  */
 export function forgetTrashItems(uids: string[]): void {
+  for (const forgotten of readsUnderway) for (const uid of uids) forgotten.add(uid);
   const kept = trashItemsGet();
   if (!kept) return;
   let changed = false;
@@ -104,6 +108,8 @@ export async function listTrashed(photos: any): Promise<TrashItem[]> {
   // the trash, and one that leaves it is dropped, so one trashed again is read afresh. Only
   // the items new to the trash are decrypted, where every one was at each start.
   const now = Date.now();
+  const forgotten = new Set<string>();
+  readsUnderway.add(forgotten);
   const kept = (trashItemsGet() ?? {}) as Record<string, KeptItem>;
   const present = new Set(uids);
   const known: Record<string, KeptItem> = {};
@@ -135,8 +141,11 @@ export async function listTrashed(photos: any): Promise<TrashItem[]> {
     }
   } finally {
     // Kept as far as it got, so a read cut short does not start from nothing next time.
-    const left = Object.keys(kept).some((uid) => !present.has(uid) || !known[uid]);
-    if (added > 0 || left) trashItemsPut(known);
+    readsUnderway.delete(forgotten);
+    const keep = { ...known };
+    for (const uid of forgotten) delete keep[uid];
+    const left = Object.keys(kept).some((uid) => !present.has(uid) || !keep[uid]);
+    if (added > 0 || left) trashItemsPut(keep);
   }
   const out = uids
     .map((uid): TrashItem | undefined => {

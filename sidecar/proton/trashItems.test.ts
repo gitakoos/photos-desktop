@@ -27,7 +27,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { initStore, setDataKey, wipeCache } from "./store.ts";
-import { listTrashed, restorePhotos } from "./trash.ts";
+import { forgetTrashItems, listTrashed, restorePhotos } from "./trash.ts";
 
 beforeEach(() => {
   initStore(mkdtempSync(join(tmpdir(), "pfp-trash-")));
@@ -89,6 +89,31 @@ describe("reading the trash", () => {
     await listTrashed(photos);
     expect(d.asked.filter((u) => u === "a1")).toHaveLength(2);
     expect(d.asked.filter((u) => u === "a2")).toHaveLength(1);
+  });
+
+  it("does not keep again an item forgotten while a read was underway", async () => {
+    const asked: string[] = [];
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const photos = {
+      async *iterateTrashedNodeUids() {
+        yield* ["a1", "a2"];
+      },
+      async *iterateNodes(list: string[]) {
+        for (const uid of list) {
+          asked.push(uid);
+          if (uid === "a2") await held;
+          yield { uid, name: { ok: true, value: `${uid}.jpg` }, type: "photo", mediaType: "image/jpeg", photo: { captureTime: new Date(1_700_000_000_000), tags: [] } };
+        }
+      },
+    };
+    const reading = listTrashed(photos);
+    await new Promise((r) => setTimeout(r, 0));
+    forgetTrashItems(["a1"]);
+    release();
+    expect((await reading).map((t) => t.uid).sort()).toEqual(["a1", "a2"]);
+    await listTrashed(photos);
+    expect(asked).toEqual(["a1", "a2", "a1"]);
   });
 
   it("does not keep an item whose name would not decrypt", async () => {

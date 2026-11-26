@@ -109,13 +109,34 @@ describe("face covers kept between runs", () => {
 
     expect(coverGet("vol~a|0.1,0.2,0.3,0.4|128")?.equals(cut)).toBe(true);
     expect(coverGet("vol~a|0.1,0.2,0.3,0.4|192")).toBeNull();
-    const files = readdirSync(join(dir, "thumbs"));
+    const files = readdirSync(join(dir, "thumbs", "covers"));
     expect(files).toHaveLength(1);
-    expect(readFileSync(join(dir, "thumbs", files[0])).subarray(0, 4).equals(JPEG_MAGIC)).toBe(false);
+    expect(readFileSync(join(dir, "thumbs", "covers", files[0])).subarray(0, 4).equals(JPEG_MAGIC)).toBe(false);
     expect(files[0]).not.toContain("vol");
 
     wipeCache();
     expect(coverGet("vol~a|0.1,0.2,0.3,0.4|128")).toBeNull();
+  });
+
+  it("keep at most the cap, dropping older ones and never the one just cut", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pfp-store-test-"));
+    initStore(dir);
+    const cut = Buffer.concat([JPEG_MAGIC, Buffer.from("a face")]);
+
+    for (const key of ["k1", "k2", "k3", "k4"]) coverPut(key, cut, 3);
+
+    expect(readdirSync(join(dir, "thumbs", "covers"))).toHaveLength(2);
+    expect(coverGet("k4")?.equals(cut)).toBe(true);
+  });
+
+  it("count a cover written again under its key once", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pfp-store-test-"));
+    initStore(dir);
+    const cut = Buffer.concat([JPEG_MAGIC, Buffer.from("a face")]);
+
+    for (const key of ["k1", "k2", "k2", "k2", "k3"]) coverPut(key, cut, 3);
+
+    expect(readdirSync(join(dir, "thumbs", "covers"))).toHaveLength(3);
   });
 });
 

@@ -149,9 +149,6 @@ function whenNear(el: Element, onNear: () => void): () => void {
   return () => stop(el);
 }
 
-/** How long a face's cut may take before the grid thumbnail stands in for it. */
-const STAND_IN_AFTER_MS = 350;
-
 /** A person's cover cut to their face: a square FACE_ZOOM_OUT times the face. */
 export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box: FaceBox | null }) {
   // A face is a small part of its photo, so the grid thumbnail blurs when cut down to it.
@@ -178,16 +175,9 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
   const [cutShown, setCutShown] = useState<string | null>(null);
   const usable = near && cut && cutFailed !== cut ? cut : null;
   const ready = !!usable && cutShown === usable;
-  // The stand-in (the grid thumbnail cut to the face in the window) only for a cut that is
-  // slow to come, or that cannot be had: one kept from before arrives at once.
-  const [late, setLate] = useState<string | null>(null);
-  useEffect(() => {
-    if (!usable || ready) return;
-    const timer = setTimeout(() => setLate(usable), STAND_IN_AFTER_MS);
-    return () => clearTimeout(timer);
-  }, [usable, ready]);
-  const noCut = !box || base === null || (!!cut && cutFailed === cut);
-  const standIn = near && (noCut || (!ready && late === usable));
+  // The grid thumbnail, cut to the face in the window, stands in until the sharp cut is in,
+  // so a circle is never blank; it loads lazily, so a circle far off costs nothing.
+  const standIn = !ready;
   // The same three places every time, so nothing under the cut is remounted as it arrives.
   return (
     <>
@@ -211,7 +201,7 @@ export function FaceCover({ uid, thumb, box }: { uid: string; thumb: string; box
 /**
  * The grid thumbnail cut to the face in the window: the picture is scaled and moved so the
  * square the thumbnail server would cut (faceSquare) fills its square frame. For when the
- * thumbnail server cannot cut it, or its cut is slow to come. Until the picture's own shape is known it
+ * thumbnail server cannot cut it, and until its cut is in. Until the picture's own shape is known it
  * is hidden, as the whole picture would show some other part of it.
  */
 function ThumbFaceCover({ thumb, box }: { thumb: string; box: FaceBox | null }) {
