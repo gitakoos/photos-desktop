@@ -259,6 +259,7 @@ export const de: Record<string, string> = {
   "metaEdit.read": "Konnte nicht gelesen werden",
   "metaEdit.detailDescription": "Beschreibung",
   "dateEdit.busy": "Dieses Foto wird noch geändert. Versuche es erneut, wenn das abgeschlossen ist.",
+  "dateEdit.paused": "Drive hat nicht mehr geantwortet, daher wurden die Änderungen angehalten. Noch offen: {photos}. Sie werden mit der nächsten Änderung oder der nächsten Anmeldung fortgesetzt.",
   "compress.confirmTitle": "Auf Drive komprimieren",
   "compress.confirmMessage": "{count} Fotos und Videos werden durch leichtere Kopien ersetzt, mit den Stufen unter Upload-Qualität. Jede Kopie behält Datum, Ort, Alben, Labels und Gesichter, und nur eine mindestens ein Zehntel kleinere ersetzt ihr Original, das in den Drive-Papierkorb kommt. Live Photos, Serienaufnahmen, Panoramen, RAW-Dateien und ausgeblendete Fotos bleiben, wie sie sind.",
   "compress.confirm": "Komprimieren ({count})",

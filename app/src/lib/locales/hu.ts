@@ -259,6 +259,7 @@ export const hu: Record<string, string> = {
   "metaEdit.read": "Nem sikerült beolvasni",
   "metaEdit.detailDescription": "Leírás",
   "dateEdit.busy": "Ez a fotó még módosítás alatt áll. Próbáld újra, ha elkészült.",
+  "dateEdit.paused": "A Drive nem válaszolt, ezért a módosítás szünetel. Még hátravan: {photos}. A következő módosítással vagy a következő bejelentkezéskor folytatódik.",
   "compress.confirmTitle": "Tömörítés a Drive-on",
   "compress.confirmMessage": "{count} fotó és videó helyére egy kisebb másolat kerül, a Feltöltési minőség alatt beállított szinten. Minden másolat megtartja a dátumát, helyét, albumait, címkéit és arcait, és csak a legalább tizedével kisebb másolat váltja le az eredetit, amely a Drive kukájába kerül. A Live Photók, sorozatfelvételek, panorámák, RAW fájlok és rejtett fotók változatlanok maradnak.",
   "compress.confirm": "Tömörítés ({count})",

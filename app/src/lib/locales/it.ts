@@ -260,6 +260,7 @@ export const it: Record<string, string> = {
   "metaEdit.read": "Impossibile leggere",
   "metaEdit.detailDescription": "Descrizione",
   "dateEdit.busy": "Questa foto è ancora in fase di modifica. Riprova quando ha finito.",
+  "dateEdit.paused": "Drive ha smesso di rispondere, quindi le modifiche sono in pausa. Ancora da fare: {photos}. Riprenderanno con la prossima modifica o il prossimo accesso.",
   "compress.confirmTitle": "Comprimi su Drive",
   "compress.confirmMessage": "{count} foto e video vengono sostituiti da copie più leggere, ai livelli impostati in Qualità di caricamento. Ogni copia mantiene data, luogo, album, etichette e volti, e solo una almeno un decimo più piccola sostituisce l'originale, che va nel cestino di Drive. Live Photo, raffiche, panoramiche, file RAW e foto nascoste restano come sono.",
   "compress.confirm": "Comprimi ({count})",

@@ -22,7 +22,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-import { addCopyToAlbum, cameraOf, editedName, joinSourceAlbum, locationOf, savedEditName } from "./editor.ts";
+import { addCopyToAlbum, cameraOf, downloadToBuffer, editedName, joinSourceAlbum, locationOf, savedEditName } from "./editor.ts";
+import { isStall } from "./stallGuard.ts";
 
 describe("editedName", () => {
   const when = new Date(2026, 8, 5, 14, 3, 9); // 2026-09-05 14:03:09 local
@@ -150,5 +151,56 @@ describe("joinSourceAlbum", () => {
       size: 10,
       albumFailed: true,
     });
+  });
+});
+
+describe("a download under a time limit", () => {
+  /** A client whose one slot is held, so a downloader waits for it until its signal fires; `free` lets it through. */
+  function heldSlot() {
+    const state = { asked: 0, released: 0, free: () => {} };
+    const client = {
+      getFileDownloader(_uid: string, signal: AbortSignal) {
+        state.asked++;
+        return new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("AbortError")), { once: true });
+          state.free = () =>
+            resolve({
+              downloadToStream: () => ({
+                completion: async () => {
+                  state.released++;
+                  if (signal.aborted) throw new Error("AbortError");
+                },
+              }),
+            });
+        });
+      },
+    };
+    return { client, state };
+  }
+
+  it("gives up on the wait for a download slot", async () => {
+    const { client } = heldSlot();
+    const err = await downloadToBuffer(client, "vol~a", 20).catch((e) => e);
+    expect(isStall(err)).toBe(true);
+  });
+
+  it("hands back a slot that comes after the wait was given up on", async () => {
+    const { client, state } = heldSlot();
+    client.getFileDownloader = (_uid: string, _signal: AbortSignal) => {
+      state.asked++;
+      return new Promise((resolve) => {
+        state.free = () =>
+          resolve({
+            downloadToStream: () => ({
+              completion: async () => {
+                state.released++;
+              },
+            }),
+          });
+      });
+    };
+    await expect(downloadToBuffer(client, "vol~a", 20)).rejects.toSatisfy(isStall);
+    state.free();
+    await vi.waitFor(() => expect(state.released).toBe(1));
   });
 });

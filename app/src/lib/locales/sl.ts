@@ -261,6 +261,7 @@ export const sl: Record<string, string> = {
   "metaEdit.read": "Branje ni uspelo",
   "metaEdit.detailDescription": "Opis",
   "dateEdit.busy": "Ta fotografija se še spreminja. Poskusi znova, ko bo končano.",
+  "dateEdit.paused": "Drive se ni več odzival, zato so se spremembe ustavile. Še ostane: {photos}. Nadaljevale se bodo ob naslednji spremembi ali naslednji prijavi.",
   "compress.confirmTitle": "Stisni na Drive",
   "compress.confirmMessage": "{count} fotografij in videov se zamenja z lažjimi kopijami, na ravneh, nastavljenih pod Kakovost nalaganja. Vsaka kopija obdrži datum, kraj, albume, oznake in obraze, izvirnik pa zamenja le kopija, ki je vsaj za desetino manjša; izvirnik gre v koš na Drive. Live Photos, zaporedni posnetki, panorame, datoteke RAW in skrite fotografije ostanejo nespremenjeni.",
   "compress.confirm": "Stisni ({count})",

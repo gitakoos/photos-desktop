@@ -104,7 +104,7 @@ export type Replacement = {
 type QueueEntry = Omit<DateEditItem, "meta"> & Replacement & { meta?: MetaChange[] };
 
 /** Why a photo was not taken in, for the window to word: `busy` is one already being replaced. */
-export type DateEditErrorCode = "busy";
+export type DateEditErrorCode = "busy" | "paused";
 
 export type DateEditStatus = {
   running: boolean;
@@ -114,7 +114,8 @@ export type DateEditStatus = {
   unchanged: number;
   failed: number;
   /** The photos that could not be changed and why, newest last. */
-  errors: { uid: string; error: string; code?: DateEditErrorCode }[];
+  /** `left`: with `paused`, the photos kept to carry on. */
+  errors: { uid: string; error: string; code?: DateEditErrorCode; left?: number }[];
   cancelled: boolean;
 };
 
@@ -154,12 +155,12 @@ const MUTATION_STALLS = 3;
  * The SDK reports an upload's progress only as each 4 MiB block finishes, several at a time, and none
  * for the commit after the last block, so an upload gets ten stall times: as long as the SDK gives a block.
  */
-const UPLOAD_STALLS = 10;
+export const UPLOAD_STALLS = 10;
 
 /** Steps given up on one after another before a run pauses, keeping the rest of its queue on disk. */
 const STALLS_BEFORE_PAUSE = 3;
 
-const stallOf = (deps: DateEditDeps) => deps.stallMs ?? SDK_STALL_MS;
+export const stallOf = (deps: DateEditDeps) => deps.stallMs ?? SDK_STALL_MS;
 
 /** A one-photo album add, trash or carry, given up on after a few stall times. */
 function mutation<T>(deps: DateEditDeps, what: string, work: () => Promise<T>): Promise<T> {
@@ -540,13 +541,7 @@ const unread = (uid: string): DateEditInfo => ({ uid, name: "", captureMs: 0, na
 
 /**
  * What the editor shows of each photo: its name, date, the date its name records, and whether it can change.
- *
- * Read a few hundred nodes at a time through `iterateNodes`, as the map and the downloads do. One
- * `getNode` after another took minutes over a Fix dates selection of a couple of thousand photos, and one
- * that never answered held the panel on "Reading the photos" for good. A batch that fails leaves only
- * its unread photos to `getNode`, each under the same stall guard. Once anything stalls the SDK is not
- * answering, and every photo not read yet is shown as one that could not be read: waiting out each
- * batch in turn would outlast the host's wait for the answer.
+ * Read INFO_BATCH at a time; a failed batch's photos are read alone, and after a stall the rest show as unread.
  */
 export async function dateEditInfo(photos: any, uids: string[], stallMs = SDK_STALL_MS): Promise<DateEditInfo[]> {
   const found = new Map<string, DateEditInfo>();
@@ -1031,6 +1026,8 @@ export class DateEditor {
     this.status.errors.push({
       uid: "paused",
       error: `Drive stopped answering, so the run paused; the ${left} photos left are kept and carry on with the next change or sign-in`,
+      code: "paused",
+      left,
     });
     process.stderr.write(`[dateedit] paused after ${STALLS_BEFORE_PAUSE} stalls in a row, ${left} left\n`);
   }

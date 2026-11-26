@@ -970,6 +970,7 @@ describe("a step that never answers", () => {
     expect(status.running).toBe(false);
     expect(status.failed).toBe(3);
     expect(status.errors.at(-1)?.error).toMatch(/7 photos left/);
+    expect(status.errors.at(-1)).toMatchObject({ code: "paused", left: 7 });
     expect(saved.map((q) => q.uid)).toEqual(Array.from({ length: 7 }, (_, i) => `vol~${i + 3}`));
 
     // The next change asked for carries them on.

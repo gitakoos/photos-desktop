@@ -130,9 +130,8 @@ export function savedEditName(meta: Pick<CloudEditMeta, "name" | "fileStem">, wh
 
 /** Download one node's decrypted original into a Buffer. */
 export async function downloadToBuffer(photos: any, uid: string, idleMs?: number): Promise<Buffer> {
-  const { downloader, stop } = await openDownloader(photos, uid);
-  const chunks: Uint8Array[] = [];
-  const read = async (touch: () => void) => {
+  const read = async (downloader: any, touch: () => void) => {
+    const chunks: Uint8Array[] = [];
     const stream = new WritableStream<Uint8Array>({
       write(chunk) {
         chunks.push(chunk);
@@ -142,8 +141,29 @@ export async function downloadToBuffer(photos: any, uid: string, idleMs?: number
     await downloader.downloadToStream(stream as any, touch).completion();
     return Buffer.concat(chunks);
   };
-  // With `idleMs`, given up on (and the download stopped) once no bytes arrive for that long.
-  return idleMs ? untilIdle("download", idleMs, read, stop) : read(() => {});
+  if (!idleMs) return read((await openDownloader(photos, uid)).downloader, () => {});
+  // Given up on, and stopped, once the wait for a slot or for the next bytes runs past `idleMs`.
+  const giveUp = new AbortController();
+  let stop: (() => void) | null = null;
+  return untilIdle(
+    "download",
+    idleMs,
+    async (touch) => {
+      const opened = await openDownloader(photos, uid, giveUp.signal);
+      // A slot that came after the wait was given up on is handed straight back.
+      if (giveUp.signal.aborted) {
+        opened.unused();
+        throw new Error("download given up");
+      }
+      stop = opened.stop;
+      touch();
+      return read(opened.downloader, touch);
+    },
+    () => {
+      giveUp.abort();
+      stop?.();
+    },
+  );
 }
 
 /**

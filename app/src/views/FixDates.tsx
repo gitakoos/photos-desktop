@@ -25,6 +25,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useThumbnails } from "../hooks/useThumbnails";
 import { dateProblem, type DateProblem } from "../lib/fixDates";
 import { useLang, useT } from "../lib/i18n";
+import { NameReader } from "../lib/nameReader";
 import { rpc } from "../lib/rpc";
 import "../styles/FixDates.css";
 
@@ -85,45 +86,23 @@ export function FixDates({
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [shownCount, setShownCount] = useState(PAGE);
 
-  // The names come from the sidecar's encrypted cache, so only a first visit decrypts them. While the
-  // timeline is still arriving, `items` grows every couple of seconds: the photos new to it join the
-  // one reading under way, rather than each growth starting the reading over from the top.
-  const waiting = useRef<string[]>([]);
-  const asked = useRef(new Set<string>());
-  // Asked once and not answered: counted as read for this visit, so the page does not wait on them.
-  const unanswered = useRef(new Set<string>());
-  const draining = useRef(false);
-  const alive = useRef(true);
+  // The names come from the sidecar's encrypted cache; photos the growing timeline adds join the reading under way.
+  const reader = useRef<NameReader | null>(null);
   useEffect(() => {
-    alive.current = true;
-    return () => {
-      alive.current = false;
-    };
+    const made = new NameReader(
+      names,
+      (uids) => rpc<{ uid: string; name: string }[]>("getMetadata", { uids }),
+      () => setArrived((n) => n + 1),
+      META_BATCH,
+    );
+    reader.current = made;
+    return () => made.stop();
   }, []);
   useEffect(() => {
-    for (const it of items) {
-      if (names.has(it.uid) || asked.current.has(it.uid)) continue;
-      asked.current.add(it.uid);
-      waiting.current.push(it.uid);
-    }
-    if (draining.current || waiting.current.length === 0) return;
-    draining.current = true;
-    void (async () => {
-      try {
-        while (alive.current && waiting.current.length > 0) {
-          const uids = waiting.current.splice(0, META_BATCH);
-          const rows = await rpc<{ uid: string; name: string }[]>("getMetadata", { uids }).catch(() => null);
-          if (rows) for (const r of rows) names.set(r.uid, r.name);
-          for (const uid of uids) if (!names.has(uid)) unanswered.current.add(uid);
-          if (alive.current) setArrived((n) => n + 1);
-        }
-      } finally {
-        draining.current = false;
-      }
-    })();
+    reader.current?.add(items.map((it) => it.uid));
   }, [items]);
   const read = useMemo(
-    () => items.reduce((n, it) => (names.has(it.uid) || unanswered.current.has(it.uid) ? n + 1 : n), 0),
+    () => items.reduce((n, it) => ((reader.current?.isRead(it.uid) ?? names.has(it.uid)) ? n + 1 : n), 0),
     // `arrived` stands for the names that have come in.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [items, arrived],

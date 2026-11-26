@@ -259,6 +259,7 @@ export const nl: Record<string, string> = {
   "metaEdit.read": "Kon niet worden gelezen",
   "metaEdit.detailDescription": "Beschrijving",
   "dateEdit.busy": "Deze foto wordt nog gewijzigd. Probeer het opnieuw als dat klaar is.",
+  "dateEdit.paused": "Drive reageerde niet meer, dus de wijzigingen zijn gepauzeerd. Nog te doen: {photos}. Ze gaan verder bij de volgende wijziging of de volgende keer inloggen.",
   "compress.confirmTitle": "Comprimeren op Drive",
   "compress.confirmMessage": "{count} foto's en video's worden vervangen door lichtere kopieën, op de niveaus onder Uploadkwaliteit. Elke kopie houdt zijn datum, plaats, albums, labels en gezichten, en alleen een kopie die minstens een tiende kleiner is vervangt het origineel, dat naar de prullenbak van Drive gaat. Live Photos, bursts, panorama's, RAW-bestanden en verborgen foto's blijven zoals ze zijn.",
   "compress.confirm": "Comprimeren ({count})",

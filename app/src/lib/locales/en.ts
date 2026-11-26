@@ -261,6 +261,7 @@ export const en: Record<string, string> = {
   "metaEdit.read": "Could not be read",
   "metaEdit.detailDescription": "Description",
   "dateEdit.busy": "This photo is still being changed. Try again when it is done.",
+  "dateEdit.paused": "Drive stopped answering, so the changes paused. Still to do: {photos}. They carry on with the next change or the next sign-in.",
   "compress.confirmTitle": "Compress on Drive",
   "compress.confirmMessage": "{count} photos and videos are replaced by lighter copies, at the levels set under Upload quality. Each copy keeps its date, place, albums, labels and faces, and only one at least a tenth smaller replaces its original, which goes to the Drive trash. Live Photos, bursts, panoramas, RAW files and hidden photos stay as they are.",
   "compress.confirm": "Compress ({count})",

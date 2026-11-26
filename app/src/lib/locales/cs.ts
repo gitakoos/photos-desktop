@@ -261,6 +261,7 @@ export const cs: Record<string, string> = {
   "metaEdit.read": "Nepodařilo se načíst",
   "metaEdit.detailDescription": "Popis",
   "dateEdit.busy": "Tato fotka se ještě mění. Zkus to znovu, až to bude hotové.",
+  "dateEdit.paused": "Drive přestal odpovídat, takže se změny pozastavily. Zbývá: {photos}. Budou pokračovat s další změnou nebo při dalším přihlášení.",
   "compress.confirmTitle": "Zmenšit na Drive",
   "compress.confirmMessage": "{count} fotek a videí se nahradí menšími kopiemi, v úrovni nastavené v Kvalitě nahrávání. Každá kopie si ponechá datum, místo, alba, štítky a tváře a originál nahradí jen kopie aspoň o desetinu menší; originál jde do koše na Drive. Live Photos, sériové snímky, panoramata, soubory RAW a skryté fotky zůstanou beze změny.",
   "compress.confirm": "Zmenšit ({count})",

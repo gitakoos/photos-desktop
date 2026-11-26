@@ -42,12 +42,20 @@ export type DateEditStatus = {
   cancelled: boolean;
 };
 
-/** A photo that was not changed: the sidecar's reason, and a code for one the window words itself. */
-export type DateEditError = { uid: string; error: string; code?: "busy" };
+/**
+ * A photo that was not changed: the sidecar's reason, and a code for one the window words itself.
+ * `paused` is the run stopped for want of answers from Drive, with the photos `left` to carry on.
+ */
+export type DateEditError = { uid: string; error: string; code?: "busy" | "paused"; left?: number };
 
 /** What the panels show for an error: the window's own words for a known code, else the sidecar's. */
-export function errorText(e: DateEditError, t: (key: string) => string): string {
-  return e.code === "busy" ? t("dateEdit.busy") : e.error;
+export function errorText(e: DateEditError, t: (key: string, vars?: Record<string, string | number>) => string): string {
+  if (e.code === "busy") return t("dateEdit.busy");
+  if (e.code === "paused") {
+    const left = e.left ?? 0;
+    return t("dateEdit.paused", { photos: t(left === 1 ? "common.photoCount.one" : "common.photoCount.other", { count: left }) });
+  }
+  return e.error;
 }
 
 /** One date for all, the same shift for each, or the date each file name records. */

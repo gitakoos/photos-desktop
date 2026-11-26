@@ -69,9 +69,19 @@ describe("the date a photo gets in the date editor", () => {
 });
 
 describe("errorText", () => {
+  const t = (key: string, vars?: Record<string, string | number>) => `[${key}${vars ? ` ${JSON.stringify(vars)}` : ""}]`;
+
   it("words a photo still being changed in the window's language, and shows other reasons as given", () => {
-    const t = (key: string) => `[${key}]`;
     expect(errorText({ uid: "a", error: "This photo is still being changed.", code: "busy" }, t)).toBe("[dateEdit.busy]");
     expect(errorText({ uid: "a", error: "The original could not be moved to the trash" }, t)).toBe("The original could not be moved to the trash");
+  });
+
+  it("words a paused run with the count of photos left, in the window's language", () => {
+    expect(errorText({ uid: "paused", error: "Drive stopped answering", code: "paused", left: 7 }, t)).toBe(
+      '[dateEdit.paused {"photos":"[common.photoCount.other {\\"count\\":7}]"}]',
+    );
+    expect(errorText({ uid: "paused", error: "Drive stopped answering", code: "paused", left: 1 }, t)).toBe(
+      '[dateEdit.paused {"photos":"[common.photoCount.one {\\"count\\":1}]"}]',
+    );
   });
 });

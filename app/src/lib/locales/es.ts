@@ -260,6 +260,7 @@ export const es: Record<string, string> = {
   "metaEdit.read": "No se pudo leer",
   "metaEdit.detailDescription": "Descripción",
   "dateEdit.busy": "Esta foto todavía se está cambiando. Vuelve a intentarlo cuando termine.",
+  "dateEdit.paused": "Drive dejó de responder, así que los cambios se pausaron. Pendientes: {photos}. Continuarán con el próximo cambio o el próximo inicio de sesión.",
   "compress.confirmTitle": "Comprimir en Drive",
   "compress.confirmMessage": "{count} fotos y vídeos se sustituyen por copias más ligeras, con los niveles de Calidad de subida. Cada copia conserva su fecha, lugar, álbumes, etiquetas y caras, y solo una al menos una décima más pequeña sustituye al original, que va a la papelera de Drive. Las Live Photos, ráfagas, panorámicas, archivos RAW y fotos ocultas se quedan como están.",
   "compress.confirm": "Comprimir ({count})",

@@ -342,3 +342,29 @@ describe("Compress on Drive and a lock while a copy goes up", () => {
     expect(disk.items).toEqual([]);
   });
 });
+
+describe("Compress on Drive and a step that never answers", () => {
+  const never = () => new Promise<never>(() => {});
+
+  it("gives up on a download that stops sending, uploading nothing", async () => {
+    const { deps, calls } = fake();
+    (deps.photos as any).getFileDownloader = async () => ({ downloadToStream: () => ({ completion: never }) });
+    const entry: any = { uid: OLD, stage: "queued" };
+    await expect(run({ ...deps, stallMs: 20 }, entry)).rejects.toThrow(/download produced nothing/);
+    expect(calls).not.toContain("upload");
+    expect(entry.sent).toBeUndefined();
+  });
+
+  it("gives up on an upload that sends nothing, stops it, and keeps what the next try looks for", async () => {
+    const { deps } = fake();
+    let signal: AbortSignal | undefined;
+    (deps.photos as any).getFileUploader = async (_n: string, _m: any, s: AbortSignal) => {
+      signal = s;
+      return { uploadFromStream: async () => ({ completion: never }) };
+    };
+    const entry: any = { uid: OLD, stage: "queued" };
+    await expect(run({ ...deps, stallMs: 5 }, entry)).rejects.toThrow(/upload produced nothing/);
+    expect(signal?.aborted).toBe(true);
+    expect(entry.sent).toBeDefined();
+  });
+});

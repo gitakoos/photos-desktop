@@ -64,7 +64,9 @@ import {
   pickUpSentCopy,
   recordSent,
   replacing,
+  stallOf,
   storedThumbnails,
+  UPLOAD_STALLS,
   withHeldProgress,
   type DateEditDeps,
   type Replacement,
@@ -73,6 +75,7 @@ import {
 import { activeRevisionOf, nodeName, toMillis } from "./nodes.ts";
 import { readSealedOrSetAside, storeDir, writeSealedAtomic } from "./store.ts";
 import { openDownloader } from "./downloadSlots.ts";
+import { untilIdle } from "./stallGuard.ts";
 
 /** Proton's photo tags a copy would lose the meaning of: motion photo, selfie-burst, burst, panorama, RAW. */
 export const KEPT_TAGS = new Set([3, 4, 7, 8, 9]);
@@ -138,27 +141,48 @@ export function scaledClaim(claimed: any, scale: number): Record<string, unknown
   return base;
 }
 
-async function downloadToFile(photos: any, uid: string, path: string, signal: AbortSignal): Promise<number> {
-  const { downloader, unused } = await openDownloader(photos, uid, signal);
-  const file = await open(path, "w").catch((e) => {
-    unused();
-    throw e;
-  });
-  let size = 0;
-  try {
-    // The SDK reports the end through `completion()` and need not close the stream it was given,
-    // so the file is written chunk by chunk here and closed once that resolves.
-    const stream = new WritableStream<Uint8Array>({
-      async write(chunk) {
-        await file.write(chunk);
-        size += chunk.byteLength;
-      },
-    });
-    await downloader.downloadToStream(stream as any).completion();
-  } finally {
-    await file.close();
-  }
-  return size;
+/** Given up on, and stopped, once the wait for a slot or for the next bytes runs past `idleMs`. */
+async function downloadToFile(photos: any, uid: string, path: string, signal: AbortSignal, idleMs: number): Promise<number> {
+  const giveUp = new AbortController();
+  let stop: (() => void) | null = null;
+  return untilIdle(
+    "download",
+    idleMs,
+    async (touch) => {
+      const { downloader, unused, stop: stopIt } = await openDownloader(photos, uid, AbortSignal.any([signal, giveUp.signal]));
+      // A slot that came after the wait was given up on is handed straight back.
+      if (giveUp.signal.aborted) {
+        unused();
+        throw new Error("download given up");
+      }
+      stop = stopIt;
+      touch();
+      const file = await open(path, "w").catch((e) => {
+        unused();
+        throw e;
+      });
+      let size = 0;
+      try {
+        // The SDK reports the end through `completion()` and need not close the stream it was given,
+        // so the file is written chunk by chunk here and closed once that resolves.
+        const stream = new WritableStream<Uint8Array>({
+          async write(chunk) {
+            await file.write(chunk);
+            size += chunk.byteLength;
+            touch();
+          },
+        });
+        await downloader.downloadToStream(stream as any, touch).completion();
+      } finally {
+        await file.close();
+      }
+      return size;
+    },
+    () => {
+      giveUp.abort();
+      stop?.();
+    },
+  );
 }
 
 async function sha1Of(path: string): Promise<string> {
@@ -179,9 +203,10 @@ export async function compressOne(
   onProgress: (value: number) => void,
 ): Promise<"compressed" | "kept"> {
   const { photos } = deps;
-  await pickUpSentCopy(photos, e, save);
+  const idleMs = stallOf(deps);
+  await pickUpSentCopy(photos, e, save, idleMs);
   if (e.stage === "queued") {
-    const node = await liveOriginal(photos, e);
+    const node = await liveOriginal(photos, e, idleMs);
     if (keptBecause(node, deps.isHidden(e.uid))) return "kept";
     const name = nodeName(node);
     const mediaType = String(node?.mediaType ?? "").toLowerCase().split(";")[0].trim();
@@ -198,7 +223,7 @@ export async function compressOne(
     holdTemp(original);
     let copy: PreparedCopy | null = null;
     try {
-      const sourceSize = await downloadToFile(photos, e.uid, original, signal);
+      const sourceSize = await downloadToFile(photos, e.uid, original, signal, idleMs);
       copy = await compressExisting(original, mediaType, new Date(captureMs > 0 ? captureMs : Date.now()), signal, onProgress);
       // The decrypted original is not needed once its copy is made: it goes before the upload.
       await rm(original, { force: true }).catch(() => {});
@@ -217,24 +242,33 @@ export async function compressOne(
         expectMs: captureMs,
         saved: sourceSize - copy.size,
       };
+      const thumbnails = await storedThumbnails(photos, e.uid);
       e.sent = sent;
       save();
-      const uploader = await photos.getFileUploader(
-        sendName,
-        {
-          mediaType: copy.mediaType,
-          expectedSize: copy.size,
-          expectedSha1: sent.sha1,
-          ...(modified > 0 ? { modificationTime: new Date(modified) } : {}),
-          ...(captureMs > 0 ? { captureTime: new Date(captureMs) } : {}),
-          tags,
-          additionalMetadata: scaledClaim(revision?.claimedAdditionalMetadata, copy.scale),
-        },
-        new AbortController().signal,
+      // As the date run's upload: stopped when it shows no progress, `sent` saved first so a late commit is found.
+      const stopUpload = new AbortController();
+      const meta = {
+        mediaType: copy.mediaType,
+        expectedSize: copy.size,
+        expectedSha1: sent.sha1,
+        ...(modified > 0 ? { modificationTime: new Date(modified) } : {}),
+        ...(captureMs > 0 ? { captureTime: new Date(captureMs) } : {}),
+        tags,
+        additionalMetadata: scaledClaim(revision?.claimedAdditionalMetadata, copy.scale),
+      };
+      const uploader: any = await untilIdle(
+        "getFileUploader",
+        idleMs,
+        () => photos.getFileUploader(sendName, meta, stopUpload.signal),
+        () => stopUpload.abort(),
       );
-      const stream = Readable.toWeb(createReadStream(copy.path)) as any;
-      const controller = await uploader.uploadFromStream(stream, await storedThumbnails(photos, e.uid));
-      const { nodeUid } = await controller.completion();
+      const path = copy.path;
+      const { nodeUid } = await untilIdle(
+        "upload",
+        idleMs * UPLOAD_STALLS,
+        async (touch) => (await uploader.uploadFromStream(Readable.toWeb(createReadStream(path)) as any, thumbnails, touch)).completion(),
+        () => stopUpload.abort(),
+      );
       if (!nodeUid || nodeUid === e.uid) throw new Error("Drive did not keep a new copy");
       recordSent(e, nodeUid, sent);
       save();
