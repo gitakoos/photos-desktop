@@ -43,6 +43,7 @@ import sharp from "sharp";
 import { activeRevisionOf, toMillis } from "./nodes.ts";
 import { mediaAttributes, thumbnailPair } from "./upload.ts";
 import { openDownloader } from "./downloadSlots.ts";
+import { untilIdle } from "./stallGuard.ts";
 
 /** The longest edge the editor works at, matching the local-file editor's working cap. */
 const EDIT_MAX_EDGE = 4096;
@@ -128,16 +129,21 @@ export function savedEditName(meta: Pick<CloudEditMeta, "name" | "fileStem">, wh
 }
 
 /** Download one node's decrypted original into a Buffer. */
-export async function downloadToBuffer(photos: any, uid: string): Promise<Buffer> {
-  const { downloader } = await openDownloader(photos, uid);
+export async function downloadToBuffer(photos: any, uid: string, idleMs?: number): Promise<Buffer> {
+  const { downloader, stop } = await openDownloader(photos, uid);
   const chunks: Uint8Array[] = [];
-  const stream = new WritableStream<Uint8Array>({
-    write(chunk) {
-      chunks.push(chunk);
-    },
-  });
-  await downloader.downloadToStream(stream as any).completion();
-  return Buffer.concat(chunks);
+  const read = async (touch: () => void) => {
+    const stream = new WritableStream<Uint8Array>({
+      write(chunk) {
+        chunks.push(chunk);
+        touch();
+      },
+    });
+    await downloader.downloadToStream(stream as any, touch).completion();
+    return Buffer.concat(chunks);
+  };
+  // With `idleMs`, given up on (and the download stopped) once no bytes arrive for that long.
+  return idleMs ? untilIdle("download", idleMs, read, stop) : read(() => {});
 }
 
 /**

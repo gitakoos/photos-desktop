@@ -54,7 +54,7 @@ import { applyMeta, canEditMeta, parseMetaChange, readTextMeta, type MetaChange,
 import { downloadWhole } from "./viewerMeta.ts";
 import { dateFromName } from "./nameDate.ts";
 import { activeRevisionOf, nodeLocation, nodeName, toMillis } from "./nodes.ts";
-import { isStall, SDK_STALL_MS, StallError, withStallGuard } from "./stallGuard.ts";
+import { isStall, SDK_STALL_MS, untilIdle, withStallGuard } from "./stallGuard.ts";
 import { readSealedOrSetAside, StoreLockedError, storeDir, writeSealedAtomic } from "./store.ts";
 
 /**
@@ -138,7 +138,33 @@ export type DateEditDeps = {
   trash: (uids: string[]) => Promise<{ uid: string; ok: boolean; error?: string }[]>;
   /** Moves what this computer keeps by `oldUid` (hidden, labels, faces, search, offline, covers) to `newUid`. */
   carry: (oldUid: string, newUid: string) => Promise<void>;
+  /** How long a step may show no sign of life before it is given up on; the SDK's stall time unless a test says. */
+  stallMs?: number;
 };
+
+/**
+ * Every Drive step of a replacement is given up on once it shows no sign of life for a stall time: a run
+ * over 2000 photos is one photo after another, so one step that never answered held all the rest, with
+ * the panel on the same count for good. An album add, trash or carry may wait behind other work, so it
+ * gets a few stall times.
+ */
+const MUTATION_STALLS = 3;
+
+/**
+ * The SDK reports an upload's progress only as each 4 MiB block finishes, several at a time, and none
+ * for the commit after the last block, so an upload gets ten stall times: as long as the SDK gives a block.
+ */
+const UPLOAD_STALLS = 10;
+
+/** Steps given up on one after another before a run pauses, keeping the rest of its queue on disk. */
+const STALLS_BEFORE_PAUSE = 3;
+
+const stallOf = (deps: DateEditDeps) => deps.stallMs ?? SDK_STALL_MS;
+
+/** A one-photo album add, trash or carry, given up on after a few stall times. */
+function mutation<T>(deps: DateEditDeps, what: string, work: () => Promise<T>): Promise<T> {
+  return untilIdle(what, stallOf(deps) * MUTATION_STALLS, work);
+}
 
 const QUEUE_FILE = "date-edit.enc";
 
@@ -179,15 +205,15 @@ function noteReplaced(oldUid: string, newUid: string): void {
  * replaced in turn), and `e.uid` names the copy from then on. A photo in the trash that no
  * replacement here took the place of is refused.
  */
-export async function liveOriginal(photos: any, e: { uid: string }): Promise<any> {
+export async function liveOriginal(photos: any, e: { uid: string }, idleMs = SDK_STALL_MS): Promise<any> {
   let uid = e.uid;
   for (let hop = 0; hop < 16; hop++) {
     const next = replacedBy.get(uid);
     let node: any = null;
     try {
-      node = await freshNode(photos, uid);
+      node = await freshNode(photos, uid, idleMs);
     } catch (err) {
-      if (!next) throw err;
+      if (!next || isStall(err)) throw err;
     }
     if (node && !node.trashTime) {
       if (uid !== e.uid) {
@@ -217,7 +243,7 @@ export async function abandonCopy(deps: DateEditDeps, e: Replacement, why: strin
   let copy = e.stage === "queued" ? undefined : e.newUid;
   if (e.stage === "queued" && e.sent) {
     try {
-      copy = (await findSentCopy(deps.photos, e.uid, e.sent)) ?? undefined;
+      copy = (await findSentCopy(deps.photos, e.uid, e.sent, stallOf(deps))) ?? undefined;
     } catch {
       return `${why}. A copy may have reached Drive and could not be looked for, so both may be kept`;
     }
@@ -225,14 +251,14 @@ export async function abandonCopy(deps: DateEditDeps, e: Replacement, why: strin
   if (!copy) return why;
   let original: any = null;
   try {
-    original = await freshNode(deps.photos, e.uid);
+    original = await freshNode(deps.photos, e.uid, stallOf(deps));
   } catch {
     /* unreadable: treated as gone */
   }
   if (!original || original.trashTime) return `${why}. The copy is kept, as the original is no longer there`;
   try {
-    if (e.stage === "carried") await deps.carry(copy, e.uid);
-    const [trashed] = await deps.trash([copy]);
+    if (e.stage === "carried") await mutation(deps, "carry back", () => deps.carry(copy, e.uid));
+    const [trashed] = await mutation(deps, "trash copy", () => deps.trash([copy]));
     if (trashed?.ok) return `${why}. The copy was moved to the trash and the original kept`;
   } catch {
     /* reported below */
@@ -245,11 +271,14 @@ export async function abandonCopy(deps: DateEditDeps, e: Replacement, why: strin
  * it went up with, not the original, out of the trash and showing the date it went up with. Null
  * when there is none, so the job sends one; throws when Drive cannot be asked, so it does not.
  */
-export async function findSentCopy(photos: any, original: string, sent: SentCopy): Promise<string | null> {
-  const found: string[] = await photos.findPhotoDuplicates(sent.name, async () => sent.sha1);
+export async function findSentCopy(photos: any, original: string, sent: SentCopy, idleMs = SDK_STALL_MS): Promise<string | null> {
+  const found: string[] = await untilIdle("findPhotoDuplicates", idleMs, () => photos.findPhotoDuplicates(sent.name, async () => sent.sha1));
   for (const uid of found) {
     if (uid === original) continue;
-    const node = await freshNode(photos, uid).catch(() => null);
+    const node = await freshNode(photos, uid, idleMs).catch((err) => {
+      if (isStall(err)) throw err;
+      return null;
+    });
     if (!node || node.trashTime) continue;
     if (sent.expectMs > 0 && !sameCapture(toMillis(node?.photo?.captureTime), sent.expectMs)) continue;
     return uid;
@@ -272,9 +301,9 @@ export function recordSent(e: Replacement & { saved?: number }, newUid: string, 
  * A job cut off after its copy was sent: when Drive holds that copy, it is recorded and saved,
  * and answers true. Answers false when there is nothing to pick up.
  */
-export async function pickUpSentCopy(photos: any, e: Replacement & { saved?: number }, save: () => void): Promise<boolean> {
+export async function pickUpSentCopy(photos: any, e: Replacement & { saved?: number }, save: () => void, idleMs = SDK_STALL_MS): Promise<boolean> {
   if (e.stage !== "queued" || !e.sent) return false;
-  const found = await findSentCopy(photos, e.uid, e.sent);
+  const found = await findSentCopy(photos, e.uid, e.sent, idleMs);
   if (!found) return false;
   recordSent(e, found, e.sent);
   save();
@@ -461,16 +490,18 @@ export function withClaimedPlace(claimed: any, place: GpsPlace | null): Record<s
 }
 
 /** Reads a node from Drive again rather than from the SDK's cache, which a write made here leaves stale. */
-export async function freshNode(photos: any, uid: string): Promise<any> {
-  const access = photos?.nodes?.access;
-  if (typeof access?.notifyNodeChanged === "function") {
-    try {
-      await access.notifyNodeChanged(uid);
-    } catch {
-      /* the read below still answers, perhaps from the cache */
+export async function freshNode(photos: any, uid: string, idleMs = SDK_STALL_MS): Promise<any> {
+  return untilIdle("getNode", idleMs, async () => {
+    const access = photos?.nodes?.access;
+    if (typeof access?.notifyNodeChanged === "function") {
+      try {
+        await access.notifyNodeChanged(uid);
+      } catch {
+        /* the read below still answers, perhaps from the cache */
+      }
     }
-  }
-  return photos.getNode(uid);
+    return photos.getNode(uid);
+  });
 }
 
 /** The thumbnails the original carries, so the copy shows the same pictures. Best-effort. */
@@ -507,21 +538,6 @@ function infoOf(uid: string, node: any): DateEditInfo {
 
 const unread = (uid: string): DateEditInfo => ({ uid, name: "", captureMs: 0, nameMs: null, place: null, blocked: "read" });
 
-/** `photos.getNode`, given up on after `stallMs`. */
-async function oneNode(photos: any, uid: string, stallMs: number): Promise<any> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const stall = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new StallError("getNode(dateEdit)", stallMs)), stallMs);
-  });
-  const read = Promise.resolve().then(() => photos.getNode(uid));
-  read.catch(() => {}); // abandoned when the stall wins
-  try {
-    return await Promise.race([read, stall]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
  * What the editor shows of each photo: its name, date, the date its name records, and whether it can change.
  *
@@ -550,7 +566,7 @@ export async function dateEditInfo(photos: any, uids: string[], stallMs = SDK_ST
     for (const uid of batch) {
       if (found.has(uid) || wedged) continue;
       try {
-        const node = await oneNode(photos, uid, stallMs);
+        const node = await untilIdle("getNode(dateEdit)", stallMs, () => photos.getNode(uid));
         found.set(uid, node ? infoOf(uid, node) : unread(uid));
       } catch (e) {
         if (isStall(e)) wedged = true;
@@ -611,11 +627,12 @@ export async function metaInfo(photos: any, uids: string[], read: boolean): Prom
  */
 export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => void): Promise<"changed" | "unchanged"> {
   const { photos } = deps;
-  await pickUpSentCopy(photos, e, save);
+  const idleMs = stallOf(deps);
+  await pickUpSentCopy(photos, e, save, idleMs);
   if (e.stage === "queued") {
     // Read from Drive, not the SDK's cache: a favourite or an album another device gave the photo since this
     // app last read it must ride along to the copy, or trashing the original loses it.
-    const node = await liveOriginal(photos, e);
+    const node = await liveOriginal(photos, e, idleMs);
     if (isLivePhoto(node)) throw new Error("A Live Photo's picture and video are dated together, so neither is changed alone");
     const heldMs = toMillis(node?.photo?.captureTime);
     const newDate = e.captureMs > 0 && !sameCapture(heldMs, e.captureMs);
@@ -631,7 +648,7 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
     if (metas.length > 0 && !canEditMeta(mediaType)) throw new Error(META_REFUSED[metas[0]!.kind]);
 
     const revision = activeRevisionOf(node);
-    const original = await downloadToBuffer(photos, e.uid);
+    const original = await downloadToBuffer(photos, e.uid, idleMs);
     let embedded: { bytes: Buffer; how: string } | null =
       newDate || newPlace ? correctedBytes(original, newDate, captureMs, newPlace ? (e.place ?? null) : undefined) : { bytes: original, how: "meta" };
     if (!embedded) throw new Error("This file type cannot carry a new date");
@@ -655,24 +672,38 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
     const modified = toMillis(revision?.claimedModificationTime);
     const tags = ((node?.photo?.tags ?? []) as number[]).slice();
     const sent: SentCopy = { name, sha1, albums: albumUidsOf(node), tags, expectMs: captureMs };
+    const thumbnails = await storedThumbnails(photos, e.uid);
     e.sent = sent;
     save();
-    const uploader = await photos.getFileUploader(
-      name,
-      {
-        mediaType,
-        expectedSize: bytes.byteLength,
-        expectedSha1: sha1,
-        ...(modified > 0 ? { modificationTime: new Date(modified) } : {}),
-        ...(captureMs > 0 ? { captureTime: new Date(captureMs) } : {}),
-        tags,
-        additionalMetadata: claimFor(revision?.claimedAdditionalMetadata, newDate, captureMs, newPlace ? (e.place ?? null) : undefined, strip ?? null),
-      },
-      new AbortController().signal,
+    // Stopped through its signal when it shows no progress. The SDK commits without looking at the signal,
+    // so a copy may still land after it was given up on: `sent` is saved first, so the next try finds it.
+    const stopUpload = new AbortController();
+    const uploader: any = await untilIdle(
+      "getFileUploader",
+      idleMs,
+      () =>
+        photos.getFileUploader(
+          name,
+          {
+            mediaType,
+            expectedSize: bytes.byteLength,
+            expectedSha1: sha1,
+            ...(modified > 0 ? { modificationTime: new Date(modified) } : {}),
+            ...(captureMs > 0 ? { captureTime: new Date(captureMs) } : {}),
+            tags,
+            additionalMetadata: claimFor(revision?.claimedAdditionalMetadata, newDate, captureMs, newPlace ? (e.place ?? null) : undefined, strip ?? null),
+          },
+          stopUpload.signal,
+        ),
+      () => stopUpload.abort(),
     );
     const stream = Readable.toWeb(Readable.from(bytes)) as any;
-    const controller = await uploader.uploadFromStream(stream, await storedThumbnails(photos, e.uid));
-    const { nodeUid } = await controller.completion();
+    const { nodeUid } = await untilIdle(
+      "upload",
+      idleMs * UPLOAD_STALLS,
+      async (touch) => (await uploader.uploadFromStream(stream, thumbnails, touch)).completion(),
+      () => stopUpload.abort(),
+    );
     if (!nodeUid || nodeUid === e.uid) throw new Error("Drive did not keep a new copy");
     recordSent(e, nodeUid, sent);
     save();
@@ -690,16 +721,17 @@ export async function replaceOne(deps: DateEditDeps, e: QueueEntry, save: () => 
  */
 export async function finishReplacement(deps: DateEditDeps, e: Replacement & { captureMs?: number }, save: () => void): Promise<void> {
   const { photos } = deps;
+  const idleMs = stallOf(deps);
   const newUid = e.newUid!;
   if (e.stage === "uploaded") {
-    const copy = await freshNode(photos, newUid);
+    const copy = await freshNode(photos, newUid, idleMs);
     const expectMs = e.expectMs ?? e.captureMs ?? 0;
     if (expectMs > 0 && !sameCapture(toMillis(copy?.photo?.captureTime), expectMs)) {
       throw new Error("The new copy did not get the new date; the original is kept");
     }
     const lacking = missingTags(copy, e.tags ?? []);
     if (lacking.length > 0) {
-      for await (const r of withStallGuard(photos.updatePhotos([{ nodeUid: newUid, tagsToAdd: lacking, tagsToRemove: [] }]), SDK_STALL_MS, "updatePhotos")) {
+      for await (const r of withStallGuard(photos.updatePhotos([{ nodeUid: newUid, tagsToAdd: lacking, tagsToRemove: [] }]), idleMs, "updatePhotos")) {
         if (!(r as any).ok) throw new Error("The new copy could not be marked as the original was; the original is kept");
       }
     }
@@ -707,7 +739,7 @@ export async function finishReplacement(deps: DateEditDeps, e: Replacement & { c
     const joined = new Set(albumUidsOf(copy));
     for (const album of albums) {
       if (joined.has(album)) continue;
-      const results = await deps.addToAlbum(album, [newUid]);
+      const results = await mutation(deps, "addToAlbum", () => deps.addToAlbum(album, [newUid]));
       if (!results.some((r) => r.ok)) {
         const why = (results.find((r) => !r.ok) as { error?: string } | undefined)?.error ?? "no answer";
         process.stderr.write(`[dateedit] album add refused: ${why}\n`);
@@ -715,7 +747,7 @@ export async function finishReplacement(deps: DateEditDeps, e: Replacement & { c
       }
     }
     if (albums.length > 0) {
-      const check = albumUidsOf(await freshNode(photos, newUid));
+      const check = albumUidsOf(await freshNode(photos, newUid, idleMs));
       if (!albums.every((a) => check.includes(a))) throw new Error("The new copy is not in every album yet; the original is kept");
     }
     e.stage = "joined";
@@ -723,15 +755,23 @@ export async function finishReplacement(deps: DateEditDeps, e: Replacement & { c
   }
 
   if (e.stage === "joined") {
-    await deps.carry(e.uid, newUid);
+    // What this computer keeps moves first, without the network; only the album covers wait on Drive. A
+    // carry that ran out of time has moved the labels and faces already, so the replacement goes on: were
+    // it given up on at "joined", the copy holding them would go to the trash without them coming back.
+    try {
+      await mutation(deps, "carry", () => deps.carry(e.uid, newUid));
+    } catch (err) {
+      if (!isStall(err)) throw err;
+      process.stderr.write(`[dateedit] carrying over did not finish in time, going on: ${(err as Error).message}\n`);
+    }
     e.stage = "carried";
     save();
   }
 
-  const [trashed] = await deps.trash([e.uid]);
+  const [trashed] = await mutation(deps, "trash", () => deps.trash([e.uid]));
   if (!trashed?.ok) {
     // Trashed already, by another device or an earlier try whose answer was lost: the replacement is through.
-    const original = await freshNode(photos, e.uid).catch(() => null);
+    const original = await freshNode(photos, e.uid, idleMs).catch(() => null);
     if (!original?.trashTime) throw new Error("The original could not be moved to the trash; both are kept");
   }
   noteReplaced(e.uid, newUid);
@@ -830,6 +870,8 @@ export class DateEditor {
   private deps: DateEditDeps | null = null;
   /** Counts each attach and detach, so a job knows the session it started under is gone. */
   private attachment = 0;
+  /** Paused for want of answers from Drive: goes on only with the next change asked for or sign-in. */
+  private paused = false;
 
   constructor(
     private readonly persist: (items: QueueEntry[]) => void = writeQueue,
@@ -844,6 +886,7 @@ export class DateEditor {
   attach(deps: DateEditDeps, saved: QueueEntry[] = readQueue()): void {
     this.deps = deps;
     this.attachment++;
+    this.paused = false;
     if (saved.length > 0) {
       this.queue = withHeldProgress(saved, this.queue);
       this.status = { ...idle(), total: saved.length };
@@ -869,6 +912,7 @@ export class DateEditor {
   start(items: DateEditItem[]): DateEditStatus {
     const fresh = items.filter((i) => asksForChange(i)).map(cleanItem);
     if (fresh.length === 0) return this.getStatus();
+    this.paused = false;
     if (!this.running && this.queue.length === 0) this.status = idle();
     for (const item of fresh) {
       const waiting = this.queue.find((q) => q.uid === item.uid);
@@ -910,12 +954,14 @@ export class DateEditor {
       this.running = null;
       this.status.running = false;
       // Attached again while the last run was still winding down: the queue goes on under the new session.
-      if (this.deps && this.queue.length > 0) this.kick();
+      if (this.deps && this.queue.length > 0 && !this.paused) this.kick();
     });
   }
 
   private async drain(): Promise<void> {
     const attachment = this.attachment;
+    // Steps given up on in a row, with no photo through between them.
+    let stalls = 0;
     while (this.queue.length > 0) {
       if (!this.deps || this.attachment !== attachment) return;
       const deps = guardedDeps(this.deps, () => this.attachment === attachment);
@@ -933,8 +979,10 @@ export class DateEditor {
         const outcome = await replaceOne(deps, entry, () => this.persist(this.queue));
         if (outcome === "changed") this.status.changed++;
         else this.status.unchanged++;
+        stalls = 0;
       } catch (e) {
         const message = (e as Error)?.message ?? String(e);
+        stalls = isStall(e) ? stalls + 1 : 0;
         if (e instanceof FollowBusy) {
           this.queue.push(this.queue.shift()!);
           await new Promise((r) => setTimeout(r, 2000));
@@ -952,6 +1000,7 @@ export class DateEditor {
             process.stderr.write(`[dateedit] finishing a replacement failed, tried again later: ${message}\n`);
             this.queue.push(this.queue.shift()!);
             this.persist(this.queue);
+            if (stalls >= STALLS_BEFORE_PAUSE) return this.pause();
             await new Promise((r) => setTimeout(r, this.retryMs));
             continue;
           }
@@ -968,7 +1017,22 @@ export class DateEditor {
       this.status.done++;
       this.queue = this.queue.filter((q) => q !== entry);
       persistUnlessLocked(this.persist, this.queue);
+      if (stalls >= STALLS_BEFORE_PAUSE && this.queue.length > 0) return this.pause();
     }
+  }
+
+  /**
+   * Drive stopped answering: the rest would each wait out a stall time. They stay on disk, as far as
+   * each got, and carry on with the next date change started or the next sign-in.
+   */
+  private pause(): void {
+    this.paused = true;
+    const left = this.queue.length;
+    this.status.errors.push({
+      uid: "paused",
+      error: `Drive stopped answering, so the run paused; the ${left} photos left are kept and carry on with the next change or sign-in`,
+    });
+    process.stderr.write(`[dateedit] paused after ${STALLS_BEFORE_PAUSE} stalls in a row, ${left} left\n`);
   }
 }
 
