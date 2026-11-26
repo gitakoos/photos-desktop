@@ -34,6 +34,14 @@ describe("a face cover's URL", () => {
     expect(faceCoverUrl(BASE, "u", [-0.02, 0.9, 0.1, 1.03])).toBe(`${BASE}u/f/0.0000,0.9000,0.1000,1.0000`);
   });
 
+  it("asks for the size the circle is drawn at, rounded up to the server's steps", () => {
+    const at = `${BASE}u/f/0.1000,0.2000,0.3000,0.4000`;
+    expect(faceCoverUrl(BASE, "u", [0.1, 0.2, 0.3, 0.4], 104)).toBe(`${at}?w=128`);
+    expect(faceCoverUrl(BASE, "u", [0.1, 0.2, 0.3, 0.4], 200)).toBe(`${at}?w=256`);
+    // Larger than the largest step: the full cover, as with no size at all.
+    expect(faceCoverUrl(BASE, "u", [0.1, 0.2, 0.3, 0.4], 640)).toBe(at);
+  });
+
   it("gives none for a box with no area in the photo", () => {
     expect(faceCoverUrl(BASE, "u", [0.5, 0.2, 0.5, 0.4])).toBeNull();
     expect(faceCoverUrl(BASE, "u", [1.2, 0.2, 1.5, 0.4])).toBeNull();

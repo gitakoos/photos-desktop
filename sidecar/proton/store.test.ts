@@ -30,6 +30,8 @@ import {
   OriginalSealer,
   SESSION_FILE,
   clearDataKey,
+  coverGet,
+  coverPut,
   decryptOriginalTo,
   setDataKey,
   seal,
@@ -97,6 +99,26 @@ describe("store seal/unseal (AES-256-GCM)", () => {
 // sealed with the account's key, so neither may outlive the account: leaving the
 // search-index metadata behind would strand the previous account's file names
 // on disk.
+describe("face covers kept between runs", () => {
+  it("are sealed on disk, read back by key, and go with the thumbnails", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pfp-store-test-"));
+    initStore(dir);
+    const cut = Buffer.concat([JPEG_MAGIC, Buffer.from("a face")]);
+
+    coverPut("vol~a|0.1,0.2,0.3,0.4|128", cut);
+
+    expect(coverGet("vol~a|0.1,0.2,0.3,0.4|128")?.equals(cut)).toBe(true);
+    expect(coverGet("vol~a|0.1,0.2,0.3,0.4|192")).toBeNull();
+    const files = readdirSync(join(dir, "thumbs"));
+    expect(files).toHaveLength(1);
+    expect(readFileSync(join(dir, "thumbs", files[0])).subarray(0, 4).equals(JPEG_MAGIC)).toBe(false);
+    expect(files[0]).not.toContain("vol");
+
+    wipeCache();
+    expect(coverGet("vol~a|0.1,0.2,0.3,0.4|128")).toBeNull();
+  });
+});
+
 describe("wipeCache", () => {
   it("removes the search metadata as well as the thumbnails", () => {
     initStore(mkdtempSync(join(tmpdir(), "pfp-store-test-")));

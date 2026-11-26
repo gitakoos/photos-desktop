@@ -43,7 +43,7 @@
 
 import { createServer, type Server } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { parseFaceBox, type FaceBox } from "./faceCover.ts";
+import { coverSideFor, parseFaceBox, type FaceBox } from "./faceCover.ts";
 import { NOT_STREAMABLE, parseRange, type VideoAnswer, type VideoSource } from "./videoStream.ts";
 import { diag, logStamp } from "./diag.ts";
 
@@ -54,8 +54,11 @@ import { diag, logStamp } from "./diag.ts";
  */
 export type ThumbnailSource = (uid: string, gone: AbortSignal) => Promise<Buffer | null>;
 
-/** A person's cover cut to the face in `box`, for `/t/<token>/<uid>/f/<l,t,r,b>`. */
-export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal) => Promise<Buffer | null>;
+/**
+ * A person's cover cut to the face in `box`, `side` pixels square, for
+ * `/t/<token>/<uid>/f/<l,t,r,b>?w=<px>`.
+ */
+export type FaceSource = (uid: string, box: FaceBox, gone: AbortSignal, side: number) => Promise<Buffer | null>;
 
 /** A video to play, for `/t/<token>/<uid>/v`, read a byte range at a time. */
 export type VideoLookup = (uid: string) => Promise<VideoAnswer>;
@@ -181,7 +184,8 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
 
   // `/t/<token>/<uid>`, `/t/<token>/<uid>/f/<l,t,r,b>` for a cover cut to a face, or
   // `/t/<token>/<uid>/v` for a video to play.
-  const parts = (req.url ?? "").split("?")[0].split("/");
+  const [path, query = ""] = (req.url ?? "").split("?", 2);
+  const parts = path.split("/");
   const face = parts.length === 6 && parts[4] === "f";
   const video = parts.length === 5 && parts[4] === "v";
   if ((parts.length !== 4 && !face && !video) || parts[0] !== "" || parts[1] !== "t") return refuse(404);
@@ -201,6 +205,8 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   if (!UID_SHAPE.test(uid) || !source) return refuse(404);
   const box = face ? parseFaceBox(parts[5]) : null;
   if (face && (!box || !faces)) return refuse(404);
+  // How large the window draws the circle, in device pixels: a small one is cut small.
+  const side = coverSideFor(Number(new URLSearchParams(query).get("w") ?? NaN));
 
   const gone = new AbortController();
   // A video's answer stays open for as long as it plays: counted with the pictures, it
@@ -218,7 +224,7 @@ async function handle(req: import("node:http").IncomingMessage, res: import("nod
   });
   if (video) return serveVideo(uid, req, res, head, gone.signal, refuse);
   try {
-    const bytes = box && faces ? await faces(uid, box, gone.signal) : await source(uid, gone.signal);
+    const bytes = box && faces ? await faces(uid, box, gone.signal, side) : await source(uid, gone.signal);
     if (gone.signal.aborted) return;
     if (!bytes) {
       ended.missing++;

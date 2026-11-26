@@ -39,7 +39,7 @@ function get(url: string, options: { method?: string; host?: string; range?: str
         {
           hostname: target.hostname,
           port: target.port,
-          path: target.pathname,
+          path: target.pathname + target.search,
           method: options.method ?? "GET",
           headers: {
             ...(options.host ? { Host: options.host } : {}),
@@ -139,6 +139,21 @@ describe("the loopback thumbnail server", () => {
     expect(res.body.equals(CUT)).toBe(true);
     expect(res.headers["cache-control"]).toBe("no-store");
     expect(asked).toEqual([[UID, [0.1, 0.2, 0.3, 0.4]]]);
+  });
+
+  it("cuts a face cover to the size the window asks for, in steps", async () => {
+    const sides: number[] = [];
+    const base = await startThumbServer(source, async (_uid, _box, _gone, side) => {
+      sides.push(side);
+      return Buffer.from([1]);
+    });
+    const at = base + encodeURIComponent(UID) + "/f/0.1,0.2,0.3,0.4";
+
+    for (const w of ["?w=100", "?w=150", "?w=256", "?w=300", "?w=2000", "?w=x", ""]) {
+      expect((await get(at + w)).status).toBe(200);
+    }
+
+    expect(sides).toEqual([128, 192, 256, 320, 320, 320, 320]);
   });
 
   it("refuses a face cover with a bad box, a wrong token, or no face source", async () => {

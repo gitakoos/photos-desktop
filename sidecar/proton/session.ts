@@ -51,6 +51,8 @@ import {
   BACKUP_STATE_FILE,
   DRIVE_COPIES_DIR,
   SESSION_FILE,
+  coverGet,
+  coverPut,
   isReady,
   originalGet,
   originalSize,
@@ -2794,12 +2796,17 @@ export class ProtonSession {
    * People's covers cut to their faces, from the HD preview (the grid thumbnail when a
    * photo has none, or the preview cannot be had), for the thumbnail server.
    */
-  private faceCovers = new FaceCovers(async (uid) => {
-    const preview = await this.previewBytes(uid).catch(() => null);
-    if (preview) return { bytes: preview, keep: true };
-    const thumb = thumbGet(uid, ThumbnailType.Type1);
-    return thumb ? { bytes: thumb, keep: false } : null;
-  });
+  private faceCovers = new FaceCovers(
+    async (uid) => {
+      const preview = await this.previewBytes(uid).catch(() => null);
+      if (preview) return { bytes: preview, keep: true };
+      const thumb = thumbGet(uid, ThumbnailType.Type1);
+      return thumb ? { bytes: thumb, keep: false } : null;
+    },
+    // A small circle is cut from the grid thumbnail, and every cut is kept sealed for the
+    // next run: a page of hundreds of faces no longer fetches a preview for each, each time.
+    { thumbnail: (uid, gone) => this.thumbnailFor(uid, gone), disk: { get: coverGet, put: coverPut } },
+  );
   /** Videos the window is playing, for the thumbnail server: see `videoSource`. */
   private videos = new OpenVideos((uid, signal) => this.videoSource(uid, signal));
   /** The trash as last read, shared by the window and the drive's listing: see `TrashListing`. */
@@ -2834,7 +2841,7 @@ export class ProtonSession {
     return {
       base: await startThumbServer(
         (uid, gone) => this.thumbnailFor(uid, gone),
-        (uid, box, gone) => this.faceCovers.get(uid, box, gone),
+        (uid, box, gone, side) => this.faceCovers.get(uid, box, gone, side),
         (uid) => this.videos.get(uid),
       ),
     };
